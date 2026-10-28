@@ -1,0 +1,13 @@
+// Vaultルートへ .stignore として配置する除外例
+.stfolder
+.stversions
+// Obsidianの設定は初期段階では端末ごとに登録する
+/.obsidian
+/.ctx-state
+/node_modules
+/dist
+/backups
+*.tmp
+.ctx-tmp-*
+.DS_Store
+// Input・90_system・HOME・同期競合コピーを除外しない

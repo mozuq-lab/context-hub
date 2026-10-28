@@ -1,0 +1,23 @@
+{
+  "id": "context-hub",
+  "name": "AI Context Hub",
+  "description": "専用Discordチャンネルのメモ保存と検索・再開支援",
+  "categories": ["tools"],
+  "activation": { "onStartup": true },
+  "contracts": { "tools": ["ctx_find", "ctx_resume", "ctx_recent", "ctx_pending", "ctx_help"] },
+  "toolMetadata": {
+    "ctx_find": { "optional": true }, "ctx_resume": { "optional": true },
+    "ctx_recent": { "optional": true }, "ctx_pending": { "optional": true }, "ctx_help": { "optional": true }
+  },
+  "configSchema": {
+    "type": "object", "additionalProperties": false,
+    "properties": {
+      "configPath": { "type": "string", "minLength": 1, "description": "Hubの設定ファイルの絶対パス" },
+      "guildId": { "type": "string", "pattern": "^[0-9]{17,20}$" },
+      "channelIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9]{17,20}$" } },
+      "allowedSenderIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9]{17,20}$" } },
+      "accountId": { "type": "string", "const": "default", "default": "default" }
+    },
+    "required": ["configPath", "guildId", "channelIds", "allowedSenderIds"]
+  }
+}

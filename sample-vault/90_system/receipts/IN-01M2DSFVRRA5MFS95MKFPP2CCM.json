@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "input_id": "IN-01M2DSFVRRA5MFS95MKFPP2CCM",
+  "status": "organized",
+  "attempts": 1,
+  "organized_at": "2026-09-13T16:27:00.848Z",
+  "llm": {
+    "provider": "mock",
+    "model": "mock",
+    "prompt_version": 1
+  },
+  "result": {
+    "category": "project-update",
+    "summary": "## 現在地 - [確認済み] サンプルで原文保存を確認した。 ## 次の一手 - [確認済み] サンプルの検索を確認する。 - [提案] 同期導入は後日検討する。 ## 未解決 - [未確認] Discord実機接続は承認後に確認する。",
+    "project_candidates": [],
+    "next_action_suggestions": [],
+    "extracted": {
+      "current": [
+        {
+          "text": "サンプルで原文保存を確認した。",
+          "status": "confirmed"
+        }
+      ],
+      "next": [
+        {
+          "text": "サンプルの検索を確認する。",
+          "status": "confirmed"
+        },
+        {
+          "text": "同期導入は後日検討する。",
+          "status": "proposal"
+        }
+      ],
+      "open": [
+        {
+          "text": "Discord実機接続は承認後に確認する。",
+          "status": "unverified"
+        }
+      ]
+    },
+    "knowledge_candidate": null,
+    "new_project_hint": null
+  },
+  "writes": [
+    "10_projects/context-hub/NOW.md"
+  ],
+  "error": null
+}

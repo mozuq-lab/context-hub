@@ -1,0 +1,31 @@
+{
+  "name": "context-hub-workspace",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mozuq-lab/context-hub.git"
+  },
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run build && tsc --noEmit",
+    "test": "vitest run",
+    "demo": "npm run build && node scripts/demo.mjs",
+    "ctx": "node packages/core/dist/cli.js",
+    "pretest": "npm run build",
+    "sample": "npm run build && node scripts/create-sample.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

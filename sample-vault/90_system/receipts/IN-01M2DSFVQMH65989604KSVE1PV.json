@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "input_id": "IN-01M2DSFVQMH65989604KSVE1PV",
+  "status": "organized",
+  "attempts": 1,
+  "organized_at": "2026-09-13T16:27:00.820Z",
+  "llm": {
+    "provider": "mock",
+    "model": "mock",
+    "prompt_version": 1
+  },
+  "result": {
+    "category": "idea",
+    "summary": "数日ぶりの開発再開を助ける仕組み、面白そう。 https://example.com/context",
+    "project_candidates": [
+      {
+        "id": "context-hub",
+        "confidence": 0.8
+      }
+    ],
+    "next_action_suggestions": [],
+    "extracted": {
+      "current": [],
+      "next": [],
+      "open": []
+    },
+    "knowledge_candidate": null,
+    "new_project_hint": null
+  },
+  "writes": [
+    "20_ideas/IDEA-01M2DSFVQMH65989604KSVE1PV.md",
+    "10_projects/context-hub/NOW.md"
+  ],
+  "error": null
+}

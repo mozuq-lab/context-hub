@@ -1,0 +1,18 @@
+node_modules/
+.worktrees/
+dist/
+.ctx-state/
+.demo/
+.env*
+*.log
+.DS_Store
+coverage/
+config.local.json
+vault/
+*.tmp
+.ctx-tmp-*
+
+# 個人設定・公開前の作業資料を持ち込まない
+.public-prep/
+backups/
+*.docx

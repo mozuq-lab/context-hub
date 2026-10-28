@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "vaultPath": "~/ContextHub/vault",
+  "statePath": "~/Library/Application Support/context-hub",
+  "timezone": "Asia/Tokyo",
+  "capture": {
+    "maxInputChars": 8000,
+    "allowedSenderIds": [
+      "YOUR_DISCORD_USER_ID"
+    ]
+  },
+  "organize": {
+    "maxItemsPerRun": 20,
+    "maxAttempts": 3,
+    "timeoutSec": 60,
+    "projectThreshold": 0.7,
+    "lockStaleSec": 3600,
+    "llm": {
+      "provider": "mock",
+      "model": null,
+      "maxOutputChars": 4000,
+      "executable": "openclaw"
+    }
+  },
+  "retrieve": {
+    "contextMaxChars": 6000,
+    "discordMaxChars": 1900
+  },
+  "logging": {
+    "dir": "~/Library/Application Support/context-hub/logs",
+    "retentionDays": 14
+  }
+}

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.context-hub.vault-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__REPO_PATH__/scripts/vault-backup.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CTX_VAULT</key>
+    <string>__VAULT_PATH__</string>
+    <key>CTX_BACKUP_DIR</key>
+    <string>__BACKUP_DIR__</string>
+    <key>CTX_BACKUP_KEEP_DAYS</key>
+    <string>30</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Application Support/context-hub/logs/vault-backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Application Support/context-hub/logs/vault-backup.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "vaultPath": ".demo/vault",
+  "statePath": ".ctx-state/demo",
+  "timezone": "Asia/Tokyo",
+  "capture": {
+    "maxInputChars": 8000,
+    "allowedSenderIds": []
+  },
+  "organize": {
+    "maxItemsPerRun": 20,
+    "maxAttempts": 3,
+    "timeoutSec": 60,
+    "projectThreshold": 0.7,
+    "lockStaleSec": 3600,
+    "llm": {
+      "provider": "mock",
+      "model": null,
+      "maxOutputChars": 4000,
+      "executable": "openclaw"
+    }
+  },
+  "retrieve": {
+    "contextMaxChars": 6000,
+    "discordMaxChars": 1900
+  },
+  "logging": {
+    "dir": ".ctx-state/demo/logs",
+    "retentionDays": 14
+  }
+}
