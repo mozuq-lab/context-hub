@@ -84,8 +84,9 @@ export async function commitAssociationLocked(config:HubConfig,vault:Vault,plan:
  const effective=plan.effective;
  if(options.inboxUnchanged){
   // 一覧が同じでも原文の書き換えは検出する。
-  const parts:string[]=[];for(const input of [effective.chain.root,...effective.chain.revisions]){const raw=await vault.read(input.path);if(raw===undefined)return undefined;parts.push(`${input.id}:${hash(raw)}`);}
-  if(hash(parts.join('\n'))!==effective.chain.evidenceHash)return undefined;
+  // 一覧が同じなのに内容が違えば原文の書き換えであり、整理と同じく整合性違反として停止する。
+  const parts:string[]=[];for(const input of [effective.chain.root,...effective.chain.revisions]){const raw=await vault.read(input.path);if(raw===undefined)throw new Error('再関連付けの根拠がありません');parts.push(`${input.id}:${hash(raw)}`);}
+  if(hash(parts.join('\n'))!==effective.chain.evidenceHash)throw new Error('訂正根拠のハッシュが一致しません');
  }else{const current=(await readEffectiveInputs(config)).find(e=>e.chain.root.id===effective.chain.root.id);if(!current||current.chain.evidenceHash!==effective.chain.evidenceHash||current.chain.latest.id!==effective.chain.latest.id)return undefined;}
  if(plan.snapshot!==JSON.stringify(await readProjects(config)))return undefined;
  let revision:string|undefined;try{revision=(await readPolicies(config,effective.chain.root.project)).revision;}catch{revision=undefined;}
@@ -93,7 +94,8 @@ export async function commitAssociationLocked(config:HubConfig,vault:Vault,plan:
  // 待機中に別の実行が同じ根拠を確定していれば、その結果を正とする。
  const saved=await readAssociation(vault,effective,plan.projects);
  if(saved&&(saved.status==='associated'||saved.attempts>=record.attempts))return undefined;
- await vault.write(pathFor(effective,plan.record.registry_hash),JSON.stringify(record,null,2)+'\n');return record;
+ const committed={...record,associated_at:new Date().toISOString()};
+ await vault.write(pathFor(effective,plan.record.registry_hash),JSON.stringify(committed,null,2)+'\n');return committed;
 }
 export async function reassociateInputLocked(config:HubConfig,vault:Vault,llm:LlmClient,effective:EffectiveInput,projects:Project[],options:{retryFailed?:boolean}={}):Promise<AssociationResult>{
  const plan=await prepareAssociationLocked(config,vault,effective,projects,options);if(!('prompt' in plan))return plan;

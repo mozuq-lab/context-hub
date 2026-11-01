@@ -11,6 +11,7 @@ import { decideProject, listProjectCandidates } from '../src/project-proposals.j
 import { Vault } from '../src/storage.js';
 import { organize } from '../src/organize.js';
 import { MockLlm } from '../src/llm.js';
+import { approve, propose } from '../src/approvals.js';
 import { PromptTooLargeError } from '../src/infer.js';
 import type { HubConfig, LlmCompletion, OrganizeResult } from '../src/types.js';
 
@@ -98,6 +99,17 @@ describe('モデル呼び出し中はVaultのwriterロックを保持しない',
     // 入力ごとに全体を再走査すると30件で数百回になる。対象がなければ定数回で終わる。
     expect(files.mock.calls.filter(([dir]) => dir === '00_inbox').length).toBeLessThan(15);
   }, 30_000);
+
+  test('モデル待機中に方針が採用された対象は古い方針の結果で確定せず、次回に整理する', async () => {
+    const config = await setup(); const saved = await add(config); const { llm, started, release } = pausedLlm();
+    const running = organize(config, llm); await started;
+    const candidate = await propose(config, { kind: 'decision', claim: '待機中に採用した方針' });
+    await approve(config, candidate.candidateId, candidate.hash, { scope: 'global' });
+    release();
+    expect(await running).toMatchObject({ processed: 0, failed: 0 });
+    expect(await new Vault(config).read(`90_system/receipts/${saved.inputId}.json`)).toBeUndefined();
+    expect((await organize(config, new MockLlm())).processed).toBe(1);
+  }, 20_000);
 
   test('整理同士は排他し、後続はモデルを呼ばずに停止する。doctorは整理中と報告する', async () => {
     const config = await setup(); await add(config); const { llm, started, release } = pausedLlm();

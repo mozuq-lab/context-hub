@@ -227,6 +227,9 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
       return { plans, key: state.key };
     });
     for (const plan of associations.plans) {
+      // 先の対象の待機中に定義や方針が変わっていれば、確定で破棄される送信をしない。
+      const unchanged = await vault.withLock(async () => JSON.stringify(await readProjects(config)) === plan.snapshot && await policyRevision(config, plan.effective.chain.root.project) === plan.policyRevision);
+      if (!unchanged) continue;
       // writerロックの外でモデルを呼び、確定時に根拠・定義・方針を再検査する。
       const record = await runAssociation(config, llm, plan);
       await vault.withLock(async () => {
