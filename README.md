@@ -12,8 +12,9 @@ AIとの作業要約や日々の思いつきをMarkdownに集め、数日後で�
 - 原文を残した訂正と、本人操作によるプロジェクト案・知識候補の承認を扱う。
 - [採用先付きの知識・方針](docs/policies.md)を共通/プロジェクトへ保存し、有効方針の読取・適用停止・AI接続用の設定差分を用意する。
 - Codex・Claude Codeから同期済みVaultを参照し、作業結果をInputへ追加する。
+- Mac・Androidの[専用アプリ（ContextHub Flutter）](#macandroidアプリ)から、整理結果の閲覧・メモ追加・候補の採用/却下を行う。
 
-全会話の自動収集、専用Web/モバイルアプリ、URLの自動取得、音声・画像処理、外部タスクの自動実行は含みません。
+全会話の自動収集、専用Webアプリ・iOSアプリ（Mac・Androidアプリは別リポジトリ）、URLの自動取得、音声・画像処理、外部タスクの自動実行は含みません。
 
 ## まずデモを試す
 
@@ -47,9 +48,23 @@ flowchart LR
 | 実AIでの整理 | OpenClaw、利用者が設定したモデルと認証 |
 | 端末間の入力・返送 | 常時稼働するMac mini、Syncthing互換の同期環境 |
 | モバイル入力 | ObsidianとQuickAdd、共有フォルダーへのアクセス |
+| Mac・Androidアプリでの閲覧・入力（任意） | [ContextHub Flutter](https://github.com/mozuq-lab/context-hub-flutter-client)、同期済みVault。ビルド済みアプリは配布していないため、FlutterとXcode/Android SDKで各自ビルド |
 | CLIバックアップ例 | macOSのsh、tar、BSD stat |
 
 ファイル同期・QuickAdd・再起動・復旧にはMac mini/Mac/Androidでの確認実績があります。OS、同期アプリ、Obsidian/QuickAdd、OpenClawの版や権限が異なる環境では、サンプルから確認してください。ほかのOSでの本番運用を保証するものではありません。
+
+## Mac・Androidアプリ
+
+[mozuq-lab/context-hub-flutter-client](https://github.com/mozuq-lab/context-hub-flutter-client)は、このVaultを読むためのMac（Apple Silicon、macOS 12以降）・Android用のクライアントアプリです。別リポジトリで管理しています。Obsidianを使わずに、次の操作ができます。
+
+- プロジェクトの「現在地・次の一手・未解決・提案」と、元のメモ・出典の確認
+- 最近のメモ・アイデアの一覧、本文検索、出典付きcontextのコピー
+- メモ・AI作業要約のInputへの追加
+- プロジェクト案・知識・方針の候補の採用・却下・適用停止の依頼
+
+アプリは同期済みVaultのファイルを読み、依頼をInputへ新しく保存するだけです。同期はSyncthingなど、受領・整理・承認の反映はこの本体が行います。候補の確認待ち一覧は本体の`dashboard`または`cycle`が生成するため、アプリの0.3.0は候補一覧と採用先付き方針に対応した本体と組み合わせて使います。
+
+クライアントは対応する本体のcommitをsubmoduleで固定し、protocolの互換性をテストしています。本体のCIでも、クライアントの既定ブランチを取得してfixture比較とDartテストを実行します（失敗しても本体のPRは止めません。[開発と検証](docs/development.md#ciと公開物)）。ビルド済みアプリは配布していないため、ビルド方法と使い方はクライアントのREADMEを参照してください。
 
 ## 利用と導入
 
@@ -58,7 +73,9 @@ flowchart LR
 - [停止・同期・バックアップ・復元](docs/operations.md)
 - [Codex・Claude CodeからVaultを参照する](docs/prompts/vault-access.md)
 - [AI作業要約の形式](docs/prompts/handoff-summary.md)
+- [候補の確認待ちを使う](docs/candidate-review.md)
 - [開発と検証](docs/development.md)
+- [Mac・Androidアプリ（別リポジトリ）](https://github.com/mozuq-lab/context-hub-flutter-client)
 
 実AIの利用枠や費用はモデルの契約によります。同期は双方向の変更・削除も伝播するため、バックアップは別に用意します。個人設定、トークン、実Vault、全会話履歴をこのリポジトリへ入れないでください。
 
