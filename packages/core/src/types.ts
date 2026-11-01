@@ -6,7 +6,7 @@ export interface HubConfig {
   policy: { projectRoots: {path:string;projectId:string}[] };
   capture: { maxInputChars: number; allowedSenderIds: string[] };
   organize: {
-    maxItemsPerRun: number; maxAttempts: number; timeoutSec: number; projectThreshold: number; lockStaleSec: number;
+    maxItemsPerRun: number; maxAttempts: number; timeoutSec: number; projectThreshold: number; /** 非推奨・未使用。旧設定の互換のため受け付ける。 */ lockStaleSec?: number;
     llm: { provider: 'mock' | 'openclaw-infer'; model: string | null; maxOutputChars: number; executable: string; agent?: string; thinking?: ThinkingLevel };
   };
   retrieve: { contextMaxChars: number; discordMaxChars: number };

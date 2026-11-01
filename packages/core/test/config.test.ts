@@ -32,3 +32,10 @@ describe('整理モデルのthinking設定', () => {
     expect(loaded.organize.maxItemsPerRun).toBe(20);
   });
 });
+describe('廃止したlockStaleSec', () => {
+  test('既定値に含めず、旧設定に残っていても読み込める', () => {
+    const base = defaultConfig('/tmp/ctx-vault', '/tmp/ctx-state');
+    expect('lockStaleSec' in base.organize).toBe(false);
+    expect(() => validateConfig({ ...base, organize: { ...base.organize, lockStaleSec: 3600 } })).not.toThrow();
+  });
+});

@@ -42,10 +42,14 @@ async function readDecision(vault:Vault,id:string):Promise<Decision|undefined>{
 async function materialize(vault:Vault,record:Decision):Promise<void>{
  if(record.action==='reject')return;const project=projectSchema.parse(parseMarkdown(record.project_text).meta), path=`10_projects/${project.id}/project.md`;
  const marker=await vault.read(materializedPath(record));
- if(marker!==undefined){const done=materializedSchema.parse(JSON.parse(marker)),current=await vault.read(path);if(done.decision_id!==record.id||done.decision_hash!==hash(JSON.stringify(record))||done.project_id!==project.id||current===undefined||projectSchema.parse(parseMarkdown(current).meta).id!==project.id)throw new Error('実体化済みの定義または承認記録が不正です');return;}
+ if(marker!==undefined){const done=materializedSchema.parse(JSON.parse(marker)),current=await vault.read(path);if(done.decision_id!==record.id||done.decision_hash!==hash(JSON.stringify(record))||done.project_id!==project.id||current===undefined||projectSchema.parse(parseMarkdown(current).meta).id!==project.id)throw new Error('実体化済みの定義または承認記録が不正です');await rebuildPolicies(vault);return;}
  if(!await vault.create(path,record.project_text)&&await vault.read(path)!==record.project_text)throw new Error('承認済みプロジェクト定義が競合しています。doctorで確認してください');
  await vault.create(materializedPath(record),JSON.stringify({schema_version:1,decision_id:record.id,decision_hash:hash(JSON.stringify(record)),project_id:project.id})+'\n');
+ await rebuildPolicies(vault);
 }
+// project.mdは方針manifestの正本に含まれる。addProjectと同じく集約し、後続のreadPoliciesを不一致にしない。
+// 実体化済みの再送でも行い、記録作成直後に停止した場合の未集約を回復する。
+async function rebuildPolicies(vault:Vault):Promise<void>{const {rebuildPoliciesLocked}=await import('./policies.js');await rebuildPoliciesLocked(vault.config,vault);}
 export async function saveProjectCandidateLocked(config:HubConfig,vault:Vault,chain:CorrectionChain,receipt:Receipt):Promise<string|undefined>{
  const proposal=receipt.result?.project_proposal;if(!proposal)return undefined;
  const id=`PCAN-${chain.latest.id.slice(3)}`,path=candidatePath(id);

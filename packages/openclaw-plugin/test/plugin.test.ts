@@ -15,7 +15,7 @@ const senderId = '100000000000000001';
 const config: HubConfig = {
   schema_version: 1, policy:{projectRoots:[]}, vaultPath: '/fixture/vault', statePath: '/fixture/state', timezone: 'Asia/Tokyo',
   capture: { maxInputChars: 8000, allowedSenderIds: [senderId] },
-  organize: { maxItemsPerRun: 20, maxAttempts: 3, timeoutSec: 60, projectThreshold: 0.7, lockStaleSec: 3600, llm: { provider: 'mock', model: null, maxOutputChars: 4000, executable: '/unused' } },
+  organize: { maxItemsPerRun: 20, maxAttempts: 3, timeoutSec: 60, projectThreshold: 0.7, llm: { provider: 'mock', model: null, maxOutputChars: 4000, executable: '/unused' } },
   retrieve: { contextMaxChars: 6000, discordMaxChars: 1900 }, logging: { dir: '/fixture/logs', retentionDays: 14 }
 };
 const event: DispatchEvent = { channel: 'discord', content: '  日本語\nhttps://example.com/a?b=c\n', body: '[Discord envelope] 書き換えない', senderId, messageId: '100000000000000005', isGroup: true, timestamp: 1789360200000 };

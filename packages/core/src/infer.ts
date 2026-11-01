@@ -2,6 +2,15 @@ import type { HubConfig, LlmClient, LlmCompletion, LlmOptions } from './types.js
 import { spawn } from 'node:child_process';
 
 function failure(kind: string): Error { return new Error(`infer:${kind}`); }
+
+/**
+ * OpenClawの`infer model run`はプロンプトを`--prompt`の引数でだけ受け取る（標準入力・ファイル指定は未提供）。
+ * Linuxは引数1個あたり128KiB（MAX_ARG_STRLEN）を超えるとE2BIGで起動できないため、余裕を見た上限で送信前に止める。
+ */
+export const MAX_PROMPT_ARG_BYTES = 120 * 1024;
+export class PromptTooLargeError extends Error {
+  constructor() { super('infer:prompt-too-large'); this.name = 'PromptTooLargeError'; }
+}
 function startProcess(executable: string, args: string[]) {
   try { return spawn(executable, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] }); }
   catch { throw failure('spawn'); }
@@ -38,6 +47,8 @@ export class OpenClawInferLlm implements LlmClient {
   async complete(prompt: string, opts: LlmOptions): Promise<LlmCompletion> {
     const maxChars = Math.min(opts.maxOutputChars, this.config.maxOutputChars);
     if (!Number.isSafeInteger(maxChars) || maxChars < 1 || !Number.isFinite(opts.timeoutSec) || opts.timeoutSec <= 0 || opts.timeoutSec > 3600) throw failure('options');
+    // 子プロセスを起動する前に判定し、モデルへの部分送信や不明瞭なspawn失敗にしない。
+    if (Buffer.byteLength(prompt, 'utf8') > MAX_PROMPT_ARG_BYTES) throw new PromptTooLargeError();
     const args = ['infer', 'model', 'run', '--prompt', prompt, '--json', '--gateway'];
     if (this.config.agent) args.push('--agent', this.config.agent);
     const model = opts.model ?? this.config.model;

@@ -34,6 +34,8 @@ npm run check:sdk --workspace=@context-hub/openclaw-plugin -- "<OpenClawパッ�
 
 ## CIと公開物
 
-GitHub ActionsはNode 24でcheck/test/build/demoと監査を行います。キーや個人設定は不要です。ホストのSDK検査と実機のDiscord・同期・モデル接続はCIとは別に確認します。
+GitHub ActionsはNode 24でcheck/test/build/demoと監査を行います。キーや個人設定は不要です。
+
+`client-contract`ジョブは[Flutterクライアント](https://github.com/mozuq-lab/context-hub-flutter-client)の既定ブランチを取得し、固定submoduleの代わりにこのcommitを置いて、fixtureの形式比較とDartテスト（クライアントが保存した依頼を本体で受理する検査を含む）を実行します。Vaultの形式・候補一覧・方針manifestを変更して失敗した場合は、意図した変更かを確認し、merge後にクライアント側でfixtureの再生成と読取の更新を行います。このジョブは`continue-on-error`で、失敗しても本体のPRは止めません。ホストのSDK検査と実機のDiscord・同期・モデル接続はCIとは別に確認します。
 
 公開するソースと例には架空のIDを使います。実Vault、個人設定、依存ディレクトリ、生成デモ、ログ、バックアップ、個人の運用記録をコミットしません。初期公開ではライセンス、著作権表示、公開先、コミットの名前とメールも確認します。

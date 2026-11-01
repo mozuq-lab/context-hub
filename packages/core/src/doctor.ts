@@ -2,7 +2,7 @@ import {readPolicies} from './policies.js';
 import {knowledgePaths,readKnowledge} from './knowledge-scope.js';
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Vault, VAULT_DIRS, parseMarkdown, lockPath, hash } from './storage.js';
+import { Vault, VAULT_DIRS, LOCK_SCOPES, parseMarkdown, lockPath, hash } from './storage.js';
 import { parseInput, eventMarker } from './capture.js';
 import { readProjects } from './projects.js';
 import { readEffectiveInputs } from './effective-inputs.js';
@@ -81,11 +81,11 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   try{await readPolicies(config);}catch{issues.push('方針manifest・正本・停止記録の同期または集約が未完了です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}
   try { for(const path of await vault.files('90_system/conflicts'))issues.push(`生成物の競合: ${path}`); } catch {issues.push('競合フォルダ走査失敗');}
-  try { const lock = await lockPath(config); for(const path of [lock, `${lock}.reap`]) {
+  try { for (const scope of LOCK_SCOPES) { const lock = await lockPath(config, scope); for(const path of [lock, `${lock}.reap`]) {
     try { await lstat(path); } catch { continue; }
     let alive=false;
     try{const owner=JSON.parse(await readFile(join(path,'owner.json'),'utf8'));if(Number.isSafeInteger(owner.pid)&&owner.pid>0){process.kill(owner.pid,0);alive=true;}}catch{}
-    issues.push(`${alive?'Writer実行中':'ロック残骸（停止状態を確認）'}: ${path}`);
-  }} catch {issues.push('ロック場所を確認できません');}
+    issues.push(`${alive?(scope==='organize'?'整理実行中':'Writer実行中'):'ロック残骸（停止状態を確認）'}: ${path}`);
+  }}} catch {issues.push('ロック場所を確認できません');}
   return{issues,inputs:inputs.length};
 }
