@@ -3,6 +3,7 @@ export interface HubConfig {
   vaultPath: string;
   statePath: string;
   timezone: string;
+  policy: { projectRoots: {path:string;projectId:string}[] };
   capture: { maxInputChars: number; allowedSenderIds: string[] };
   organize: {
     maxItemsPerRun: number; maxAttempts: number; timeoutSec: number; projectThreshold: number; lockStaleSec: number;

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import {readPolicies,formatPolicies,rebuildPoliciesLocked,resolvePolicyProject} from './policies.js';
+import {retireKnowledge} from './knowledge-retirement.js';
 import { Command, Option } from 'commander';
 import { open } from 'node:fs/promises';
 import { loadConfig, type ConfigOverrides } from './config.js';
@@ -37,7 +39,7 @@ async function inputText(text:string|undefined, file:string|undefined,max:number
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)); }
   catch { throw new Error('文字コードがUTF-8ではありません。変換してから取り込んでください'); }
 }
-program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();await new Vault(c).init();output({vaultPath:c.vaultPath,initialized:true});});
+program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(()=>rebuildPoliciesLocked(c,vault));output({vaultPath:c.vaultPath,initialized:true});});
 program.command('add [text]').description('原文を保存').option('--file <path>','Markdown/テキストファイル')
   .option('--event-id <id>','再送判定用ID').option('--source <name>','出典名').option('--occurred-at <iso>','タイムゾーン付き発生日時')
   .addOption(new Option('--kind <kind>','入力の種別').choices(['memo','work-summary']).default('memo'))
@@ -62,8 +64,10 @@ program.command('recent').option('--n <n>','表示件数',positive,10).action(as
 program.command('pending').action(async()=>output(await pending(await config())));
 program.command('resume <project>').action(async id=>output(await resume(await config(),id)));
 program.command('context <project>').option('--max-chars <n>','最大文字数',positive).action(async(id,opts)=>output(await context(await config(),id,opts.maxChars)));
+program.command('policies').description('同期版の有効方針を読取専用で取得').option('--project <id>','ContextHubプロジェクト').option('--cwd <path>','対応付ける作業フォルダー').option('--json','JSON出力').action(async opts=>{const c=await config(),id=opts.project??(opts.cwd?await resolvePolicyProject(c,opts.cwd):undefined),b=await readPolicies(c,id);output(opts.json?b:formatPolicies(b));});
+program.command('retire <id>').requiredOption('--hash <sha256>','確認した正式知識のハッシュ').requiredOption('--confirm','本人による適用停止').action(async(id,opts)=>output(await retireKnowledge(await config(),id,opts.hash)));
 program.command('candidates').action(async()=>output(await listCandidates(await config())));
-program.command('approve <id>').requiredOption('--hash <sha256>','候補一覧で確認した内容ハッシュ').action(async(id,opts)=>output(await approve(await config(),id,opts.hash)));
+program.command('approve <id>').requiredOption('--hash <sha256>','候補一覧で確認した内容ハッシュ').requiredOption('--scope <scope>','global または project').option('--project <id>','採用先ContextHubプロジェクト').option('--project-hash <sha256>','確認したproject.mdのハッシュ').action(async(id,opts)=>output(await approve(await config(),id,opts.hash,opts.scope==='project'?{scope:'project',projectId:opts.project,projectHash:opts.projectHash}:{scope:opts.scope})));
 program.command('reject <id>').requiredOption('--hash <sha256>','候補一覧で確認した内容ハッシュ').action(async(id,opts)=>output(await reject(await config(),id,opts.hash)));
 program.command('propose <claim>').addOption(new Option('--kind <kind>','候補の種別').choices(['knowledge','decision','preference']).default('knowledge')).option('--rationale <text>','根拠','人による候補作成').option('--supersedes <id>','置き換えるKNW-ID')
   .action(async(claim,opts)=>output(await propose(await config(),{claim,kind:opts.kind,rationale:opts.rationale,supersedes:opts.supersedes})));

@@ -1,16 +1,19 @@
+import {retireKnowledge} from './knowledge-retirement.js';
+import {adoptionTargetSchema} from './knowledge-scope.js';
 import { z } from 'zod';
 import { readdir,lstat } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { Vault,hash } from './storage.js';
 import { capture,readInputs,inputIdSchema } from './capture.js';
 import { correctInput,CorrectionTargetError } from './corrections.js';
+import {approve,reject} from './approvals.js';
 import { decideProject } from './project-proposals.js';
 import { parseIntake,decodeIntake,requestIdSchema,type IntakeRequest } from './intake-format.js';
 import type { HubConfig } from './types.js';
 export interface IntakeRunResult { accepted:number; rejected:number; deferred:number; deduped:number; conflicts:string[]; requestIds:string[]; dryRun:boolean }
 const digest=z.string().regex(/^[a-f0-9]{64}$/);
-const operations=z.enum(['capture','correct','project-approve','project-reject']);
-export const intakeReceiptSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),operation:operations,status:z.literal('accepted'),received_at:z.string().datetime({offset:true}),result:z.union([z.object({inputId:inputIdSchema,path:z.string(),receivedAt:z.string(),deduped:z.boolean()}).strict(),z.object({candidateId:z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/),projectId:z.string().regex(/^project-[0-9a-hjkmnp-tv-z]{26}$/),decisionId:z.string().regex(/^PAPR-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict()])}).strict().refine(r=>(r.operation==='capture'||r.operation==='correct')===('inputId'in r.result));
+const operations=z.enum(['capture','correct','project-approve','project-reject','knowledge-approve','knowledge-reject','knowledge-retire']);
+export const intakeReceiptSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),operation:operations,status:z.literal('accepted'),received_at:z.string().datetime({offset:true}),result:z.union([z.object({knowledgeId:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),retirementId:z.string().regex(/^KRET-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({inputId:inputIdSchema,path:z.string(),receivedAt:z.string(),deduped:z.boolean()}).strict(),z.object({candidateId:z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/),projectId:z.string().regex(/^project-[0-9a-hjkmnp-tv-z]{26}$/),decisionId:z.string().regex(/^PAPR-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({candidateId:z.string().regex(/^CAN-[0-9A-HJKMNP-TV-Z]{26}$/),approvalId:z.string().regex(/^APR-[0-9A-HJKMNP-TV-Z]{26}$/),knowledgeId:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/).optional(),adoptedTarget:adoptionTargetSchema.optional(),deduped:z.boolean()}).strict()])}).strict().refine(r=>{if(r.operation==='capture'||r.operation==='correct')return 'inputId'in r.result;if(r.operation==='project-approve'||r.operation==='project-reject')return 'decisionId'in r.result;if(r.operation==='knowledge-retire')return 'retirementId'in r.result;return 'approvalId'in r.result&&(r.operation==='knowledge-approve'?'knowledgeId'in r.result:!('knowledgeId'in r.result));});
 const pendingSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),raw:z.string()}).strict();
 const intakeReasonSchema=z.discriminatedUnion('code',[
  z.object({code:z.literal('stale-correction-target'),latest_input_id:inputIdSchema}).strict(),
@@ -88,7 +91,11 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
     const inputId=result.inputId,saved=(await readInputs(config)).find(i=>i.id===inputId);
     if(!saved||saved.text!==packet.text||saved.kind!==packet.kind||saved.occurred_at!==packet.occurred_at||saved.project!==packet.project||saved.tool!==packet.tool||!isDeepStrictEqual(saved.meta,packet.meta))throw new Error('event-conflict');
    }else if(packet.operation==='correct')result=await correctInput(config,packet.target_id,{source:packet.source,sourceEventId:id,text:packet.text,occurredAt:packet.occurred_at});
-   else result=await decideProject(config,{candidateId:packet.candidate_id,expectedHash:packet.candidate_hash,confirmationToken:packet.confirmation_token,confirmed:packet.confirmed,action:packet.operation==='project-approve'?'approve':'reject',source:packet.source,sourceEventId:id});
+   else if(packet.operation==='knowledge-retire')result=await retireKnowledge(config,packet.target_id,packet.target_hash);
+   else if(packet.operation==='knowledge-approve')result=await approve(config,packet.candidate_id,packet.candidate_hash,packet.scope==='global'?{scope:'global'}:{scope:'project',projectId:packet.project_id,projectHash:packet.project_hash});
+   else if(packet.operation==='knowledge-reject')result=await reject(config,packet.candidate_id,packet.candidate_hash);
+   else if('confirmation_token'in packet)result=await decideProject(config,{candidateId:packet.candidate_id,expectedHash:packet.candidate_hash,confirmationToken:packet.confirmation_token,confirmed:packet.confirmed,action:packet.operation==='project-approve'?'approve':'reject',source:packet.source,sourceEventId:id});
+   else throw new Error('受付操作が不正です');
    const accepted=await vault.withLock(async()=>{
     const receipt={schema_version:1,request_id:id,request_hash:requestHash,path,operation:packet.operation,status:'accepted',received_at:new Date().toISOString(),result};
     if(await vault.create(ackPath(id),JSON.stringify(receipt,null,2)+'\n'))return true;

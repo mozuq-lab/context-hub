@@ -59,23 +59,28 @@ export async function saveProjectCandidateLocked(config:HubConfig,vault:Vault,ch
  return path;
 }
 export async function listProjectCandidates(config:HubConfig):Promise<ProjectCandidate[]>{
- const vault=new Vault(config),chains=await readCorrectionChains(config),projects=await readProjects(config),items:ProjectCandidate[]=[];
+ const vault=new Vault(config),items:ProjectCandidate[]=[];
  for(const path of await vault.files('90_system/project-candidates')){
   if(!/^90_system\/project-candidates\/PCAN-[0-9A-HJKMNP-TV-Z]{26}\.md$/.test(path))continue;
+  items.push(await readProjectCandidate(config,path.split('/').at(-1)!.slice(0,-3)));
+ }return items;
+}
+export async function readProjectCandidate(config:HubConfig,id:string):Promise<ProjectCandidate>{
+ candidateId.parse(id);const vault=new Vault(config),chains=await readCorrectionChains(config),projects=await readProjects(config),path=candidatePath(id);
   const raw=(await vault.read(path))!,meta=parseCandidate(path,raw),confirmationRaw=await vault.read(confirmationPath(meta.id));
   const confirmation=confirmationRaw?confirmationSchema.parse(JSON.parse(confirmationRaw)):undefined;
   if(confirmation&&(confirmation.candidate_id!==meta.id||confirmation.candidate_hash!==hash(raw)))throw new Error('候補と確認情報が一致しません');
   const decision=await readDecision(vault,meta.id),chain=chains.find(c=>c.root.id===meta.root_input_id);
   const stale=!confirmation||!chain||chain.evidenceHash!==meta.evidence_hash||JSON.stringify(meta.evidence_ids)!==JSON.stringify([chain.root,...chain.revisions].map(i=>i.id))||overlaps(meta.proposal,projects);
-  items.push({candidateId:meta.id,projectId:meta.project_id,path,rootInputId:meta.root_input_id,evidenceHash:meta.evidence_hash,candidateHash:hash(raw),confirmationToken:confirmation?.confirmation_token??'',proposal:meta.proposal,status:decision?decision.action==='approve'?'approved':'rejected':stale?'stale':'pending'});
- }return items;
+  return{candidateId:meta.id,projectId:meta.project_id,path,rootInputId:meta.root_input_id,evidenceHash:meta.evidence_hash,candidateHash:hash(raw),confirmationToken:confirmation?.confirmation_token??'',proposal:meta.proposal,status:decision?decision.action==='approve'?'approved':'rejected':stale?'stale':'pending'};
 }
+export {readDecision as readProjectDecision};
 export async function decideProject(config:HubConfig,request:ProjectDecisionRequest):Promise<ProjectDecisionResult>{
  requestSchema.parse(request);const vault=new Vault(config);
  return vault.withLock(async()=>{
   const previous=await readDecision(vault,request.candidateId);
   if(previous){if(previous.action!==request.action||previous.candidate_hash!==request.expectedHash||previous.confirmation_hash!==hash(request.confirmationToken))throw new Error('この候補には異なる承認・却下記録があります');await materialize(vault,previous);const meta=parseCandidate(candidatePath(request.candidateId),previous.candidate_snapshot);return{candidateId:request.candidateId,projectId:meta.project_id,decisionId:previous.id,deduped:true};}
-  const candidate=(await listProjectCandidates(config)).find(c=>c.candidateId===request.candidateId);
+  const candidate=await readProjectCandidate(config,request.candidateId);
   if(!candidate||candidate.status!=='pending')throw new Error('候補が古いか確認情報が不足しています。同期後に最新候補を確認してください');
   if(candidate.candidateHash!==request.expectedHash||candidate.confirmationToken!==request.confirmationToken)throw new Error('表示した候補と承認の確認情報が一致しません');
   const raw=(await vault.read(candidate.path))!;

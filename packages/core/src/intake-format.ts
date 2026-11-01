@@ -9,7 +9,14 @@ const base = { schema_version: z.literal(1), request_id: requestIdSchema, source
 const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), text: z.string() }).strict();
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
 const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), confirmed: z.literal(true), text: z.string() }).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema]);
+const knowledgeBase={...base,candidate_id:z.string().regex(/^CAN-[0-9A-HJKMNP-TV-Z]{26}$/),candidate_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()};
+const knowledgeApprove=z.union([
+ z.object({...knowledgeBase,operation:z.literal('knowledge-approve'),scope:z.literal('global')}).strict(),
+ z.object({...knowledgeBase,operation:z.literal('knowledge-approve'),scope:z.literal('project'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),
+]);
+const knowledgeReject=z.object({...knowledgeBase,operation:z.literal('knowledge-reject')}).strict();
+const knowledgeRetire=z.object({...base,operation:z.literal('knowledge-retire'),target_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

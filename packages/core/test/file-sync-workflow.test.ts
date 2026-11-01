@@ -23,6 +23,6 @@ test('別端末の入力から訂正と承認を経て出典付き表示へ戻�
 });
 test('根拠の訂正は承認済み知識を変更せず検索で再確認を促す',async()=>{
  const{config,vault}=await workflowSetup(roots);await packet(config,{},'栽培を始める判断');await runCycle(config,new MockLlm([{...proposed,project_proposal:null,knowledge_candidate:{kind:'decision',claim:'栽培を始める',rationale:'利用者の検討内容'}}]));
- const root=(await readInputs(config))[0],candidateId=`CAN-${root.id.slice(3)}`,candidateRaw=(await vault.read(`90_system/candidates/${candidateId}.md`))!;const decision=await approve(config,candidateId,hash(candidateRaw)),path=`30_knowledge/${decision.knowledgeId}.md`,knowledge=await vault.read(path);
+ const root=(await readInputs(config))[0],candidateId=`CAN-${root.id.slice(3)}`,candidateRaw=(await vault.read(`90_system/candidates/${candidateId}.md`))!;const decision=await approve(config,candidateId,hash(candidateRaw),{scope:'global'}),path=`30_knowledge/${decision.knowledgeId}.md`,knowledge=await vault.read(path);
  await packet(config,{operation:'correct',target_id:root.id},'栽培開始を延期する');await runCycle(config,new MockLlm());expect(await vault.read(path)).toBe(knowledge);expect(await find(config,'栽培')).toContain('本文は自動改訂されていません');
 });

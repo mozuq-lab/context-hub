@@ -20,9 +20,13 @@ export interface HubTool {
   execute(id: string, params: unknown): Promise<ToolResult>;
 }
 export interface PluginLogger { info(message: string): void; warn(message: string): void }
+export interface PromptEvent{prompt:string;currentUserMessage?:string;messages:unknown[]}
+export interface PromptContext{agentId?:string;workspaceDir?:string;channel?:string;accountId?:string;senderId?:string;chatId?:string;channelId?:string}
+export interface PromptResult{prependContext?:string}
 export interface PluginApi {
   config: unknown; pluginConfig?: Record<string, unknown>; logger?: PluginLogger;
   on(name: 'before_dispatch', handler: (event: DispatchEvent, ctx: DispatchContext) => Promise<DispatchResult | undefined>): void;
+  on(name:'before_prompt_build',handler:(event:PromptEvent,ctx:PromptContext)=>Promise<PromptResult|undefined>):void;
   registerTool(factory: (ctx: ToolContext) => HubTool | null, opts: { name: string; optional: boolean }): void;
 }
 export interface HubDependencies {

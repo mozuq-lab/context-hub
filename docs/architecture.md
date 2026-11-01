@@ -17,7 +17,10 @@ Input/                         端末が追加する不変の受付ファイル
 10_projects/<id>/project.md     プロジェクト定義
 10_projects/<id>/NOW.md         現在地・次の一手・未解決の生成ビュー
 20_ideas/                      AI整理済みアイデア
-30_knowledge/                  本人承認を経た知識
+30_knowledge/                  共通へ採用した正式知識・方針
+10_projects/<id>/knowledge/     対象projectへ採用した正式知識・方針
+POLICY.md                      共通の有効方針（派生集約）
+10_projects/<id>/POLICY.md      対象projectの有効方針（派生集約）
 90_system/                     受領・処理・訂正解釈・候補・承認・競合の記録
 HOME.md                        受領と整理状況への入口
 _ContextHub/                   共有する入力ツールとテンプレート

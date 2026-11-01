@@ -1,3 +1,4 @@
+import {projectIdSchema} from './projects.js';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve, join, relative, isAbsolute } from 'node:path';
@@ -10,6 +11,7 @@ export function expandPath(value: string): string {
 export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Library/Application Support/context-hub')): HubConfig {
   return {
     schema_version: 1, vaultPath: expandPath(vaultPath), statePath: expandPath(statePath), timezone: 'Asia/Tokyo',
+    policy: {projectRoots:[]},
     capture: { maxInputChars: 8000, allowedSenderIds: [] },
     organize: { maxItemsPerRun: 20, maxAttempts: 3, timeoutSec: 60, projectThreshold: 0.7, lockStaleSec: 3600,
       llm: { provider: 'mock', model: null, maxOutputChars: 4000, executable: 'openclaw' } },
@@ -20,6 +22,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
 const positive = z.number().int().min(1).max(1_000_000);
 const configSchema = z.object({
   schema_version: z.literal(1), vaultPath: z.string().min(1), statePath: z.string().min(1), timezone: z.literal('Asia/Tokyo'),
+  policy: z.object({projectRoots:z.array(z.object({path:z.string().refine(isAbsolute,'絶対パスが必要です'),projectId:projectIdSchema}).strict()).max(1000)}).strict(),
   capture: z.object({ maxInputChars: positive.max(100_000), allowedSenderIds: z.array(z.string()) }).strict(),
   organize: z.object({ maxItemsPerRun: positive.max(1000), maxAttempts: positive.max(10), timeoutSec: positive.max(600), projectThreshold: z.number().min(0).max(1), lockStaleSec: positive,
     llm: z.object({ provider: z.enum(['mock', 'openclaw-infer']), model: z.string().min(1).nullable(), maxOutputChars: positive.max(100_000), executable: z.string().min(1), agent: z.string().regex(/^[a-z0-9_-]+$/).optional(), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high']).optional() }).strict() }).strict(),

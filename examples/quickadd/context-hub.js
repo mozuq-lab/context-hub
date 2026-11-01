@@ -49,31 +49,6 @@ async function correct(params) {
   if (text === undefined || text === null || !text.trim()) return;
   return submit(params, 'correct', { target_id: selected.id }, text);
 }
-async function decide(params, action) {
-  const candidates = [];
-  for (const file of await params.app.vault.getMarkdownFiles()) {
-    if (!/^90_system\/project-candidates\/PCAN-[0-9A-HJKMNP-TV-Z]{26}\.md$/.test(file.path)) continue;
-    const raw = await params.app.vault.read(file), meta = metadata(params, raw);
-    if (file.path !== `90_system/project-candidates/${meta.id}.md`) throw new Error('候補IDとパスが一致しません');
-    const decision = params.app.vault.getAbstractFileByPath(`90_system/project-approvals/PAPR-${meta.id.slice(5)}.json`);
-    if (decision) {
-      try { const record = JSON.parse(await params.app.vault.read(decision)); if (record.candidate_id === meta.id) continue; } catch { /* 未同期の断片はMiniが再検証する。 */ }
-    }
-    candidates.push({ raw, meta });
-  }
-  if (!candidates.length) { notify(params, '承認待ち候補がありません。候補と処理記録の同期を確認してください。'); return; }
-  const selected = await params.quickAddApi.suggester(candidates.map(c => `${c.meta.proposal.title} / ${c.meta.id}`), candidates);
-  if (!selected) return;
-  const { raw, meta } = selected;
-  const confirmation = JSON.parse(await read(params, `90_system/project-confirmations/${meta.id}.json`));
-  if (confirmation.candidate_id !== meta.id || confirmation.candidate_hash !== await sha256(raw) || !/^[a-f0-9]{64}$/.test(confirmation.confirmation_token)) throw new Error('候補と確認情報が一致しません。同期完了後に再実行してください');
-  const all = await inputs(params), evidence = all.filter(i => meta.evidence_ids.includes(i.id));
-  if (evidence.length !== meta.evidence_ids.length || all.some(i => i.corrects_input_id && meta.evidence_ids.includes(i.corrects_input_id) && !meta.evidence_ids.includes(i.id))) throw new Error('根拠が未同期か新しい訂正があります。最新の候補を確認してください');
-  const proposal = meta.proposal;
-  const details = `名前: ${proposal.title}\n別名: ${proposal.aliases.join('、') || 'なし'}\n検索語: ${proposal.keywords.join('、') || 'なし'}\n理由: ${proposal.rationale}\n候補: ${meta.id}\n根拠: ${meta.evidence_ids.join(' → ')}\n生成日時: ${meta.generated_at}\nモデル: ${meta.generated_by.model}\n\n${action === 'approve' ? '承認するとMac miniがこの内容の定義を作成します。' : 'この候補を却下します。'}\n同期後、Mac miniが内容と最新状態を再検証します。`;
-  if (!await params.quickAddApi.yesNoPrompt(action === 'approve' ? 'プロジェクト案を承認' : 'プロジェクト案を却下', details)) return;
-  return submit(params, action === 'approve' ? 'project-approve' : 'project-reject', { candidate_id: meta.id, candidate_hash: confirmation.candidate_hash, confirmation_token: confirmation.confirmation_token, confirmed: true });
-}
 function safeAction(action) {
   return async params => {
     try { return await action(params); }
@@ -84,10 +59,98 @@ function safeAction(action) {
     }
   };
 }
+function safePath(path) {
+  return typeof path === 'string' && /^(00_inbox|10_projects|30_knowledge|90_system)\//.test(path) && !path.includes('\\') && !path.split('/').some(p => !p || p === '.' || p === '..');
+}
+async function reviewItems(params) {
+  const root = JSON.parse(await read(params, '90_system/review/index.json'));
+  if (root.schema_version !== 1 || !Array.isArray(root.items)) throw new Error('確認待ち一覧が未同期です');
+  const items = [...root.items];
+  if (root.pages !== undefined) {
+    if (!Array.isArray(root.pages) || root.pages.length > 5000 || items.length) throw new Error('一覧の分割情報が不正です');
+    const seen = new Set();
+    for (const page of root.pages) {
+      if (!/^90_system\/review\/page-\d{5}\.json$/.test(page.path) || seen.has(page.path)) throw new Error('一覧の参照先が不正です');
+      seen.add(page.path);
+      const raw = await read(params, page.path);
+      if (await sha256(raw) !== page.hash) throw new Error('一覧の同期が未完了です');
+      const value = JSON.parse(raw);
+      if (value.schema_version !== 1 || !Array.isArray(value.items)) throw new Error('一覧の形式が不正です');
+      items.push(...value.items);
+    }
+  }
+  return items;
+}
+async function validateReview(params, item) {
+  const project = item.kind === 'project', prefix = project ? 'PCAN' : 'CAN', folder = project ? 'project-candidates' : 'candidates';
+  if (!(new RegExp('^' + prefix + '-[0-9A-HJKMNP-TV-Z]{26}$')).test(item.id) || item.status !== 'pending' || !['project', 'knowledge', 'decision', 'preference'].includes(item.kind) || !/^[a-f0-9]{64}$/.test(item.candidateHash) || item.path !== `90_system/${folder}/${item.id}.md` || !Array.isArray(item.inputIds) || !item.dependencies || item.dependencies[item.path] !== item.candidateHash) throw new Error('候補の情報が不正です');
+  if (project && !/^[a-f0-9]{64}$/.test(item.confirmationToken)) throw new Error('確認情報が未同期です');
+  await validateDependencies(params,item);
+  const all = await inputs(params);
+  if (item.inputIds.some(id => !all.some(i => i.id === id)) || all.some(i => item.inputIds.includes(i.corrects_input_id) && !item.inputIds.includes(i.id))) throw new Error('元のメモに未同期または新しい訂正があります。最新の候補を確認してください');
+  return all.filter(i => item.inputIds.includes(i.id));
+}
+async function validateDependencies(params,item) {
+  for (const [path, wanted] of Object.entries(item.dependencies)) {
+    if (!safePath(path) || (wanted !== null && !/^[a-f0-9]{64}$/.test(wanted))) throw new Error('候補の参照先が不正です');
+    const file = params.app.vault.getAbstractFileByPath(path);
+    const actual = file ? await sha256(await params.app.vault.read(file)) : null;
+    if (actual !== wanted) throw new Error('根拠・候補・判断の同期が未完了か変更されています。再同期後に確認してください');
+  }
+}
+async function decideReview(params, action, project = false) {
+  const candidates = (await reviewItems(params)).filter(i => i.status === 'pending' && (project ? i.kind === 'project' : ['knowledge', 'decision', 'preference'].includes(i.kind)));
+  if (!candidates.length) { notify(params, '確認待ち候補がありません。HOMEと同期を確認してください。'); return; }
+  const item = await params.quickAddApi.suggester(candidates.map(i => `${i.title} / ${i.id}`), candidates);
+  if (!item) return;
+  const target = !project && action === 'approve' ? await selectTarget(params,item) : undefined;
+  if (!project && action === 'approve' && !target) return;
+  const evidence = await validateReview(params, item);
+  const originals = [];
+  for (const source of evidence) originals.push(`${source.id}\n${await read(params, source.path)}`);
+  const proposal = project ? metadata(params, await read(params, item.path)).proposal : undefined;
+  const projectDetails = proposal ? `名前: ${proposal.title}\n別名: ${proposal.aliases.join('、') || 'なし'}\n検索語: ${proposal.keywords.join('、') || 'なし'}\n` : '';
+  const previousPath=item.supersedes?Object.keys(item.dependencies).find(p=>p.endsWith(`/${item.supersedes}.md`)):undefined;
+  const previous = previousPath ? await read(params,previousPath) : '';
+  const targetDetails=target?`採用先: ${target.scope==='global'?'全ての作業に共通（本人の明示選択）':target.label}\n${item.kind==='knowledge'?'参考知識として必要時に参照します。':'有効な方針として対象のAI作業へ渡します。'}\n`:'';
+  const details = `${projectDetails}${targetDetails}主張: ${item.claim}\n理由: ${item.rationale || '不明'}\n種別: ${item.kind}\n候補: ${item.id}\n生成日時: ${item.generatedAt || '不明'}\n\n元のメモ:\n${originals.join('\n\n') || '利用者の提案（原文なし）'}${previous ? '\n\n置き換え元:\n' + previous : ''}\n\n${action === 'approve' ? 'この内容を採用します。' : 'この候補を却下します。'}\n依頼保存後、Mac miniが最新状態を再検証します。`;
+  if (!await params.quickAddApi.yesNoPrompt(action === 'approve' ? '知識・方針の候補を採用' : '知識・方針の候補を却下', details)) return;
+  await validateReview(params, item);
+  if(target)await validateTarget(params,target);
+  return submit(params, `${project ? 'project' : 'knowledge'}-${action}`, { candidate_id: item.id, candidate_hash: item.candidateHash, ...(project ? { confirmation_token: item.confirmationToken } : target ? {scope:target.scope,...(target.scope==='project'?{project_id:target.project_id,project_hash:target.project_hash}:{})} : {}), confirmed: true });
+}
+async function selectTarget(params,item) {
+  const root=JSON.parse(await read(params,'90_system/review/index.json'));
+  if(!Array.isArray(root.projects))throw new Error('採用先一覧が未同期です');
+  const suggestions=Array.isArray(item.projectSuggestions)?item.projectSuggestions:[];
+  const ordered=[...root.projects].sort((a,b)=>Number(!suggestions.some(s=>s.projectId===a.id))-Number(!suggestions.some(s=>s.projectId===b.id)));
+  const targets=ordered.map(p=>{const suggestion=suggestions.find(s=>s.projectId===p.id);return {scope:'project',project_id:p.id,project_hash:p.hash,path:p.path,label:`${p.title} (${p.id})${suggestion?` / ${suggestion.source==='explicit'?'元メモで指定':'AIの推定・本人確認が必要'}`:''}`};});
+  targets.push({scope:'global',label:'全ての作業に共通（本人の明示選択）'},null);
+  const selected=await params.quickAddApi.suggester(targets.map(t=>t?t.label:'保留する'),targets);
+  if(selected)await validateTarget(params,selected);return selected;
+}
+async function validateTarget(params,target){
+  if(target.scope==='global')return;
+  if(target.scope!=='project'||!(/^[a-z0-9][a-z0-9-]{1,40}$/).test(target.project_id)||target.path!==`10_projects/${target.project_id}/project.md`||!(/^[a-f0-9]{64}$/).test(target.project_hash))throw new Error('採用先情報が不正です');
+  const raw=await read(params,target.path);if(await sha256(raw)!==target.project_hash||metadata(params,raw).id!==target.project_id)throw new Error('採用先が変更・未同期です。再読込してください');
+}
+async function retireKnowledge(params){
+  const candidates=(await reviewItems(params)).filter(i=>i.kind!=='project'&&i.status==='approved'&&i.reflected&&!i.retired);
+  if(!candidates.length){notify(params,'適用停止できる採用済み記録がありません。');return;}
+  const item=await params.quickAddApi.suggester(candidates.map(i=>`${i.title} / ${i.id}`),candidates);if(!item)return;
+  const validate=async()=>{await validateDependencies(params,item);if(!safePath(item.targetPath)||!item.targetPath.endsWith(`/KNW-${item.id.slice(4)}.md`))throw new Error('停止先が不正です');const raw=await read(params,item.targetPath),meta=metadata(params,raw);if(meta.approval_id!==item.decisionId||meta.approved_hash!==item.candidateHash||meta.verified!==true)throw new Error('停止対象を確認できません');return {raw,id:meta.id,hash:await sha256(raw)};};
+  const value=await validate();
+  if(!await params.quickAddApi.yesNoPrompt('採用済み記録を適用停止',`${value.raw}\n\n自動適用を止めます。本文と採用履歴は保持します。`))return;
+  const fresh=await validate();if(fresh.hash!==value.hash)throw new Error('確認中に停止対象が変更されました');
+  return submit(params,'knowledge-retire',{target_id:value.id,target_hash:value.hash,confirmed:true});
+}
 module.exports = {
   captureMemo: safeAction(params => capture(params, 'memo')),
   captureSummary: safeAction(params => capture(params, 'work-summary')),
   correctInput: safeAction(correct),
-  approveProject: safeAction(params => decide(params, 'approve')),
-  rejectProject: safeAction(params => decide(params, 'reject')),
+  approveProject: safeAction(params => decideReview(params, 'approve', true)),
+  rejectProject: safeAction(params => decideReview(params, 'reject', true)),
+  retireKnowledge: safeAction(retireKnowledge),
+  approveKnowledge: safeAction(params => decideReview(params, 'approve')),
+  rejectKnowledge: safeAction(params => decideReview(params, 'reject')),
 };

@@ -13,7 +13,7 @@ const channelId = '100000000000000004';
 const guildId = '100000000000000002';
 const senderId = '100000000000000001';
 const config: HubConfig = {
-  schema_version: 1, vaultPath: '/fixture/vault', statePath: '/fixture/state', timezone: 'Asia/Tokyo',
+  schema_version: 1, policy:{projectRoots:[]}, vaultPath: '/fixture/vault', statePath: '/fixture/state', timezone: 'Asia/Tokyo',
   capture: { maxInputChars: 8000, allowedSenderIds: [senderId] },
   organize: { maxItemsPerRun: 20, maxAttempts: 3, timeoutSec: 60, projectThreshold: 0.7, lockStaleSec: 3600, llm: { provider: 'mock', model: null, maxOutputChars: 4000, executable: '/unused' } },
   retrieve: { contextMaxChars: 6000, discordMaxChars: 1900 }, logging: { dir: '/fixture/logs', retentionDays: 14 }
@@ -37,7 +37,7 @@ function fixture(overrides: Partial<HubDependencies> = {}, hostOverride?: unknow
   const api: PluginApi = {
     config: hostOverride ?? { channels: { discord: { enabled: true, groupPolicy: 'allowlist', guilds: { [guildId]: { users: [senderId], channels: { [channelId]: { enabled: true, requireMention: false, users: [senderId] } } } } } } },
     pluginConfig: { configPath: '/fixture/config.json', guildId, channelIds: [channelId], allowedSenderIds: [senderId], accountId: 'default' },
-    on: (_name, next) => { handler = next; },
+    on: (name, next) => { if(name==='before_dispatch')handler = next as typeof handler; },
     registerTool: (factory, options) => { expect(options.optional).toBe(true); factories.set(options.name, factory); }
   };
   registerHub(api, deps);
@@ -169,7 +169,7 @@ describe('保存フックの辞退理由の記録', () => {
       config: hostOverride ?? { channels: { discord: { enabled: true, groupPolicy: 'allowlist', guilds: { [guildId]: { channels: { [channelId]: { enabled: true, users: [senderId] } } } } } } },
       pluginConfig: { configPath: '/fixture/config.json', guildId, channelIds: [channelId], allowedSenderIds: [senderId], accountId: 'default' },
       logger: { info, warn },
-      on: (_name, next) => { handler = next; },
+      on: (name, next) => { if(name==='before_dispatch')handler = next as typeof handler; },
       registerTool: () => {}
     };
     const deps: HubDependencies = { loadConfig: async () => config, capture: async () => ({ inputId: 'IN-01K5ABCDEFGHJKMNPQRSTVWXYZ', deduped: false, path: 'x', receivedAt: '2026-09-14T00:30:02Z' }), find: async () => '', resume: async () => '', recent: async () => '', pending: async () => '' };
@@ -204,7 +204,7 @@ describe('保存フックの辞退理由の記録', () => {
 describe('保存フックの辞退理由の記録（会話ID欠落）', () => {
   it('会話IDが無くてもsessionKeyが専用チャンネルなら辞退理由を残す', async () => {
     const warn = vi.fn(); let handler!: (e: DispatchEvent, c: DispatchContext) => Promise<DispatchResult | undefined>;
-    registerHub({ config: {}, pluginConfig: { configPath: '/x', guildId, channelIds: [channelId], allowedSenderIds: [senderId] }, logger: { info: () => {}, warn }, on: (_n, next) => { handler = next; }, registerTool: () => {} },
+    registerHub({ config: {}, pluginConfig: { configPath: '/x', guildId, channelIds: [channelId], allowedSenderIds: [senderId] }, logger: { info: () => {}, warn }, on: (_n, next) => { handler = next as typeof handler; }, registerTool: () => {} },
       { loadConfig: async () => config, capture: async () => { throw new Error(); }, find: async () => '', resume: async () => '', recent: async () => '', pending: async () => '' });
     expect(await handler(event, { ...context, conversationId: undefined })).toBeUndefined();
     expect(String(warn.mock.calls[0]?.[0])).toContain('conversation=(none)');

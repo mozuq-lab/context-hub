@@ -1,8 +1,9 @@
+import {readPolicies,resolvePolicyProject,policyContext,policyUnavailable,projectIdSchema} from '@context-hub/core';
 import { Type } from 'typebox';
 import type { HubDependencies, PluginApi, ToolResult } from './api.js';
 
 interface PluginSettings {
-  configPath: string; guildId: string; channelIds: string[]; allowedSenderIds: string[]; accountId: string;
+  configPath: string; guildId: string; channelIds: string[]; allowedSenderIds: string[]; accountId: string; policyAgents:{agentId:string;projectId?:string}[];
 }
 const snowflake = /^\d{17,20}$/u;
 const help = '/ctx_find <キーワード> — 検索\n/ctx_resume <プロジェクトID> — 再開\n/ctx_recent [件数] — 最近の入力\n/ctx_pending — 未整理・失敗\n/ctx_help — この案内\n普通の文章はメモとして保存します。全文はCLIで取得できます。';
@@ -19,7 +20,9 @@ function settings(raw: unknown): PluginSettings {
     || !Array.isArray(value.channelIds) || value.channelIds.length === 0 || !value.channelIds.every((id) => typeof id === 'string' && snowflake.test(id))
     || !Array.isArray(value.allowedSenderIds) || value.allowedSenderIds.length === 0 || !value.allowedSenderIds.every((id) => typeof id === 'string' && snowflake.test(id))
     || (value.accountId !== undefined && value.accountId !== 'default')) throw new Error('context-hub: プラグイン設定が不正です');
-  return { configPath: value.configPath, guildId: value.guildId, channelIds: value.channelIds, allowedSenderIds: value.allowedSenderIds, accountId: 'default' };
+  const policyAgents=value.policyAgents??[];
+  if(!Array.isArray(policyAgents)||policyAgents.some(p=>!p||typeof p!=='object'||typeof p.agentId!=='string'||!(/^[a-z0-9_-]+$/).test(p.agentId)||p.projectId!==undefined&&!projectIdSchema.safeParse(p.projectId).success)||new Set(policyAgents.map(p=>p.agentId)).size!==policyAgents.length)throw new Error('context-hub: 方針の適用agent設定が不正です');
+  return { policyAgents, configPath: value.configPath, guildId: value.guildId, channelIds: value.channelIds, allowedSenderIds: value.allowedSenderIds, accountId: 'default' };
 }
 function output(text: string, ok = true): ToolResult { return { content: [{ type: 'text', text }], details: { ok } }; }
 function channelIdFromConversation(value: string | undefined): string | undefined {
@@ -104,6 +107,19 @@ export function registerHub(api: PluginApi, deps: HubDependencies): void {
     } catch { return refuse('保存先または設定を確認してください'); }
   });
   api.logger?.info('context-hub: before_dispatch registered');
+  if(config.policyAgents.length)api.on('before_prompt_build',async(_event,ctx)=>{
+    const binding=config.policyAgents.find(a=>a.agentId===ctx.agentId);if(!binding)return;
+    if(ctx.channel&&!allowed(ctx.channel,channelIdFromConversation(ctx.chatId??ctx.channelId),ctx.senderId,ctx.accountId))return;
+    try{
+      if(!ctx.workspaceDir)throw new Error('作業フォルダーがありません');
+      const hubConfig=await deps.loadConfig(config.configPath),mapped=await resolvePolicyProject(hubConfig,ctx.workspaceDir);
+      if(mapped&&binding.projectId&&mapped!==binding.projectId)throw new Error('project対応が競合しています');
+      const bundle=await readPolicies(hubConfig,binding.projectId??mapped),text=policyContext(bundle);
+      api.logger?.info(JSON.stringify({status:'ok',revision:bundle.revision,scope:bundle.projectId??'global',count:bundle.global.length+bundle.project.length}));
+      return{prependContext:text};
+    }catch{api.logger?.warn('context-hub: policy status=unavailable');return{prependContext:policyUnavailable+' このcontext追加hookだけでは実行停止を強制する保証はありません。'};}
+  });
+
 
   for (const [name, description] of Object.entries(descriptions)) {
     api.registerTool((ctx) => {

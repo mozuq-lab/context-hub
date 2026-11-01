@@ -1,3 +1,5 @@
+import {readPolicies} from './policies.js';
+import {knowledgePaths,readKnowledge} from './knowledge-scope.js';
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Vault, VAULT_DIRS, parseMarkdown, lockPath, hash } from './storage.js';
@@ -75,6 +77,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   for(const dir of ['20_ideas','90_system/candidates','30_knowledge','90_system/project-candidates'])try{
     for(const path of await vault.files(dir))if(path.endsWith('.md')&&!isGeneratedIntact((await vault.read(path))!))issues.push(`生成物の手動変更・形式不正: ${path}`);
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
+  try{for(const path of await knowledgePaths(vault)){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
+  try{await readPolicies(config);}catch{issues.push('方針manifest・正本・停止記録の同期または集約が未完了です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}
   try { for(const path of await vault.files('90_system/conflicts'))issues.push(`生成物の競合: ${path}`); } catch {issues.push('競合フォルダ走査失敗');}
   try { const lock = await lockPath(config); for(const path of [lock, `${lock}.reap`]) {

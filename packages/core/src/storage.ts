@@ -124,6 +124,8 @@ export class Vault {
     await this.root();
     await this.withLock(async () => {
       for (const rel of VAULT_DIRS) await this.path(`${rel}/.check`, true);
+      const {policyInventory}=await import('./policy-manifest.js');
+      if(await this.read('90_system/policies/index.json')===undefined&&(await policyInventory(this)).length===0){const {rebuildPoliciesLocked}=await import('./policies.js');await rebuildPoliciesLocked(this.config,this);}
     });
   }
   async read(rel: string): Promise<string | undefined> {

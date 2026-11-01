@@ -23,7 +23,7 @@ test('resumeはプロジェクト未生成を不明とし、contextは対象外�
  const{config}=await setup();expect(await resume(config,'context-hub')).toContain('不明');
  const saved=await capture(config,{source:'cli',occurredAt:'2026-09-14T00:00:00Z',text:'対象の長文'.repeat(300),project:'context-hub'});
  await capture(config,{source:'cli',occurredAt:'2026-09-14T00:00:00Z',text:'無関係な非公開メモ'});
- const output=await context(config,'context-hub',600);expect(output.length).toBeLessThanOrEqual(600);expect(output).toContain(saved.inputId);expect(output).not.toContain('無関係な非公開メモ');expect(output).toContain('2026-09-14');expect(await resume(config,'unknown')).toContain('見つかりません');
+ const output=await context(config,'context-hub',1200);expect(output.length).toBeLessThanOrEqual(1200);expect(output).toContain(saved.inputId);expect(output).not.toContain('無関係な非公開メモ');expect(output).toContain('2026-09-14');expect(await resume(config,'unknown')).toContain('見つかりません');
 });
 test('生成NOWの出典を表示し自動領域の外の手動メモを再開に混ぜない',async()=>{
  const{config,vault}=await setup();await vault.write('10_projects/context-hub/NOW.md',markdown({project:'context-hub',generated_at:'2026-09-14T00:00:00Z',last_evidence_at:'2026-09-13T00:00:00Z',input_ids:['IN-01K5ABCDEFGHJKMNPQRSTVWXYZ']},'秘密の手動メモ\n<!-- ctx:auto:start -->\n# 現在地\n不明\n<!-- ctx:auto:end -->'));

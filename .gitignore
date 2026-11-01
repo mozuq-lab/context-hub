@@ -16,3 +16,13 @@ vault/
 .public-prep/
 backups/
 *.docx
+
+# AIツールの中間成果物・作業記録
+.agent-work/
+.superpowers/
+docs/superpowers/
+docs/reviews/
+docs/plans/
+docs/specs/
+docs/plan.md
+docs/decisions.md

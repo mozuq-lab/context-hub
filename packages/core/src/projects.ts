@@ -20,6 +20,7 @@ export async function addProject(config: HubConfig, value: Pick<Project, 'id' | 
   const vault = new Vault(config);
   return vault.withLock(async () => {
     if (!await vault.create(`10_projects/${project.id}/project.md`, markdown({ ...project }, `# ${project.title}\n\n人が保守するプロジェクト定義です。\n`))) throw new Error('プロジェクトは既に存在します');
+    const {rebuildPoliciesLocked}=await import('./policies.js');await rebuildPoliciesLocked(config,vault);
     return project;
   });
 }

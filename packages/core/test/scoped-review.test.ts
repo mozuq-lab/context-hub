@@ -1,0 +1,13 @@
+import {rm} from 'node:fs/promises';
+import {afterEach,expect,test} from 'vitest';
+import {scopedAiCandidate} from './review-fixtures.js';
+import {buildReviewIndex} from '../src/candidate-review.js';
+import {approve} from '../src/approvals.js';
+import {retireKnowledge} from '../src/knowledge-retirement.js';
+import {readKnowledge} from '../src/knowledge-scope.js';
+import {rebuildDashboard} from '../src/dashboard.js';
+import {hash} from '../src/storage.js';
+const roots:string[]=[];afterEach(async()=>{await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
+test.each([['one',[],'explicit'],[undefined,['one'],'inferred']] as const)('明示指定と単独推定を区別し採用先として提案する: %s',async(explicit,ids,source)=>{const f=await scopedAiCandidate(roots,explicit,[...ids]),index=await buildReviewIndex(f.config),item=index.items[0];expect(item.projectSuggestions).toMatchObject([{projectId:'one',source}]);expect(item.suggestedTarget).toMatchObject({scope:'project',projectId:'one'});expect(index.projects).toMatchObject([{id:'one',path:'10_projects/one/project.md',hash:hash((await f.vault.read('10_projects/one/project.md'))!)}]);});
+test.each([{ids:[]},{ids:['one','two']}])('不明・複数推定では共通へ自動提案しない: %j',async({ids})=>{const f=await scopedAiCandidate(roots,undefined,ids),item=(await buildReviewIndex(f.config)).items[0];expect(item.suggestedTarget).toBeUndefined();expect(item.projectSuggestions).toHaveLength(ids.length);});
+test('採用・停止の履歴へ範囲と効力を表示し依存hashに停止記録を含める',async()=>{const f=await scopedAiCandidate(roots,'one'),target={scope:'project' as const,projectId:'one',projectHash:hash((await f.vault.read('10_projects/one/project.md'))!)},d=await approve(f.config,f.id,f.hash,target),k=(await readKnowledge(f.vault,d.knowledgeId!))!;await retireKnowledge(f.config,k.id,hash(k.raw));await rebuildDashboard(f.config);const item=(await buildReviewIndex(f.config)).items[0];expect(item).toMatchObject({status:'approved',adoptedTarget:target,retired:true,reflected:true});expect(item.dependencies[`90_system/knowledge-retirements/KRET-${k.id.slice(4)}.json`]).toMatch(/^[a-f0-9]{64}$/);expect(await f.vault.read('HOME.md')).toContain('適用停止');expect(await f.vault.read('HOME.md')).toContain('project:one');});

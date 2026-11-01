@@ -13,3 +13,4 @@
 - CIと導入例へ個人のID・絶対パス・トークンを埋め込みません。公開前に履歴と著者情報を含む公開対象を確認します。
 
 基本検証はnpm ci、npm run check、npm test、npm run build、npm run demoです。OpenClaw導入環境でのcheck:sdkは追加の互換検査として行います。VaultをAIから使うルールはexamples/vault-instructionsにあります。
+- ツールが生成する設計・実装計画・途中レビュー・進捗ログなどの中間成果物は `.agent-work/` などのGit対象外領域へ保存し、コミットしません。`docs/superpowers/`・`docs/reviews/`・作業用の計画/判断ログも公開対象外です。README・利用手順・構成説明・現在の制限・最終的な検証状況は公開資料として整え、途中経過を残しません。

@@ -80,7 +80,7 @@ describe('整理の契約と安全な再処理', () => {
     await organize(config, new MockLlm([{ ...valid(), category: 'decision-candidate', knowledge_candidate: { kind: 'decision', claim: 'Markdownを正本にする', rationale: '移植しやすい' } }]));
     expect(await vault.files('30_knowledge')).toEqual([]); expect(await vault.files('90_system/approvals')).toEqual([]);
     const candidateId = `CAN-${saved.inputId.slice(3)}`; const listing = await listCandidates(config); expect(listing).toContain(saved.inputId);
-    const candidateHash = listing.match(/ハッシュ: ([0-9a-f]{64})/)![1]!; await approve(config, candidateId, candidateHash); expect(await vault.files('30_knowledge')).toHaveLength(1);
+    const candidateHash = listing.match(/ハッシュ: ([0-9a-f]{64})/)![1]!; await approve(config, candidateId, candidateHash,{scope:'global'}); expect(await vault.files('30_knowledge')).toHaveLength(1);
     const candidatePath = `90_system/candidates/${candidateId}.md`; const approvedContent = await vault.read(candidatePath); await rm(path.join(config.vaultPath, `90_system/receipts/${saved.inputId}.json`));
     const rerun = await organize(config, new MockLlm([{ ...valid(), knowledge_candidate: { kind: 'decision', claim: '内容を勝手に変更', rationale: '再処理' } }]));
     expect(await vault.read(candidatePath)).toBe(approvedContent); expect(rerun.conflicts).toHaveLength(1);
