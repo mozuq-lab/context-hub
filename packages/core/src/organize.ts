@@ -79,15 +79,27 @@ async function loadState(config: HubConfig): Promise<OrganizeState> {
   return { chains, inputs: chains.flatMap(c => [c.root, ...c.revisions]), receipts, byId: new Map(receipts.map((receipt) => [receipt.input_id, receipt])), projects: await readProjects(config) };
 }
 /** ロック内で確定した整理対象。新規はロック外でモデルを呼び、journalがあれば呼ばずに確定する。 */
-interface OrganizePlan { chain: CorrectionChain; input: Input; projects: Project[]; registry: string; receipt: Receipt; resumed: boolean; policyText: string }
+interface OrganizePlan { chain: CorrectionChain; input: Input; projects: Project[]; registry: string; receipt: Receipt; resumed: boolean; policyText: string; policyRevision?: string }
+async function policyRevision(config: HubConfig, projectId: string | undefined): Promise<string | undefined> {
+  try { return (await readPolicies(config, projectId)).revision; } catch { return undefined; }
+}
 
 /**
  * 整理はorganizeロックで実行全体を排他し、Vaultのwriterロックは対象選択・確定の短い区間だけ取得する。
- * モデル呼び出し中もcapture・承認・受付を待たせない。待機中に根拠・最新訂正・プロジェクト定義が変わった対象は書き込まず、次回の実行に回す。
+ * モデル呼び出し中もcapture・承認・受付を待たせない。待機中に最新訂正・プロジェクト定義・方針が変わった対象は書き込まず、次回の実行に回す。
  */
 export async function organize(config: HubConfig, llm: LlmClient, options: OrganizeOptions = {}): Promise<OrganizeRunResult> {
   optionsSchema.parse(options); const vault = new Vault(config); const started = Date.now();
   const matchesId = (chain: CorrectionChain) => !options.id || chain.latest.id === options.id || chain.root.id === options.id;
+  // writerロック内でだけ呼ぶ。00_inboxの一覧が変わらなければ入力と訂正チェーンを再利用し、対象ごとの全体走査を避ける。
+  // 原文は不変で、対象の根拠は確定時にassertEvidenceで読み直す。receiptは整理ロック中この実行だけが書く。
+  let cache: (OrganizeState & { key: string }) | undefined;
+  const current = async (): Promise<OrganizeState & { key: string }> => {
+    const key = hash((await vault.files('00_inbox')).join('\n'));
+    if (cache?.key === key) { cache.projects = await readProjects(config); return cache; }
+    return cache = { ...(await loadState(config)), key };
+  };
+  const remember = (receipt: Receipt) => { if (cache) { cache.byId.set(receipt.input_id, receipt); cache.receipts = [...cache.byId.values()]; } };
   const rebuildAffected = async (state: OrganizeState, outcome: OrganizeRunResult, chain: CorrectionChain, current: Receipt[], generatedAt: string) => {
     const { chains, receipts, inputs, projects } = state, projectIds = new Set<string>();
     for(const records of [receipts,current])for(const unit of await applyAssociations(config,effectiveFromChains(chains,records),projects))if(unit.chain.root.id===chain.root.id){if(unit.chain.root.project)projectIds.add(unit.chain.root.project);if(unit.receipt)for(const id of associatedProjects(unit.chain.root,unit.receipt,config))projectIds.add(id);}
@@ -101,7 +113,7 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
       let recovered=options.id?0:await recoverProjectApprovalsLocked(config,vault,budget,options.dryRun);
       if(!options.id)recovered+=await recoverKnowledgeApprovalsLocked(config,vault,budget-recovered,options.dryRun);
       if(!options.dryRun)await rebuildPoliciesLocked(config,vault);
-      const { chains, inputs, byId } = await loadState(config);
+      const { chains, inputs, byId } = await current();
       if (options.id && !inputs.some((input) => input.id === options.id)) throw new Error('入力が見つかりません');
       const journals = new Set<string>();
       for (const chain of chains) {
@@ -120,7 +132,7 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
     });
     for (const rootId of options.dryRun ? [] : selected) {
       const plan = await vault.withLock(async (): Promise<OrganizePlan | undefined> => {
-        const { chains, byId, projects } = await loadState(config);
+        const { chains, byId, projects } = await current();
         const chain = chains.find(c => c.root.id === rootId), input = chain?.latest;
         // 選択後に訂正が届いた、または完了済みになった対象は次回の実行に任せる。
         if (!chain || !input || !outcome.inputIds.includes(input.id) || byId.get(input.id)?.status === 'organized') return undefined;
@@ -135,7 +147,8 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         receipt.project_registry_hash=registry;
         if(chain.revisions.length)Object.assign(receipt,{root_input_id:chain.root.id,evidence_ids:[chain.root,...chain.revisions].map(i=>i.id),evidence_hash:chain.evidenceHash});
         // 方針はwriterロック内で読み、ロック外の書き込み途中の状態をモデルへ渡さない。
-        return { chain, input, projects, registry, receipt, resumed: false, policyText: formatPolicies(await readPolicies(config,chain.root.project)) };
+        const policies = await readPolicies(config,chain.root.project);
+        return { chain, input, projects, registry, receipt, resumed: false, policyText: formatPolicies(policies), policyRevision: policies.revision };
       });
       if (!plan) { outcome.skipped++; continue; }
       const { input, receipt } = plan;
@@ -145,18 +158,20 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         catch (error) { receipt.status = 'failed'; receipt.error = error instanceof InvalidOrganizeOutput ? 'invalid-output' : error instanceof LlmTimeout ? 'timeout' : error instanceof PromptTooLargeError ? 'prompt-too-large' : 'llm-error'; }
       }
       const committed = await vault.withLock(async (): Promise<boolean> => {
-        const state = await loadState(config), { byId, projects } = state;
+        const state = await current(), { byId, projects } = state;
         const chain = state.chains.find(c => c.root.id === plan.chain.root.id);
         // モデル待機中の訂正・プロジェクト定義の変更・別実行による確定を検出し、古い結果を書かない。
         if (!chain || chain.latest.id !== input.id || projectRegistryHash(projects) !== plan.registry || byId.get(input.id)?.status === 'organized'
           || (!plan.resumed && await vault.read(`90_system/receipts/pending/${input.id}.json`) !== undefined)
-          || (!plan.resumed && (byId.get(input.id)?.attempts ?? 0) + 1 !== receipt.attempts)) return false;
+          || (!plan.resumed && (byId.get(input.id)?.attempts ?? 0) + 1 !== receipt.attempts)
+          // 待機中に採用・適用停止された方針で作った結果は使わない。
+          || (!plan.resumed && await policyRevision(config, chain.root.project) !== plan.policyRevision)) return false;
         // 原文は不変。待機中の書き換えは競合ではなく整合性違反として停止する。
         await assertInputHash(vault, input, receipt.input_hash);
         await assertEvidence(vault,plan.chain);
         if (chain.evidenceHash !== plan.chain.evidenceHash) throw new Error('訂正根拠のハッシュが一致しません');
         if (receipt.status === 'failed') {
-          await vault.write(`90_system/receipts/${input.id}.json`, `${JSON.stringify(receipt, null, 2)}\n`); byId.set(input.id, receipt); await rebuildAffected(state,outcome,chain,[...byId.values()],receipt.organized_at);outcome.failed++; return true;
+          await vault.write(`90_system/receipts/${input.id}.json`, `${JSON.stringify(receipt, null, 2)}\n`); remember(receipt); await rebuildAffected(state,outcome,chain,[...byId.values()],receipt.organized_at);outcome.failed++; return true;
         }
         // モデル出力の検証後、派生ファイルより先に同じ結果・試行回数・生成日時を耐久化する。
         if (!plan.resumed && !await vault.create(`90_system/receipts/pending/${input.id}.json`, `${JSON.stringify(receipt, null, 2)}\n`)) throw new Error(`処理journalが競合しました: ${input.id}`);
@@ -184,41 +199,44 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         await assertEvidence(vault,chain);
         await assertInputHash(vault, input, receipt.input_hash);
         await vault.write(`90_system/receipts/${input.id}.json`, `${JSON.stringify(receipt, null, 2)}\n`);
-        outcome.processed++; return true;
+        remember(receipt); outcome.processed++; return true;
       });
       if (!committed) outcome.skipped++;
     }
+    // 再関連付けの対象は1回のスナップショットで選び、モデルを呼ぶ対象だけを準備する。
     let remaining=budget-recovered-selected.length;
-    for(const listed of await vault.withLock(() => readEffectiveInputs(config))){
-      if(remaining<=0)break;
-      if(!matchesId(listed.chain))continue;
-      const step = await vault.withLock(async (): Promise<AssociationPlan | undefined> => {
-        const state = await loadState(config), unit = (await readEffectiveInputs(config)).find(e => e.chain.root.id === listed.chain.root.id);
-        if (!unit || !matchesId(unit.chain)) return undefined;
+    const associations = await vault.withLock(async () => {
+      const state = await current(), plans: AssociationPlan[] = [];
+      for(const unit of await readEffectiveInputs(config)){
+        if(remaining<=0)break;
+        if(!matchesId(unit.chain))continue;
         const saved=await readAssociation(vault,unit,state.projects);
         if(saved?.status==='associated'&&!await associationViewsComplete(vault,saved)){
           remaining--;outcome.inputIds.push(unit.chain.root.id);
-          if(options.dryRun)return undefined;
+          if(options.dryRun)continue;
           await rebuildAffected(state,outcome,unit.chain,[...state.byId.values()],saved.associated_at);
           await markAssociationViewsCompleteLocked(vault,saved);
-          outcome.processed++;outcome.recovered=(outcome.recovered??0)+1;return undefined;
+          outcome.processed++;outcome.recovered=(outcome.recovered??0)+1;continue;
         }
-        if(!await associationEligible(config,vault,unit,state.projects,options.retryFailed))return undefined;
+        if(!await associationEligible(config,vault,unit,state.projects,options.retryFailed))continue;
         remaining--;outcome.inputIds.push(unit.chain.root.id);
-        if(options.dryRun)return undefined;
+        if(options.dryRun)continue;
         const plan=await prepareAssociationLocked(config,vault,unit,state.projects,{retryFailed:options.retryFailed});
-        return 'prompt' in plan ? plan : undefined;
-      });
-      if (!step) continue;
-      // writerロックの外でモデルを呼び、確定時に根拠と定義を再検査する。
-      const record = await runAssociation(config, llm, step);
+        if('prompt' in plan)plans.push(plan);
+      }
+      return { plans, key: state.key };
+    });
+    for (const plan of associations.plans) {
+      // writerロックの外でモデルを呼び、確定時に根拠・定義・方針を再検査する。
+      const record = await runAssociation(config, llm, plan);
       await vault.withLock(async () => {
-        const result = await commitAssociationLocked(config, vault, step, record);
-        if (!result) { outcome.skipped++; return; }
+        const state = await current();
+        const result = await commitAssociationLocked(config, vault, plan, record, { inboxUnchanged: state.key === associations.key });
+        // 対象外になった入力は開始時のskippedに含まれるため、ここでは数えない。
+        if (!result) return;
         if(result.status==='failed'){outcome.failed++;return;}
         outcome.processed++;outcome.reassociated=(outcome.reassociated??0)+1;
-        const state = await loadState(config);
-        await rebuildAffected(state,outcome,step.effective.chain,[...state.byId.values()],result.associated_at);
+        await rebuildAffected(state,outcome,plan.effective.chain,[...state.byId.values()],result.associated_at);
         await markAssociationViewsCompleteLocked(vault,result);
       });
     }

@@ -45,6 +45,8 @@ async function materialize(vault:Vault,record:Decision):Promise<void>{
  if(marker!==undefined){const done=materializedSchema.parse(JSON.parse(marker)),current=await vault.read(path);if(done.decision_id!==record.id||done.decision_hash!==hash(JSON.stringify(record))||done.project_id!==project.id||current===undefined||projectSchema.parse(parseMarkdown(current).meta).id!==project.id)throw new Error('実体化済みの定義または承認記録が不正です');return;}
  if(!await vault.create(path,record.project_text)&&await vault.read(path)!==record.project_text)throw new Error('承認済みプロジェクト定義が競合しています。doctorで確認してください');
  await vault.create(materializedPath(record),JSON.stringify({schema_version:1,decision_id:record.id,decision_hash:hash(JSON.stringify(record)),project_id:project.id})+'\n');
+ // project.mdは方針manifestの正本に含まれる。addProjectと同じく集約し、後続のreadPoliciesを不一致にしない。
+ const {rebuildPoliciesLocked}=await import('./policies.js');await rebuildPoliciesLocked(vault.config,vault);
 }
 export async function saveProjectCandidateLocked(config:HubConfig,vault:Vault,chain:CorrectionChain,receipt:Receipt):Promise<string|undefined>{
  const proposal=receipt.result?.project_proposal;if(!proposal)return undefined;

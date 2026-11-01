@@ -6,7 +6,8 @@ import { defaultConfig } from '../src/config.js';
 import { capture } from '../src/capture.js';
 import { correctInput } from '../src/corrections.js';
 import { doctor } from '../src/doctor.js';
-import { addProject } from '../src/projects.js';
+import { addProject, readProjects } from '../src/projects.js';
+import { decideProject, listProjectCandidates } from '../src/project-proposals.js';
 import { Vault } from '../src/storage.js';
 import { organize } from '../src/organize.js';
 import { MockLlm } from '../src/llm.js';
@@ -69,6 +70,34 @@ describe('モデル呼び出し中はVaultのwriterロックを保持しない',
     expect(await new Vault(config).read(`90_system/receipts/${saved.inputId}.json`)).toBeUndefined();
     expect((await organize(config, new MockLlm())).processed).toBe(1);
   }, 10_000);
+
+  test('モデル待機中にプロジェクト候補が承認されても整理は中断しない', async () => {
+    const config = await setup();
+    const proposal = { title: '家庭菜園', aliases: ['菜園'], keywords: ['栽培'], rationale: '継続した活動の記録' };
+    await capture(config, { source: 'cli', occurredAt: '2026-10-03T10:00:00Z', text: '家庭菜園を始めたい' });
+    await organize(config, new MockLlm([{ ...valid(), project_proposal: proposal }]));
+    const [candidate] = await listProjectCandidates(config);
+    await add(config, '一件目'); await add(config, '二件目');
+    const { llm, started, release } = pausedLlm();
+    const running = organize(config, llm); await started;
+    await decideProject(config, { candidateId: candidate.candidateId, expectedHash: candidate.candidateHash, confirmationToken: candidate.confirmationToken, action: 'approve', source: 'quickadd', sourceEventId: 'REQ-' + 'a'.repeat(32), confirmed: true });
+    release();
+    // 以前は承認後の方針manifest不一致で整理全体が例外になっていた。
+    await expect(running).resolves.toBeDefined();
+    expect((await readProjects(config)).map(p => p.title)).toEqual(['家庭菜園']);
+  }, 20_000);
+
+  test('処理対象がない整理は入力数に比例した回数しかVaultを走査しない', async () => {
+    const config = await setup();
+    config.organize.maxItemsPerRun = 100;
+    for (let i = 0; i < 30; i++) await add(config, `メモ${i}`);
+    await organize(config, new MockLlm());
+    const files = vi.spyOn(Vault.prototype, 'files');
+    const result = await organize(config, new MockLlm());
+    expect(result.processed).toBe(0);
+    // 入力ごとに全体を再走査すると30件で数百回になる。対象がなければ定数回で終わる。
+    expect(files.mock.calls.filter(([dir]) => dir === '00_inbox').length).toBeLessThan(15);
+  }, 30_000);
 
   test('整理同士は排他し、後続はモデルを呼ばずに停止する。doctorは整理中と報告する', async () => {
     const config = await setup(); await add(config); const { llm, started, release } = pausedLlm();
