@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { OpenClawInferLlm } from '../src/infer.js';
+import { MAX_PROMPT_ARG_BYTES, OpenClawInferLlm, PromptTooLargeError } from '../src/infer.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -76,5 +76,18 @@ describe('OpenClaw推論の子プロセス境界', () => {
   it('OSが起動前に引数を拒否しても本文を例外へ出さない', async () => {
     const client = await fixture('process.exit(0);');
     await expect(client.complete('秘密\0本文', opts)).rejects.toThrow('infer:spawn');
+  });
+  it('引数長の上限を超えるプロンプトは子プロセスを起動せずに拒否する', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ctx-infer-')); roots.push(root);
+    const marker = join(root, 'started'), executable = join(root, 'infer fixture');
+    await writeFile(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, '1');\nprocess.stdout.write(JSON.stringify({ok:true,capability:'model.run',outputs:[{text:'本文'}]}));\n`, { mode: 0o700 });
+    const client = new OpenClawInferLlm({ provider: 'openclaw-infer', executable, model: null, maxOutputChars: 4000 });
+    // 日本語は1文字3バイト。文字数ではなくUTF-8のバイト数で判定する。
+    const tooLarge = 'あ'.repeat(Math.floor(MAX_PROMPT_ARG_BYTES / 3) + 1);
+    await expect(client.complete(tooLarge, opts)).rejects.toBeInstanceOf(PromptTooLargeError);
+    await expect(readFile(marker, 'utf8')).rejects.toThrow();
+    const fits = 'あ'.repeat(Math.floor(MAX_PROMPT_ARG_BYTES / 3));
+    await expect(client.complete(fits, opts)).resolves.toEqual({ text: '本文' });
+    expect(await readFile(marker, 'utf8')).toBe('1');
   });
 });

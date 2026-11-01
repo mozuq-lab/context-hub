@@ -10,6 +10,7 @@ import { addProject } from '../src/projects.js';
 import { Vault } from '../src/storage.js';
 import { organize } from '../src/organize.js';
 import { MockLlm } from '../src/llm.js';
+import { PromptTooLargeError } from '../src/infer.js';
 import type { HubConfig, LlmCompletion, OrganizeResult } from '../src/types.js';
 
 const roots: string[] = [];
@@ -79,4 +80,14 @@ describe('モデル呼び出し中はVaultのwriterロックを保持しない',
     release(); await running;
     expect(second).not.toHaveBeenCalled();
   }, 20_000);
+});
+
+describe('プロンプトの引数長上限', () => {
+  test('上限超過は送信前の失敗としてreceiptへprompt-too-largeを記録する', async () => {
+    const config = await setup(); const saved = await add(config);
+    const result = await organize(config, { complete: async () => { throw new PromptTooLargeError(); } });
+    expect(result).toMatchObject({ processed: 0, failed: 1 });
+    const receipt = JSON.parse((await new Vault(config).read(`90_system/receipts/${saved.inputId}.json`))!);
+    expect(receipt).toMatchObject({ status: 'failed', error: 'prompt-too-large' });
+  });
 });

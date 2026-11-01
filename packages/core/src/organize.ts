@@ -13,6 +13,7 @@ import { hash,parseMarkdown,Vault } from './storage.js';
 import { associatedProjects, dateLabel, generatedMarkdown, readReceipts, receiptSchema, rebuildNowLocked, writeGeneratedLocked } from './views.js';
 import type { HubConfig, Input, LlmClient, LlmCompletion, OrganizeResult, Project, Receipt } from './types.js';
 import {recoverKnowledgeApprovalsLocked} from './approvals.js';
+import { PromptTooLargeError } from './infer.js';
 
 export interface OrganizeOptions { limit?: number; dryRun?: boolean; retryFailed?: boolean; id?: string }
 export interface OrganizeRunResult { processed: number; failed: number; skipped: number; conflicts: string[]; dryRun: boolean; inputIds: string[]; recovered?:number; reassociated?:number }
@@ -141,7 +142,7 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
       // writerロックの外でモデルを呼ぶ。実行側が報告したモデル名を記録し、報告がなければ設定値、それもなければ未検証の継承を明示する。
       if (!plan.resumed) {
         try { const classified = await classify(config, llm, input, plan.projects, plan.chain, plan.policyText); receipt.result = classified.result; if (classified.model) receipt.llm.model = classified.model; }
-        catch (error) { receipt.status = 'failed'; receipt.error = error instanceof InvalidOrganizeOutput ? 'invalid-output' : error instanceof LlmTimeout ? 'timeout' : 'llm-error'; }
+        catch (error) { receipt.status = 'failed'; receipt.error = error instanceof InvalidOrganizeOutput ? 'invalid-output' : error instanceof LlmTimeout ? 'timeout' : error instanceof PromptTooLargeError ? 'prompt-too-large' : 'llm-error'; }
       }
       const committed = await vault.withLock(async (): Promise<boolean> => {
         const state = await loadState(config), { byId, projects } = state;

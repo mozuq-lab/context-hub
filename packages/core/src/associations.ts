@@ -1,6 +1,7 @@
 import {readPolicies,formatPolicies} from './policies.js';
 import { z } from 'zod';
 import { Vault, hash } from './storage.js';
+import { PromptTooLargeError } from './infer.js';
 import { readProjects } from './projects.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import type { HubConfig, LlmClient, OrganizeResult, Project } from './types.js';
@@ -73,7 +74,7 @@ export async function runAssociation(config:HubConfig,llm:LlmClient,plan:Associa
    if(result.project_candidates.some(c=>!projects.some(p=>p.id===c.id))||new Set(result.project_candidates.map(c=>c.id)).size!==result.project_candidates.length)throw new Error('invalid-output');
    record.project_candidates=result.project_candidates;record.model=completion.model??record.model;
   }finally{if(timer)clearTimeout(timer);}
- }catch(error){record.status='failed';record.project_candidates=[];record.error=error instanceof Error&&error.message==='timeout'?'timeout':'association-error';}
+ }catch(error){record.status='failed';record.project_candidates=[];record.error=error instanceof Error&&error.message==='timeout'?'timeout':error instanceof PromptTooLargeError?'prompt-too-large':'association-error';}
  return record;
 }
 /** 根拠・最新訂正・プロジェクト定義がモデル呼び出し前と同じときだけ保存する。変わっていればundefinedを返し、次回の実行に任せる。 */
