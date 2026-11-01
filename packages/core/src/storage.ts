@@ -47,12 +47,18 @@ async function validateLockRoot(): Promise<void> {
   if (info && (info.uid !== process.getuid!() || (info.mode & 0o077) !== 0)) throw new Error('ロックディレクトリの所有者・権限が不正です');
 }
 
+/**
+ * writer: Vaultへ書き込む短い区間の排他。capture・承認・受付・整理の書き込みが共有する。
+ * organize: 整理実行全体の排他。モデル呼び出し中はwriterを解放し、整理同士の重複送信だけを防ぐ。
+ */
+export type LockScope = 'writer' | 'organize';
+export const LOCK_SCOPES: readonly LockScope[] = ['writer', 'organize'];
 /** statePathやTMPDIRが変わっても同じ実Vaultには同じ利用者ローカルロックを使う。 */
-export async function lockPath(config: HubConfig): Promise<string> {
+export async function lockPath(config: HubConfig, scope: LockScope = 'writer'): Promise<string> {
   const root = await vaultRoot(config);
   outsideVault(root, localLockRoot());
   await validateLockRoot();
-  return join(localLockRoot(), `${hash(root).slice(0, 24)}.lock`);
+  return join(localLockRoot(), `${hash(root).slice(0, 24)}${scope === 'organize' ? '.organize' : ''}.lock`);
 }
 async function ensureLockRoot(): Promise<void> {
   try { await mkdir(localLockRoot(), { mode: 0o700 }); }
@@ -72,8 +78,8 @@ async function readLockOwner(lock: string) {
 }
 
 /** 明示的な復旧専用。判断不能な所有者や回収残骸は手動確認に留める。 */
-export async function unlockVault(config: HubConfig): Promise<boolean> {
-  const lock = await lockPath(config), reaper = `${lock}.reap`;
+export async function unlockVault(config: HubConfig, scope: LockScope = 'writer'): Promise<boolean> {
+  const lock = await lockPath(config, scope), reaper = `${lock}.reap`;
   await ensureLockRoot();
   try { await mkdir(reaper, { mode: 0o700 }); }
   catch (error) {
@@ -182,15 +188,15 @@ export class Vault {
     }
     return files;
   }
-  async withLock<T>(fn: () => Promise<T>): Promise<T> {
+  async withLock<T>(fn: () => Promise<T>, scope: LockScope = 'writer'): Promise<T> {
     const root = await this.root();
     await mkdir(this.config.statePath, { recursive: true, mode: 0o700 });
     if ((await lstat(this.config.statePath)).isSymbolicLink()) throw new Error('状態ディレクトリのsymlinkは禁止です');
     outsideVault(root, await realpath(this.config.statePath));
-    const lock = await lockPath(this.config), reaper = `${lock}.reap`, token = randomUUID(), deadline = performance.now() + 10_000;
+    const lock = await lockPath(this.config, scope), reaper = `${lock}.reap`, token = randomUUID(), deadline = performance.now() + 10_000;
     await ensureLockRoot();
     while (true) {
-      if (performance.now() >= deadline) throw new Error('別のWriterまたはロック残骸があります。ctx doctorで確認してください');
+      if (performance.now() >= deadline) throw new Error(scope === 'organize' ? '別の整理処理が実行中か、整理ロックの残骸があります。ctx doctorで確認してください' : '別のWriterまたはロック残骸があります。ctx doctorで確認してください');
       if (await directoryInfo(reaper)) { await pause(20); continue; }
       try {
         await mkdir(lock, { mode: 0o700 });

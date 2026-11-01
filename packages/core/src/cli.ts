@@ -10,7 +10,7 @@ import { listProjectCandidates,decideProject } from './project-proposals.js';
 import { ingest } from './intake.js';
 import { runCycle } from './cycle.js';
 import { rebuildDashboard } from './dashboard.js';
-import { Vault, unlockVault } from './storage.js';
+import { Vault, unlockVault, LOCK_SCOPES } from './storage.js';
 import { addProject, readProjects } from './projects.js';
 import { find, recent, pending, resume, context } from './retrieve.js';
 import { doctor } from './doctor.js';
@@ -71,7 +71,7 @@ program.command('approve <id>').requiredOption('--hash <sha256>','候補一覧�
 program.command('reject <id>').requiredOption('--hash <sha256>','候補一覧で確認した内容ハッシュ').action(async(id,opts)=>output(await reject(await config(),id,opts.hash)));
 program.command('propose <claim>').addOption(new Option('--kind <kind>','候補の種別').choices(['knowledge','decision','preference']).default('knowledge')).option('--rationale <text>','根拠','人による候補作成').option('--supersedes <id>','置き換えるKNW-ID')
   .action(async(claim,opts)=>output(await propose(await config(),{claim,kind:opts.kind,rationale:opts.rationale,supersedes:opts.supersedes})));
-program.command('doctor').description('Vaultと処理記録を検査').option('--unlock','全Writer停止後、死亡PIDのロック残骸のみ回収').action(async opts=>{const c=await config();if(opts.unlock)await unlockVault(c);const result=await doctor(c);output(result);if(result.issues.length)process.exitCode=1;});
+program.command('doctor').description('Vaultと処理記録を検査').option('--unlock','全Writer停止後、死亡PIDのロック残骸のみ回収').action(async opts=>{const c=await config();if(opts.unlock)for(const scope of LOCK_SCOPES)await unlockVault(c,scope);const result=await doctor(c);output(result);if(result.issues.length)process.exitCode=1;});
 try { await program.parseAsync(); }
 catch (error) {
   // パス・本文・外部プロセスのstderrを例外から転記しない。
