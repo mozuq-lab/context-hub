@@ -27,6 +27,7 @@ Syncthingで新しいVaultを共有し、各端末は専用フォルダーで受
 | scripts/submit-input.mjs | _ContextHub/scripts/submit-input.mjs |
 | examples/quickadd/templates/ | _ContextHub/templates/ |
 | docs/prompts/file-input.md | _ContextHub/docs/file-input.md |
+| docs/prompts/policy-check.md | _ContextHub/docs/policy-check.md |
 | docs/prompts/handoff-summary.md | _ContextHub/docs/handoff-summary.md |
 | examples/vault-instructions/AGENTS.md | AGENTS.md |
 | examples/vault-instructions/CLAUDE.md | CLAUDE.md |
