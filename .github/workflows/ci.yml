@@ -33,10 +33,14 @@ jobs:
       - run: npm audit --audit-level=moderate
 
   # 本体の変更がFlutterクライアントの読取・書込protocolを壊さないかを、クライアントの既定ブランチで検査する。
-  # クライアントの固定submoduleの代わりにこのcommitを置き、fixtureの形式比較・protocol検査を含むDartテストを実行する。
+  # クライアントの固定submoduleの代わりにこのcommitを置き、Dartテストを実行する。テストはfixtureと本体出力の比較、
+  # Dartが保存した依頼を本体が受理する検査を含む。
   # 意図した形式変更で失敗した場合は、本体のmerge後にクライアント側のfixture再生成と読取の更新を行う。
   client-contract:
     runs-on: ubuntu-latest
+    # クライアントは固定submoduleに合わせてfixtureを持つため、意図した形式変更では本体のmerge後まで先に直せない。
+    # 失敗はPR上で互換性の注意として示し、本体のmergeは止めない。
+    continue-on-error: true
     timeout-minutes: 30
     env:
       FLUTTER_VERSION: '3.41.5'
@@ -60,11 +64,6 @@ jobs:
         run: |
           npm install --ignore-scripts --no-audit --no-fund
           npm run build:protocol
-      - name: fixtureの形式比較
-        working-directory: client
-        run: |
-          if [ -f scripts/check_fixture_drift.mjs ]; then node scripts/check_fixture_drift.mjs
-          else echo 'クライアントにfixture形式比較がまだありません。Dartテストだけを実行します。'; fi
       - name: Flutterの取得
         run: |
           git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
