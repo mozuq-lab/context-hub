@@ -31,3 +31,47 @@ jobs:
       - run: npm run build
       - run: npm run demo
       - run: npm audit --audit-level=moderate
+
+  # 本体の変更がFlutterクライアントの読取・書込protocolを壊さないかを、クライアントの既定ブランチで検査する。
+  # クライアントの固定submoduleの代わりにこのcommitを置き、fixtureの形式比較・protocol検査を含むDartテストを実行する。
+  # 意図した形式変更で失敗した場合は、本体のmerge後にクライアント側のfixture再生成と読取の更新を行う。
+  client-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FLUTTER_VERSION: '3.41.5'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mozuq-lab/context-hub-flutter-client
+          path: client
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: client/vendor/context-hub
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: protocol検査用に本体をビルド
+        working-directory: client
+        # 本体の依存がクライアントのlockfileと異なっても検査できるよう、ciではなくinstallを使う。
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run build:protocol
+      - name: fixtureの形式比較
+        working-directory: client
+        run: |
+          if [ -f scripts/check_fixture_drift.mjs ]; then node scripts/check_fixture_drift.mjs
+          else echo 'クライアントにfixture形式比較がまだありません。Dartテストだけを実行します。'; fi
+      - name: Flutterの取得
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Dartテスト
+        working-directory: client
+        run: |
+          flutter --disable-analytics
+          flutter pub get
+          flutter test
