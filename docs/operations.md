@@ -2,13 +2,14 @@
 
 ## 普段の確認
 
-HOMEで受領、整理待ち、失敗、競合を確認します。NOWは生成時点と最終根拠の日時を持つビューです。同期100%と本人の表示確認、AI内容の正しさはそれぞれ別に確認します。
+HOMEで受領、整理待ち、失敗、競合、停滞しているプロジェクトを確認します。数日あいたときは[REVIEW.md](project-lifecycle.md#ふりかえりreviewmd)で直近の変化を確認します。NOWは生成時点と最終根拠の日時を持つビューです。同期100%と本人の表示確認、AI内容の正しさはそれぞれ別に確認します。
 
 ```sh
 node packages/core/dist/cli.js --config "<設定ファイル>" doctor
 node packages/core/dist/cli.js --config "<設定ファイル>" pending
 node packages/core/dist/cli.js --config "<設定ファイル>" find "<検索語>"
 node packages/core/dist/cli.js --config "<設定ファイル>" context "<project-id>" --max-chars 6000
+node packages/core/dist/cli.js --config "<設定ファイル>" digest
 ```
 
 原文や生成物を手動で書き換える前に、訂正履歴と競合を確認してください。同期による削除はほかの端末にも伝わるため、同期だけをバックアップとして扱いません。

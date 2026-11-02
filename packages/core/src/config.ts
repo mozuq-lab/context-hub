@@ -15,7 +15,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
     capture: { maxInputChars: 8000, allowedSenderIds: [] },
     organize: { maxItemsPerRun: 20, maxAttempts: 3, timeoutSec: 60, projectThreshold: 0.7,
       llm: { provider: 'mock', model: null, maxOutputChars: 4000, executable: 'openclaw' } },
-    retrieve: { contextMaxChars: 6000, discordMaxChars: 1900 },
+    retrieve: { contextMaxChars: 6000, discordMaxChars: 1900, staleDays: 14, digestDays: 7 },
     logging: { dir: join(expandPath(statePath), 'logs'), retentionDays: 14 },
   };
 }
@@ -28,7 +28,7 @@ const configSchema = z.object({
     // 旧版の設定を読めるよう受け付けるが使わない。ロックは自動回収せず、ctx doctor --unlock で明示的に回収する。
     lockStaleSec: positive.optional(),
     llm: z.object({ provider: z.enum(['mock', 'openclaw-infer']), model: z.string().min(1).nullable(), maxOutputChars: positive.max(100_000), executable: z.string().min(1), agent: z.string().regex(/^[a-z0-9_-]+$/).optional(), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high']).optional() }).strict() }).strict(),
-  retrieve: z.object({ contextMaxChars: positive.min(200), discordMaxChars: positive.min(100).max(2000) }).strict(),
+  retrieve: z.object({ contextMaxChars: positive.min(200), discordMaxChars: positive.min(100).max(2000), staleDays: positive.max(3650).default(14), digestDays: positive.max(366).default(7) }).strict(),
   logging: z.object({ dir: z.string().min(1), retentionDays: positive.max(3650) }).strict(),
 }).strict();
 export function validateConfig(value: unknown): HubConfig {
