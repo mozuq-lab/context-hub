@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Vault, hash } from './storage.js';
 import { PromptTooLargeError } from './infer.js';
 import { readProjects } from './projects.js';
-import { candidateProjects } from './project-status.js';
+import { candidateProjects,lifecycleOf } from './project-status.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import type { HubConfig, LlmClient, OrganizeResult, Project } from './types.js';
 
@@ -20,8 +20,11 @@ export async function associationViewsComplete(vault:Vault,record:AssociationRes
 export async function markAssociationViewsCompleteLocked(vault:Vault,record:AssociationResult):Promise<void>{
  if(!await vault.create(viewPath(record),JSON.stringify(viewRecord(record))+'\n'))await associationViewsComplete(vault,record);
 }
+// 休止・完了への切替は帰属候補の提示だけを変える。再関連付けや既存の関連付けを失わないよう、登録簿hashでは進行中と同じに扱う。
+// 旧版の自由記述の状態はそのまま含め、既存の処理記録のhashを変えない。
+function registryStatus(p:Project):string{return lifecycleOf(p)==='active'?p.status:'active';}
 export function projectRegistryHash(projects:Project[]):string{
- return hash(JSON.stringify(projects.map(p=>({id:p.id,title:p.title,aliases:[...p.aliases].sort(),keywords:[...p.keywords].sort(),status:p.status})).sort((a,b)=>a.id.localeCompare(b.id))));
+ return hash(JSON.stringify(projects.map(p=>({id:p.id,title:p.title,aliases:[...p.aliases].sort(),keywords:[...p.keywords].sort(),status:registryStatus(p)})).sort((a,b)=>a.id.localeCompare(b.id))));
 }
 const pathFor=(effective:EffectiveInput,registry:string)=>`90_system/associations/${effective.chain.root.id}/${effective.chain.evidenceHash}.${registry}.json`;
 export async function readAssociation(vault:Vault,effective:EffectiveInput,projects:Project[]):Promise<AssociationResult|undefined>{
@@ -73,7 +76,7 @@ export async function runAssociation(config:HubConfig,llm:LlmClient,plan:Associa
    const completion=await Promise.race([llm.complete(plan.prompt,{timeoutSec:config.organize.timeoutSec,maxOutputChars:config.organize.llm.maxOutputChars,model:config.organize.llm.model}),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('timeout')),config.organize.timeoutSec*1000);})]);
    if(completion.text.length>config.organize.llm.maxOutputChars)throw new Error('invalid-output');
    const result=z.object({project_candidates:candidatesSchema}).strict().parse(JSON.parse(completion.text));
-   if(result.project_candidates.some(c=>!candidateProjects(projects).some(p=>p.id===c.id))||new Set(result.project_candidates.map(c=>c.id)).size!==result.project_candidates.length)throw new Error('invalid-output');
+   if(result.project_candidates.some(c=>!projects.some(p=>p.id===c.id))||new Set(result.project_candidates.map(c=>c.id)).size!==result.project_candidates.length)throw new Error('invalid-output');
    record.project_candidates=result.project_candidates;record.model=completion.model??record.model;
   }finally{if(timer)clearTimeout(timer);}
  }catch(error){record.status='failed';record.project_candidates=[];record.error=error instanceof Error&&error.message==='timeout'?'timeout':error instanceof PromptTooLargeError?'prompt-too-large':'association-error';}

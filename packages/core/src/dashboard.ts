@@ -38,7 +38,9 @@ export async function rebuildDashboard(config:HubConfig,options:{now?:Date}={}):
   const group=(name:'active'|'stale'|'inactive')=>listed.filter(x=>x.group===name).sort((a,b)=>name==='stale'?a.at-b.at:b.at-a.at).map(x=>x.row);
   const rows=group('active'),staleRows=group('stale'),inactiveRows=group('inactive');
   const projectSections=`## プロジェクト一覧\n${rows.join('\n')||(listed.length?'進行中で最近動いたプロジェクトはありません。':'プロジェクトはまだありません。')}${staleRows.length?`\n\n## 停滞しているプロジェクト（${staleRows.length}件）\n最終根拠から${config.retrieve.staleDays}日を超えて新しい入力がない進行中のプロジェクトです。再開するか、休止・完了にするかを判断してください。\n${staleRows.join('\n')}`:''}${inactiveRows.length?`\n\n## 休止・完了（${inactiveRows.length}件）\n${inactiveRows.join('\n')}`:''}`;
-  const reviewLink=await vault.read('REVIEW.md')!==undefined?`\n直近${config.retrieve.digestDays}日のふりかえり: [REVIEW.md](REVIEW.md)`:'';
+  const reviewRaw=await vault.read('REVIEW.md');let reviewDays=config.retrieve.digestDays;
+  if(reviewRaw!==undefined)try{const d=parseMarkdown(reviewRaw).meta.period_days;if(typeof d==='number'&&Number.isSafeInteger(d)&&d>0)reviewDays=d;}catch{/* 解析できないふりかえりは設定の日数で案内する。 */}
+  const reviewLink=reviewRaw!==undefined?`\n直近${reviewDays}日のふりかえり: [REVIEW.md](REVIEW.md)`:'';
   const statuses:string[]=[];
   for(const path of await intakePaths(vault)){
    const ack=acks.find(a=>a.path===path);let changed=false;

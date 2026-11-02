@@ -32,7 +32,7 @@ test('期間内の入力・NOWの変化・持ち越しの未解決をまとめ�
   expect(text).toContain('# 直近7日のふりかえり');
   expect(text).toContain('期間: 2026-10-26 09:00 〜 2026-11-02 09:00 Asia/Tokyo');
   expect(text).toContain('- この期間に届いた入力: 3件（整理済み 3 / 整理待ち 0 / 整理失敗 0）');
-  expect(text).toContain('- プロジェクト未帰属: 1件');
+  expect(text).toContain('- プロジェクト未帰属（整理済みのうち）: 1件');
   const hub = text.slice(text.indexOf('### [集約ツール]'), text.indexOf('## 動きのなかった'));
   expect(hub).toContain('- 新しい入力: 2件（作業要約 1 / メモ 1）');
   expect(hub).toMatch(/- 現在地の変化（\[IN-[^\]]+\]\([^)]+\)）:\n {2}- 追加: 試作が動いた\n {2}- 外れた: 設計を終えた/);
@@ -40,7 +40,7 @@ test('期間内の入力・NOWの変化・持ち越しの未解決をまとめ�
   expect(hub).not.toContain('外れた: 試作する');
   expect(hub).toContain(`名前が決まっていない [${old.inputId}](${old.path})（13日前）`);
   expect(text.slice(text.indexOf('## 動きのなかった進行中のプロジェクト'))).toContain('[静かな計画](10_projects/calm/NOW.md) — 進行中 / 最終根拠: 2026-10-01 09:00（32日前）');
-  expect(text.slice(text.indexOf('## 休止・完了'))).toContain('[休止中の計画](10_projects/rest/NOW.md) — 休止');
+  expect(text.slice(text.indexOf('## 休止・完了'))).toContain('[休止中の計画](10_projects/rest/project.md) — 休止');
   expect(text).toContain('確認待ちの候補はありません。');
 });
 
@@ -74,4 +74,24 @@ test('cycleがふりかえりを生成し、HOMEからリンクする', async ()
   expect(await vault.read('REVIEW.md')).toContain('この期間に新しい入力のあったプロジェクトはありません。');
   expect(await vault.read('HOME.md')).toContain('直近7日のふりかえり: [REVIEW.md](REVIEW.md)');
   expect((await runCycle(config, new MockLlm(), { dryRun: true })).digest).toBeUndefined();
+});
+
+test('期間内に届いた訂正を入力として数え、開始時点の解釈と比べる', async () => {
+  const { config } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: '集約ツール' });
+  const { correctInput } = await import('../src/corrections.js');
+  const old = await capture(config, { source: 'file', kind: 'work-summary', project: 'hub', occurredAt: '2026-10-01T00:00:00Z', receivedAt: '2026-10-01T00:00:00Z', text: '## 現在地\n- [確認済み] 旧い状態' });
+  await organize(config, new MockLlm());
+  await correctInput(config, old.inputId, { source: 'cli', occurredAt: '2026-11-01T00:00:00Z', text: '## 現在地\n- [確認済み] 訂正後の状態' });
+  const { readInputs } = await import('../src/capture.js');
+  const correction = (await readInputs(config)).find(i => i.kind === 'correction')!;
+  const at = new Date(Date.parse(correction.received_at) + 60_000);
+  const pendingText = await buildDigest(config, { now: at });
+  expect(pendingText).toContain('- この期間に届いた入力: 1件（整理済み 0 / 整理待ち 1 / 整理失敗 0）');
+  expect(pendingText).toContain('訂正未反映');
+  await organize(config, new MockLlm());
+  const text = await buildDigest(config, { now: at });
+  expect(text).toContain('うち期間内の訂正 1');
+  expect(text).toMatch(/- 現在地の変化[^\n]*:\n {2}- 追加: 訂正後の状態\n {2}- 外れた: 旧い状態/);
+  expect(text).toContain('期間内に訂正');
 });

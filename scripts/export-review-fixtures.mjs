@@ -14,7 +14,7 @@ try{
  const no=await propose(config,{claim:'毎日すべてを削除する'});await reject(config,no.candidateId,no.hash);
  const old=await capture(config,{source:'cli',occurredAt:'2026-11-01T02:00:00Z',text:'一時的な方針'});await organize(config,new MockLlm([{category:'decision-candidate',summary:'方針候補',project_candidates:[],next_action_suggestions:[],extracted:{current:[],next:[],open:[]},knowledge_candidate:{kind:'knowledge',claim:'古い方針',rationale:'検討中'},new_project_hint:null}]));
  await correctInput(config,old.inputId,{source:'cli',occurredAt:'2026-11-01T03:00:00Z',text:'方針を見直す'});
- await vault.create('90_system/candidates/CAN-'+'0'.repeat(26)+'.md','同期途中の候補');await rebuildDashboard(config);
+ await vault.create('90_system/candidates/CAN-'+'0'.repeat(26)+'.md','同期途中の候補');await rebuildDashboard(config,{now:new Date('2026-11-02T00:00:00Z')});
  const files={};for(const dir of ['00_inbox','10_projects','20_ideas','30_knowledge','90_system','Input'])for(const path of await vault.files(dir))files[path]=await vault.read(path);
  files['POLICY.md']=await vault.read('POLICY.md');
  const index=await buildReviewIndex(config),target=resolve(process.argv[2]??'.demo/review-fixture.json');await mkdir(dirname(target),{recursive:true});

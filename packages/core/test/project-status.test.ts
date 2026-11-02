@@ -97,3 +97,51 @@ test('休止したプロジェクトは整理の候補に出さず、人が指�
   await organize(config, llm);
   expect(prompts.at(-1)).toContain('"id":"garden"');
 });
+
+test('別のプロジェクトを休止しても既存の関連付けを失わず、モデルを呼び直さない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  const saved = await capture(config, { source: 'quickadd', kind: 'work-summary', occurredAt: '2026-10-01T10:00:00Z', text: '## 現在地\n- [確認済み] 菜園を栽培中' });
+  await organize(config, new MockLlm());
+  await addProject(config, { id: 'garden', title: '家庭菜園', keywords: ['菜園'] }); await addProject(config, { id: 'other', title: '別件' });
+  await organize(config, new MockLlm());
+  const { resume } = await import('../src/retrieve.js');
+  expect(await resume(config, 'garden')).toContain('菜園を栽培中');
+  const forbidden: LlmClient = { complete: async () => { throw new Error('再呼出は禁止'); } };
+  for (const [id, status] of [['other', 'paused'], ['garden', 'done']] as const) {
+    await setProjectStatus(config, { projectId: id, status, expectedHash: hash((await definition(vault, id))!), source: 'cli' });
+    expect((await organize(config, forbidden)).failed).toBe(0);
+  }
+  expect(await resume(config, 'garden')).toContain('菜園を栽培中');
+  expect(await vault.files('90_system/associations')).toHaveLength(1);
+  void saved;
+});
+
+test('休止中のIDが返っても整理を失敗にしない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'garden', title: '家庭菜園' });
+  await setProjectStatus(config, { projectId: 'garden', status: 'paused', expectedHash: hash((await definition(vault, 'garden'))!), source: 'cli' });
+  await capture(config, { source: 'cli', occurredAt: '2026-11-01T00:00:00Z', text: '菜園のメモ' });
+  const result = { category: 'idea' as const, summary: '菜園', project_candidates: [{ id: 'garden', confidence: 0.9 }], next_action_suggestions: [], extracted: { current: [], next: [], open: [] }, knowledge_candidate: null, new_project_hint: null };
+  expect(await organize(config, new MockLlm([result]))).toMatchObject({ processed: 1, failed: 0 });
+});
+
+test('status行だけを書き換えて書式を保ち、同じ状態と同じ受付IDの別内容を拒否する', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  const path = '10_projects/garden/project.md';
+  const raw = '---\r\nid: garden # 固定ID\r\ntitle: "家庭菜園"\r\naliases: [菜園, 畑]\r\nkeywords: []\r\nstatus: active\r\n---\r\n# 家庭菜園\r\n';
+  await vault.write(path, raw);
+  await expect(setProjectStatus(config, { projectId: 'garden', status: 'active', expectedHash: hash(raw), source: 'cli' })).rejects.toThrow('既に進行中です');
+  const first = await setProjectStatus(config, { projectId: 'garden', status: 'paused', expectedHash: hash(raw), source: 'cli', sourceEventId: 'cli:garden:x:paused' });
+  expect(await vault.read(path)).toBe(raw.replace('status: active', 'status: paused'));
+  // 定義の書込後・受付記録前の停止を想定した再送は、同じ変更として扱う。
+  expect(await setProjectStatus(config, { projectId: 'garden', status: 'paused', expectedHash: hash(raw), source: 'cli', sourceEventId: 'cli:garden:x:paused' })).toEqual({ ...first, deduped: true });
+  await expect(setProjectStatus(config, { projectId: 'garden', status: 'done', expectedHash: hash(raw), source: 'cli', sourceEventId: 'cli:garden:x:paused' })).rejects.toThrow('別の状態変更');
+  expect(await readProjectStatusChanges(vault)).toHaveLength(1);
+});
+
+test('状態変更の受付記録は変更IDを必須にする', async () => {
+  const { intakeReceiptSchema } = await import('../src/intake.js');
+  const base = { schema_version: 1, request_id: 'REQ-' + 'a'.repeat(32), request_hash: 'a'.repeat(64), path: `Input/REQ-${'a'.repeat(32)}.md`, operation: 'project-status', status: 'accepted', received_at: '2026-11-02T00:00:00Z' };
+  expect(intakeReceiptSchema.safeParse({ ...base, result: { projectId: 'garden', status: 'paused', changeId: 'PST-' + '0'.repeat(26), deduped: false } }).success).toBe(true);
+  expect(intakeReceiptSchema.safeParse({ ...base, result: { inputId: 'IN-' + '0'.repeat(26), path: 'x', receivedAt: 'x', deduped: false } }).success).toBe(false);
+});

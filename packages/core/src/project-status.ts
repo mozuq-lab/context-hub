@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
-import { Vault, hash, markdown, parseMarkdown } from './storage.js';
+import { Vault, hash, parseMarkdown } from './storage.js';
 import { projectIdSchema, projectSchema } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig, Project } from './types.js';
@@ -41,9 +41,15 @@ export async function readProjectStatusChanges(vault: Vault): Promise<ProjectSta
   }
   return result.sort((a, b) => a.id.localeCompare(b.id));
 }
-function withStatus(raw: string, status: ProjectStatus): string {
-  const { meta, text } = parseMarkdown(raw);
-  return markdown({ ...meta, status }, text);
+/** 人が保守するfrontmatterのコメント・書式・改行を保つため、status行だけを置き換える。 */
+export function withStatus(raw: string, status: ProjectStatus): string {
+  const match = /^---(\r?\n)([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
+  if (!match) throw new Error('プロジェクト定義のfrontmatterを確認できません');
+  const eol = match[1], body = match[2], line = `status: ${status}`;
+  const next = /^status:.*$/m.test(body) ? body.replace(/^status:.*$/m, line) : `${body}${eol}${line}`;
+  const result = `---${eol}${next}${raw.slice(3 + eol.length + body.length)}`;
+  if (projectSchema.parse(parseMarkdown(result).meta).status !== status) throw new Error('状態を書き換えられません');
+  return result;
 }
 
 /**
@@ -69,6 +75,7 @@ export async function setProjectStatus(config: HubConfig, request: ProjectStatus
       }
     }
     if (current !== r.expectedHash) throw new Error('プロジェクト定義が変更されています。再確認してください');
+    if (project.status === r.status) throw new Error(`既に${projectStatusLabels[r.status]}です`);
     const next = withStatus(raw, r.status);
     const change: ProjectStatusChange = {
       schema_version: 1, id: `PST-${ulid()}`, project_id: r.projectId, from: project.status, to: r.status,
