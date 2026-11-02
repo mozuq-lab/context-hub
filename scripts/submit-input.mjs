@@ -6,7 +6,9 @@ import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
+let creationAttempted = false;
 try {
+  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node 22以上が必要です');
   const { values } = parseArgs({ options: { vault: { type: 'string' }, kind: { type: 'string', default: 'memo' }, file: { type: 'string' }, source: { type: 'string', default: 'mac-agent' }, project: { type: 'string' }, tool: { type: 'string' } } });
   if (!values.vault || !['memo','work-summary'].includes(values.kind)) throw new Error('保存先と入力種別を確認してください');
   if (!values.source.trim() || values.source.length > 200 || (values.tool?.length ?? 0) > 100 || (values.project && !/^[a-z0-9][a-z0-9-]{1,40}$/.test(values.project))) throw new Error('出典・ツール・プロジェクト指定が不正です');
@@ -24,8 +26,15 @@ try {
   if (!text.trim() || text.length > 8000) throw new Error('本文が空か8000文字を超えています');
   const id = `REQ-${randomBytes(16).toString('hex')}`;
   const meta = { schema_version: 1, request_id: id, operation: 'capture', source: values.source, occurred_at: new Date().toISOString(), kind: values.kind, ...(values.project ? { project: values.project } : {}), ...(values.tool ? { tool: values.tool } : {}) };
+  // openの試行以降は、失敗してもREQ未作成と断定しない。
+  creationAttempted = true;
   const handle = await open(join(folder, `${id}.md`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { await handle.writeFile(`---\n${JSON.stringify(meta)}\n---\n${text}`, 'utf8'); await handle.sync(); } finally { await handle.close(); }
   const dir = await open(folder, 'r'); try { await dir.sync(); } finally { await dir.close(); }
   process.stdout.write(JSON.stringify({ requestId: id, path: `Input/${id}.md`, status: '端末保存済み・同期と受付待ち' }) + '\n');
-} catch { process.stderr.write('受付保存に失敗しました。引数・本文・保存先を確認してください。\n'); process.exitCode = 1; }
+} catch {
+  process.stderr.write(creationAttempted
+    ? '受付保存の結果が不明です。再実行せず、今回のREQを確認してください。\n'
+    : '今回の受付ファイルは未作成です。Nodeの版・引数・本文・保存先を確認してください。\n');
+  process.exitCode = creationAttempted ? 1 : 2;
+}
