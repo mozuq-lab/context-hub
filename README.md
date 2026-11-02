@@ -9,6 +9,8 @@ AIとの作業要約や日々の思いつきをMarkdownに集め、数日後で�
 - メモ・AI作業要約を先に原文として保存し、出典と日時を保持する。
 - AIが分類・要約・関連候補を返し、コードが検証してアイデアやプロジェクトのNOWを更新する。
 - HOMEから受領・整理状態を確認し、検索や別AI向けのコンテキスト出力を使う。
+- 直近7日の[ふりかえり](docs/project-lifecycle.md#ふりかえりreviewmd)で、動いたプロジェクト・現在地の変化・持ち越しの未解決を確認する。
+- 止まっているプロジェクトをHOMEで見つけ、本人の操作で[休止・完了](docs/project-lifecycle.md)に切り替える。
 - 原文を残した訂正と、本人操作によるプロジェクト案・知識候補の承認を扱う。
 - [採用先付きの知識・方針](docs/policies.md)を共通/プロジェクトへ保存し、有効方針の読取・適用停止・AI接続用の設定差分を用意する。
 - Codex・Claude Codeから同期済みVaultを参照し、作業結果をInputへ追加する。
@@ -74,6 +76,7 @@ flowchart LR
 - [Codex・Claude CodeからVaultを参照する](docs/prompts/vault-access.md)
 - [AI作業要約の形式](docs/prompts/handoff-summary.md)
 - [候補の確認待ちを使う](docs/candidate-review.md)
+- [プロジェクトの状態とふりかえり](docs/project-lifecycle.md)
 - [開発と検証](docs/development.md)
 - [Mac・Androidアプリ（別リポジトリ）](https://github.com/mozuq-lab/context-hub-flutter-client)
 

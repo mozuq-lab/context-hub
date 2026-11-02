@@ -9,7 +9,7 @@ export interface HubConfig {
     maxItemsPerRun: number; maxAttempts: number; timeoutSec: number; projectThreshold: number; /** 非推奨・未使用。旧設定の互換のため受け付ける。 */ lockStaleSec?: number;
     llm: { provider: 'mock' | 'openclaw-infer'; model: string | null; maxOutputChars: number; executable: string; agent?: string; thinking?: ThinkingLevel };
   };
-  retrieve: { contextMaxChars: number; discordMaxChars: number };
+  retrieve: { contextMaxChars: number; discordMaxChars: number; /** 最終根拠からこの日数を超えた進行中プロジェクトをHOMEで停滞と表示する。 */ staleDays: number; /** ふりかえり（REVIEW.md）の集計日数。 */ digestDays: number };
   logging: { dir: string; retentionDays: number };
 }
 
