@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { inputIdSchema } from './capture.js';
 import { projectIdSchema } from './projects.js';
 import { projectStatusSchema } from './project-status.js';
+import { itemActionSchema, itemKeySchema } from './item-resolutions.js';
 import { parseMarkdown } from './storage.js';
 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
@@ -18,7 +19,9 @@ const knowledgeApprove=z.union([
 const knowledgeReject=z.object({...knowledgeBase,operation:z.literal('knowledge-reject')}).strict();
 const knowledgeRetire=z.object({...base,operation:z.literal('knowledge-retire'),target_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 const projectStatus=z.object({...base,operation:z.literal('project-status'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),status:projectStatusSchema,confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus]);
+const itemResolution=z.object({...base,operation:z.literal('item-resolution'),project_id:projectIdSchema,item_key:itemKeySchema,action:itemActionSchema,confirmed:z.literal(true),text:z.string()}).strict();
+const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss'),draft_id:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),draft_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, itemResolution, gitDraftDismiss]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
