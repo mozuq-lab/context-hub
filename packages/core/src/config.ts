@@ -32,12 +32,13 @@ const configSchema = z.object({
   retrieve: z.object({ contextMaxChars: positive.min(200), discordMaxChars: positive.min(100).max(2000), staleDays: positive.max(3650).default(14), digestDays: positive.max(366).default(7) }).strict(),
   logging: z.object({ dir: z.string().min(1), retentionDays: positive.max(3650) }).strict(),
   // 既定では無効。本人が明示したローカルリポジトリだけを読み取り専用で参照する。
-  git: z.object({ enabled: z.boolean(), repos: z.array(z.object({ projectId: projectIdSchema, path: z.string().refine(isAbsolute, '絶対パスが必要です'), name: z.string().min(1).max(100).regex(/^[^\r\n]+$/).optional() }).strict()).max(100),
-    maxCommits: positive.max(200), lookbackDays: positive.max(366) }).strict().default({ enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 }),
+  git: z.object({ enabled: z.boolean(), repos: z.array(z.object({ projectId: projectIdSchema, path: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です'), name: z.string().min(1).max(100).regex(/^[^\r\n]+$/).optional() }).strict()).max(100),
+    maxCommits: positive.max(200), lookbackDays: positive.max(366) }).strict().refine(g => new Set(g.repos.map(r => expandPath(r.path))).size === g.repos.length, '同じリポジトリを重ねて設定できません').default({ enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 }),
 }).strict();
 export function validateConfig(value: unknown): HubConfig {
   const c = configSchema.parse(value);
   c.vaultPath = expandPath(c.vaultPath); c.statePath = expandPath(c.statePath); c.logging.dir = expandPath(c.logging.dir);
+  c.git = { ...c.git, repos: c.git.repos.map(r => ({ ...r, path: expandPath(r.path) })) };
   for (const outside of [c.statePath, c.logging.dir]) {
     const rel = relative(c.vaultPath, outside);
     if (!rel || (!rel.startsWith('..' + '/') && rel !== '..' && !isAbsolute(rel))) throw new Error('ローカル状態・ログはVaultの外へ設定してください');

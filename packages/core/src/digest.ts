@@ -69,7 +69,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const mine = units.filter(u => u.projects.includes(project.id) && u.unit.receipt?.result);
     const fresh = recent.filter(u => u.projects.includes(project.id));
     // 期間内の本人の完了・解決報告。最後の記録が解決のままのものだけを数える。
-    const resolvedNow = activeResolutions(resolutions, project.id), closed = [...resolvedNow.values()].filter(r => inWindow(r.created_at));
+    const resolvedNow = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), project.id), closed = [...resolvedNow.values()].filter(r => inWindow(r.created_at));
     if (!fresh.length && !closed.length) { quiet.push(`- ${head}`); continue; }
     // NOWと同じ基準で、発生日時の順に最新の作業要約を選ぶ。期間開始時点は、その時点までに届いていた入力だけで決める。
     const byOccurred = (a: Unit, b: Unit) => Date.parse(a.input.occurred_at) - Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id);

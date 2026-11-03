@@ -20,6 +20,7 @@ export * from './dashboard.js';
 export * from './cycle.js';
 export * from './project-status.js';
 export * from './item-resolutions.js';
+export * from './git-drafts.js';
 export * from './digest.js';
 export * from './candidate-review.js';
 
