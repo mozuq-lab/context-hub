@@ -1,0 +1,54 @@
+# NOW項目の完了・解決と、コミット履歴からの作業記録
+
+NOWの「次の一手」「未解決」を本人の報告で片付ける機能と、開発リポジトリのコミット履歴から作業記録の下書きを作る機能です。どちらも原文と整理結果は書き換えません。モデルも使わず、本人の確認を経た操作だけを記録します。
+
+## NOW項目の完了・解決
+
+NOWの「次の一手」と「未解決」の各行は、作業要約で触れられない限り残り続けます。本人が「やった」「解決した」と報告すると、その行を該当欄から外して、NOW末尾の「解決済み・完了（本人報告）」へ移します。ふりかえり（REVIEW.md）でも、解決済みの項目を「期間より前からの未解決」から外し、期間内に報告した件数を表示します。
+
+項目は「プロジェクト・欄・根拠の入力ID・本文」で識別します。同じ本文でも、新しい作業要約で再び報告された場合は別の項目として再表示します。報告は根拠の入力に結び付き、後から届いた報告を打ち消さないためです。
+
+NOWを生成するたびに、項目とキーの一覧を`90_system/now-items/<project>.json`へ書きます。報告はこの一覧にある項目だけを受け付けます。CLIでは次のように操作します。
+
+```sh
+node packages/core/dist/cli.js --config "<設定ファイル>" item list <project-id>
+node packages/core/dist/cli.js --config "<設定ファイル>" item resolve <project-id> <key> --confirm
+node packages/core/dist/cli.js --config "<設定ファイル>" item reopen <project-id> <key> --confirm
+```
+
+[Mac・Androidアプリ](https://github.com/mozuq-lab/context-hub-flutter-client)の対応版では、NOWの項目から`operation: item-resolution`の受付ファイルとして依頼し、次の`cycle`（または`ingest`）で反映します。報告ごとに`90_system/item-resolutions/RES-*.json`を残し、項目ごとに最後の記録（解決または再開）を有効とします。記録の作成後、NOWの再生成前に停止しても、同じ受付IDで再送すると再生成だけを行います。
+
+AIは完了・解決を判断しません。AIに解決報告の受付ファイルを代作させないでください。
+
+## コミット履歴からの作業記録の下書き
+
+既定では無効です。設定ファイルで本人が指定したローカルリポジトリだけを、Mac miniで読み取り専用で参照します。
+
+```json
+{
+  "git": {
+    "enabled": true,
+    "repos": [{ "projectId": "context-hub", "path": "/Users/me/dev/context-hub", "name": "context-hub" }],
+    "maxCommits": 30,
+    "lookbackDays": 14
+  }
+}
+```
+
+`cycle`（または`git collect`）は、進行中のプロジェクトに設定したリポジトリごとに、まだ下書きにしていないコミットを`git log`で集め、下書きを1件作ります。対象は前回の下書きの最新コミット以降で、下書きがなければプロジェクトの最終根拠以降です。どちらも`lookbackDays`日より前には遡りません。マージコミットは除き、件名だけを使います。差分・作者・メールアドレスは読みません。gitはシェルを介さず固定引数で実行し、ページャとfsmonitorは使いません。読み取れないリポジトリがあっても、`cycle`は止めずに結果へ記録します。
+
+下書きは入力ではありません。`90_system/git-drafts/GDR-*.json`に保存し、HOMEの「作業記録の下書き」に表示します。未確認の下書きが残っているリポジトリでは、確認されるまで次の下書きを作りません。休止・完了のプロジェクトは対象外です。
+
+- アプリでは、下書きの本文を入力フォームに読み込み、本人が編集してメモまたは作業要約として保存します。保存した入力には`meta.git_draft`として下書きIDが付き、下書きは使用済みになります。
+- 見送る場合は`operation: git-draft-dismiss`の受付ファイルで依頼します。見送った下書きのコミットは、以後の下書きに含めません。
+- CLIでは本文をそのまま入力にするか、見送ります。
+
+```sh
+node packages/core/dist/cli.js --config "<設定ファイル>" git drafts
+node packages/core/dist/cli.js --config "<設定ファイル>" git use <GDR-ID> --hash <sha256> --kind memo --confirm
+node packages/core/dist/cli.js --config "<設定ファイル>" git dismiss <GDR-ID> --hash <sha256> --confirm
+```
+
+NOWの「現在地」「次の一手」は、最新の作業要約から作ります。下書きを作業要約として保存すると、そのときの次の一手が置き換わります。次の一手を書き足すか、メモとして保存してください。メモでも最終根拠として数えるので、停滞表示とふりかえりに反映されます。
+
+これは本人が指定したリポジトリのコミット件名を、本人の確認後に入力にする機能です。会話の自動収集ではありません。

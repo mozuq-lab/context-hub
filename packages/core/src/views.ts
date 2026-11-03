@@ -8,6 +8,7 @@ import { correctionNotice, effectiveFromInputs } from './effective-inputs.js';
 import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
+import { activeResolutions, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
 import type { HubConfig, Input, Receipt } from './types.js';
 
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -78,28 +79,38 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const summaries = evidence.filter(({ input }) => input.kind === 'work-summary'); const latest = summaries.at(-1);
   const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${dateLabel(input.occurred_at, config.timezone)} ${config.timezone} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${evidence.find(e=>e.input.id===input.id)?.notice ? ' '+evidence.find(e=>e.input.id===input.id)!.notice.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
+  // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
+  const resolved = activeResolutions(await readItemResolutions(vault), projectId), items = new Map<string, NowItem>(), done: string[] = [];
+  const entry = (section: ItemSection, text: string, input: Input, label = ''): string[] => {
+    const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key);
+    if (!items.has(key)) {
+      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null });
+      if (resolution) done.push(`- ${section === 'next' ? '完了' : '解決'}: ${label}${plain(text)} ${ref(input)} — 本人報告 ${dateLabel(resolution.created_at, config.timezone)} ${resolution.id}`);
+    }
+    return resolution ? [] : [row(text, input, label)];
+  };
   const current = latest?.result.extracted.current.filter((item) => item.status === 'confirmed').map((item) => row(item.text, latest.input)) ?? [];
-  const next = latest?.result.extracted.next.filter((item) => item.status === 'confirmed').map((item) => row(item.text, latest.input)) ?? [];
+  const next = latest?.result.extracted.next.filter((item) => item.status === 'confirmed').flatMap((item) => entry('next', item.text, latest.input)) ?? [];
   const proposals: string[] = []; const open: string[] = [];
   for (const item of evidence) {
     const { input, result } = item;
     if (result.category === 'task' && input.kind === 'memo' && (!latest || Date.parse(input.occurred_at) > Date.parse(latest.input.occurred_at))) proposals.push(row(result.summary, input, '分類候補task・要確認: '));
-    if (result.category === 'question') open.push(row(result.summary, input));
+    if (result.category === 'question') open.push(...entry('open', result.summary, input));
     for (const suggestion of result.next_action_suggestions) proposals.push(row(suggestion, input, 'AI提案: '));
     for (const value of [...result.extracted.current, ...result.extracted.next]) {
       if (value.status === 'proposal') proposals.push(row(value.text, input, '提案: '));
-      if (value.status === 'unverified') open.push(row(value.text, input, '未確認: '));
+      if (value.status === 'unverified') open.push(...entry('open', value.text, input, '未確認: '));
     }
-    for (const value of result.extracted.open) open.push(row(value.text, input, value.status === 'proposal' ? '提案・判断待ち: ' : '未解決: '));
+    for (const value of result.extracted.open) open.push(...entry('open', value.text, input, value.status === 'proposal' ? '提案・判断待ち: ' : '未解決: '));
   }
   if (latest) {
     const latestTexts = new Set(latest.result.extracted.current.filter((item) => item.status === 'confirmed').map((item) => item.text));
     for (const old of summaries.slice(0, -1)) for (const item of old.result.extracted.current) {
-      if (item.status === 'confirmed' && !latestTexts.has(item.text)) open.push(row(item.text, old.input, '過去の報告との差異（矛盾・時点差は未確認）: '));
+      if (item.status === 'confirmed' && !latestTexts.has(item.text)) open.push(...entry('open', item.text, old.input, '過去の報告との差異（矛盾・時点差は未確認）: '));
     }
   }
   const fallback = '- 不明（根拠となる入力がありません）';
-  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || fallback}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || '- 不明（未解決事項の確認が必要です）'}\n`;
+  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? '- 残っている次の一手はありません（完了報告済み）' : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? '- 残っている未解決はありません（解決報告済み）' : '- 不明（未解決事項の確認が必要です）')}\n${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}`;
   const relative = `10_projects/${projectId}/NOW.md`; const existing = await vault.read(relative);
   let before = '（手動領域: この領域は再生成しても保持されます）\n\n'; let after = '\n'; let oldMeta: Record<string, unknown> = {}; let conflict = false;
   if (existing !== undefined) {
@@ -111,6 +122,8 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   }
   const meta = { ...oldMeta, schema_version: 1, project: projectId, generated_by: { model: 'deterministic-writer', prompt_version: 1 }, generated_at: generatedAt, last_evidence_at: evidence.at(-1)?.input.occurred_at ?? null, input_ids: evidence.map(({ input }) => input.id), verified: false, generated_hash: `sha256:${hash(auto)}` };
   const content = markdown(meta, `${before}${autoStart}${auto}${autoEnd}${after}`);
+  // 項目一覧はNOWの手動編集と無関係に、常に最新の整理結果から書き直す。
+  await vault.write(nowItemsPath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_at: generatedAt, items: [...items.values()] }, null, 2) + '\n');
   if (conflict) {
     const conflictPath = `90_system/conflicts/NOW.${projectId}.${ulid()}.md`;
     if (!await vault.create(conflictPath, content)) throw new Error('NOWの退避ファイルが競合しました');

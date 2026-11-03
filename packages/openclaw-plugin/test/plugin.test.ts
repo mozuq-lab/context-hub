@@ -16,7 +16,8 @@ const config: HubConfig = {
   schema_version: 1, policy:{projectRoots:[]}, vaultPath: '/fixture/vault', statePath: '/fixture/state', timezone: 'Asia/Tokyo',
   capture: { maxInputChars: 8000, allowedSenderIds: [senderId] },
   organize: { maxItemsPerRun: 20, maxAttempts: 3, timeoutSec: 60, projectThreshold: 0.7, llm: { provider: 'mock', model: null, maxOutputChars: 4000, executable: '/unused' } },
-  retrieve: { contextMaxChars: 6000, discordMaxChars: 1900, staleDays: 14, digestDays: 7 }, logging: { dir: '/fixture/logs', retentionDays: 14 }
+  retrieve: { contextMaxChars: 6000, discordMaxChars: 1900, staleDays: 14, digestDays: 7 }, logging: { dir: '/fixture/logs', retentionDays: 14 },
+  git: { enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 }
 };
 const event: DispatchEvent = { channel: 'discord', content: '  日本語\nhttps://example.com/a?b=c\n', body: '[Discord envelope] 書き換えない', senderId, messageId: '100000000000000005', isGroup: true, timestamp: 1789360200000 };
 // 2026.9.4のDiscord resolveInboundConversationは通常チャンネルをchannel:<id>で返す。

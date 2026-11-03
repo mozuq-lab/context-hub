@@ -11,6 +11,8 @@ export interface HubConfig {
   };
   retrieve: { contextMaxChars: number; discordMaxChars: number; /** 最終根拠からこの日数を超えた進行中プロジェクトをHOMEで停滞と表示する。 */ staleDays: number; /** ふりかえり（REVIEW.md）の集計日数。 */ digestDays: number };
   logging: { dir: string; retentionDays: number };
+  /** 作業記録の下書きに使うローカルリポジトリ。本人が設定したものだけを読み取り専用で参照する。 */
+  git: { enabled: boolean; repos: { projectId: string; path: string; name?: string }[]; maxCommits: number; lookbackDays: number };
 }
 
 export interface CaptureRequest {

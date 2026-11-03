@@ -6,6 +6,7 @@ import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js'
 import { buildReviewIndex } from './candidate-review.js';
 import { lifecycleOf, projectStatusLabels } from './project-status.js';
 import { lastEvidenceAt, daysSince } from './dashboard.js';
+import { activeResolutions, itemKey, readItemResolutions } from './item-resolutions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
 
 const DAY = 86_400_000;
@@ -31,7 +32,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   const inWindow = (iso: string) => { const t = Date.parse(iso); return t > start.getTime() && t <= now.getTime(); };
   const before = (iso: string) => Date.parse(iso) <= start.getTime();
   const vault = new Vault(config), projects = await readProjects(config), effective = await readEffectiveInputs(config), receipts = await readReceipts(config);
-  const review = await buildReviewIndex(config);
+  const review = await buildReviewIndex(config), resolutions = await readItemResolutions(vault);
   const units: Unit[] = effective.map(unit => ({ input: unit.chain.root, unit, projects: unit.receipt ? associatedProjects(unit.chain.root, unit.receipt, config) : unit.chain.root.project ? [unit.chain.root.project] : [] }));
   // 訂正も入力として扱い、元の入力か訂正のどれかが期間内に届いたものを「届いた入力」に数える。
   const evidenceOf = (u: Unit) => [u.unit.chain.root, ...u.unit.chain.revisions];
@@ -67,7 +68,9 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     if (lifecycle !== 'active') { inactive.push(`- ${head}`); continue; }
     const mine = units.filter(u => u.projects.includes(project.id) && u.unit.receipt?.result);
     const fresh = recent.filter(u => u.projects.includes(project.id));
-    if (!fresh.length) { quiet.push(`- ${head}`); continue; }
+    // 期間内の本人の完了・解決報告。最後の記録が解決のままのものだけを数える。
+    const resolvedNow = activeResolutions(resolutions, project.id), closed = [...resolvedNow.values()].filter(r => inWindow(r.created_at));
+    if (!fresh.length && !closed.length) { quiet.push(`- ${head}`); continue; }
     // NOWと同じ基準で、発生日時の順に最新の作業要約を選ぶ。期間開始時点は、その時点までに届いていた入力だけで決める。
     const byOccurred = (a: Unit, b: Unit) => Date.parse(a.input.occurred_at) - Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id);
     const summaries = mine.filter(u => u.input.kind === 'work-summary').sort(byOccurred);
@@ -81,7 +84,11 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
       for (const text of change.added.slice(0, 10)) out.push(`  - 追加: ${clip(text)}`);
       for (const text of change.removed.slice(0, 10)) out.push(`  - 外れた: ${clip(text)}`);
     }
-    out.push('- 主な入力:');
+    if (closed.length) {
+      out.push(`- 期間内に完了・解決と報告した項目: ${closed.length}件`);
+      for (const r of closed.slice(-5).reverse()) out.push(`  - ${r.section === 'next' ? '完了' : '解決'}: ${clip(r.text)}（${label(r.created_at)} ${r.id}）`);
+    }
+    if (fresh.length) out.push('- 主な入力:');
     const lastReceived = (u: Unit) => Math.max(...evidenceOf(u).filter(i => inWindow(i.received_at)).map(i => Date.parse(i.received_at)));
     for (const u of [...fresh].sort((a, b) => lastReceived(b) - lastReceived(a)).slice(0, 5)) {
       const summary = u.unit.receipt?.result?.summary;
@@ -90,7 +97,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const carried = mine.filter(u => before(u.input.received_at)).sort(byOccurred).flatMap(u => {
       const result = u.unit.receipt!.result!;
       return [...(result.category === 'question' ? [result.summary] : []), ...result.extracted.open.map(i => i.text)].map(text => ({ text, input: u.input }));
-    });
+    }).filter(item => !resolvedNow.has(itemKey(project.id, 'open', item.input.id, item.text)));
     if (carried.length) {
       out.push(`- 期間より前からの未解決（解決済みかは未確認・古い順に最大5件 / 全${carried.length}件）:`);
       for (const item of carried.slice(0, 5)) out.push(`  - ${clip(item.text)} ${ref(item.input)}（${daysSince(item.input.occurred_at, now)}日前）`);

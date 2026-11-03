@@ -17,6 +17,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
       llm: { provider: 'mock', model: null, maxOutputChars: 4000, executable: 'openclaw' } },
     retrieve: { contextMaxChars: 6000, discordMaxChars: 1900, staleDays: 14, digestDays: 7 },
     logging: { dir: join(expandPath(statePath), 'logs'), retentionDays: 14 },
+    git: { enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 },
   };
 }
 const positive = z.number().int().min(1).max(1_000_000);
@@ -30,6 +31,9 @@ const configSchema = z.object({
     llm: z.object({ provider: z.enum(['mock', 'openclaw-infer']), model: z.string().min(1).nullable(), maxOutputChars: positive.max(100_000), executable: z.string().min(1), agent: z.string().regex(/^[a-z0-9_-]+$/).optional(), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high']).optional() }).strict() }).strict(),
   retrieve: z.object({ contextMaxChars: positive.min(200), discordMaxChars: positive.min(100).max(2000), staleDays: positive.max(3650).default(14), digestDays: positive.max(366).default(7) }).strict(),
   logging: z.object({ dir: z.string().min(1), retentionDays: positive.max(3650) }).strict(),
+  // 既定では無効。本人が明示したローカルリポジトリだけを読み取り専用で参照する。
+  git: z.object({ enabled: z.boolean(), repos: z.array(z.object({ projectId: projectIdSchema, path: z.string().refine(isAbsolute, '絶対パスが必要です'), name: z.string().min(1).max(100).regex(/^[^\r\n]+$/).optional() }).strict()).max(100),
+    maxCommits: positive.max(200), lookbackDays: positive.max(366) }).strict().default({ enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 }),
 }).strict();
 export function validateConfig(value: unknown): HubConfig {
   const c = configSchema.parse(value);
@@ -41,8 +45,8 @@ export function validateConfig(value: unknown): HubConfig {
   return c;
 }
 /** 設定ファイルへ上書きする値。入れ子は部分指定でよい。 */
-export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging'>> & {
-  capture?: Partial<HubConfig['capture']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
+export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git'>> & {
+  capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
   organize?: Partial<Omit<HubConfig['organize'], 'llm'>> & { llm?: Partial<HubConfig['organize']['llm']> };
 };
 export async function loadConfig(path?: string, overrides: ConfigOverrides = {}): Promise<HubConfig> {
@@ -61,6 +65,7 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
       llm: { ...defaults.organize.llm, ...raw.organize?.llm, ...overrides.organize?.llm } },
     retrieve: { ...defaults.retrieve, ...raw.retrieve, ...overrides.retrieve },
     logging: { ...defaults.logging, ...raw.logging, ...overrides.logging },
+    git: { ...defaults.git, ...raw.git, ...overrides.git },
   };
   try { return validateConfig(c); } catch { throw new Error('設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }
 }
