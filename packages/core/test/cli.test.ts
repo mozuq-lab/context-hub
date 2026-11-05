@@ -37,3 +37,15 @@ test('organize --thinking は推論CLIへ渡り、報告されたモデルをrec
  const argv=JSON.parse(await readFile(argvFile,'utf8'));expect(argv.slice(0,3)).toEqual(['infer','model','run']);expect(argv).toContain('--gateway');expect(argv.slice(-4)).toEqual(['--agent','hub','--thinking','low']);expect(argv).not.toContain('--model');
  const receipt=JSON.parse(await readFile(join(root,'vault/90_system/receipts',`${id}.json`),'utf8'));expect(receipt.llm).toEqual({provider:'openclaw-infer',model:'openai/gpt-6-astra',prompt_version:1});
 },15000);
+test('CLIで次の一手を完了にするとHOMEの次の一手からも外れる',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ expect((await cli(config,['project','add','hub','--title','集約ツール'])).code).toBe(0);
+ expect((await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-30T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n- [確認済み] 名前を決める\n')).code).toBe(0);
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const home=()=>readFile(join(root,'vault/HOME.md'),'utf8');
+ expect(await home()).toContain('  - 利用者に見せる');
+ const items=JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string;text:string}[];
+ const resolved=await cli(config,['item','resolve','hub',items.find(i=>i.text==='利用者に見せる')!.key,'--confirm']);expect(resolved.code).toBe(0);
+ expect(await home()).not.toContain('  - 利用者に見せる');
+ expect(await home()).toContain('  - 名前を決める');
+},15000);
