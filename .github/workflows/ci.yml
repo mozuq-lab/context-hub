@@ -73,19 +73,25 @@ jobs:
           log="$RUNNER_TEMP/fixture-drift.log"
           if node scripts/check_fixture_drift.mjs >"$log" 2>&1; then
             cat "$log"
-          else
-            cat "$log"
-            echo "::warning title=クライアントfixtureとの形式差分::本体の出力がクライアントのfixtureと異なります。意図した変更なら、本体のmerge後にクライアントのsubmoduleを更新してfixtureを再生成してください。詳細は実行サマリーを参照してください。"
-            {
-              echo '### クライアントfixtureとの形式差分（参考）'
-              echo
-              echo '本体の出力がクライアントのfixtureと異なります。意図した変更なら、本体のmerge後にクライアントのsubmoduleをこのcommitへ更新し、fixtureを再生成してください。このPRの失敗にはしていません。'
-              echo
-              echo '```'
-              cat "$log"
-              echo '```'
-            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          cat "$log"
+          # 生成スクリプトの失敗（本体APIの変更など）は形式差分ではなく、クライアントのfixture再生成が壊れているため失敗にする。
+          if ! grep -q 'fixtureが固定参照の本体の出力形式と一致しません' "$log"; then
+            echo '::error title=fixture生成の失敗::クライアントのfixture生成スクリプトが本体で実行できません。本体のAPI変更でクライアントの再生成が壊れていないか確認してください。'
+            exit 1
+          fi
+          echo "::warning title=クライアントfixtureとの形式差分::本体の出力がクライアントのfixtureと異なります。意図した変更なら、本体のmerge後にクライアントのsubmoduleを更新してfixtureを再生成してください。詳細は実行サマリーを参照してください。"
+          {
+            echo '### クライアントfixtureとの形式差分（参考）'
+            echo
+            echo '本体の出力がクライアントのfixtureと異なります。意図した変更なら、本体のmerge後にクライアントのsubmoduleをmerge後の本体のcommitへ更新し、fixtureを再生成してDart側の読取を確認してください。このPRの失敗にはしていません。'
+            echo
+            # 出力に```が含まれても閉じないよう、長いfenceを使う。
+            echo '~~~~~~~~~~'
+            cat "$log"
+            echo '~~~~~~~~~~'
+          } >>"$GITHUB_STEP_SUMMARY"
       - name: Dartテスト
         working-directory: client
         run: |
