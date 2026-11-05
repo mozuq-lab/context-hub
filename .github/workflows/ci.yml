@@ -33,13 +33,12 @@ jobs:
       - run: npm audit --audit-level=moderate
 
   # 本体の変更がFlutterクライアントの読取・書込protocolを壊さないかを、クライアントの既定ブランチで検査する。
-  # クライアントの固定submoduleの代わりにこのcommitを置き、Dartテストを実行する。テストはfixtureと本体出力の比較、
-  # Dartが保存した依頼を本体が受理する検査を含む。
-  # 意図した形式変更で失敗した場合は、本体のmerge後にクライアント側のfixture再生成と読取の更新を行う。
+  # クライアントの固定submoduleの代わりにこのcommitを置き、Dartテストを実行する。テストはDartが保存した依頼を本体が受理する検査を含む。
+  # fixtureと本体出力の比較は、本体の出力を変えるPRでは意図した変更でも必ず差分になり、本体のmerge後までクライアント側で直せない。
+  # そのため比較は失敗にせず警告と実行サマリーで示し、Dartテストからは除く。差分は本体のmerge後にクライアント側でfixtureを再生成して解消する。
   client-contract:
     runs-on: ubuntu-latest
-    # クライアントは固定submoduleに合わせてfixtureを持つため、意図した形式変更では本体のmerge後まで先に直せない。
-    # 失敗はPR上で互換性の注意として示し、本体のmergeは止めない。
+    # Dartテストの失敗は互換性の注意としてPR上に示し、本体のmergeは止めない。
     continue-on-error: true
     timeout-minutes: 30
     env:
@@ -68,9 +67,37 @@ jobs:
         run: |
           git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: fixture形式の比較（参考）
+        working-directory: client
+        run: |
+          log="$RUNNER_TEMP/fixture-drift.log"
+          if node scripts/check_fixture_drift.mjs >"$log" 2>&1; then
+            cat "$log"
+            exit 0
+          fi
+          cat "$log"
+          # 生成スクリプトの失敗（本体APIの変更など）は形式差分ではなく、クライアントのfixture再生成が壊れているため失敗にする。
+          if ! grep -q 'fixtureが固定参照の本体の出力形式と一致しません' "$log"; then
+            echo '::error title=fixture生成の失敗::クライアントのfixture生成スクリプトが本体で実行できません。本体のAPI変更でクライアントの再生成が壊れていないか確認してください。'
+            exit 1
+          fi
+          echo "::warning title=クライアントfixtureとの形式差分::本体の出力がクライアントのfixtureと異なります。意図した変更なら、本体のmerge後にクライアントのsubmoduleを更新してfixtureを再生成してください。詳細は実行サマリーを参照してください。"
+          {
+            echo '### クライアントfixtureとの形式差分（参考）'
+            echo
+            echo '本体の出力がクライアントのfixtureと異なります。意図した変更なら、本体のmerge後にクライアントのsubmoduleをmerge後の本体のcommitへ更新し、fixtureを再生成してDart側の読取を確認してください。このPRの失敗にはしていません。'
+            echo
+            # 出力に```が含まれても閉じないよう、長いfenceを使う。
+            echo '~~~~~~~~~~'
+            cat "$log"
+            echo '~~~~~~~~~~'
+          } >>"$GITHUB_STEP_SUMMARY"
       - name: Dartテスト
         working-directory: client
         run: |
           flutter --disable-analytics
           flutter pub get
-          flutter test
+          # fixture比較は前のstepで警告として実行済みのため除く。
+          mapfile -t tests < <(find test -name '*_test.dart' ! -name fixture_drift_test.dart | sort)
+          if [ "${#tests[@]}" -eq 0 ]; then echo '::error::Dartテストが見つかりません'; exit 1; fi
+          flutter test "${tests[@]}"
