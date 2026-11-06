@@ -54,6 +54,8 @@ export interface FindOptions {
   sort?: 'relevance' | 'newest';
   limit?: number;
   offset?: number;
+  /** 続きがあるときにCLIの --offset を案内する。チャット経由の呼び出しでは付けない。 */
+  pagingHint?: boolean;
 }
 /** 検索の期間指定を解釈する。日付だけなら日本時間の1日の始まり（endOfDayなら終わり）にする。 */
 export function parseFindTime(value: string, endOfDay = false): number {
@@ -70,7 +72,7 @@ export async function find(config: HubConfig, query: string, options: FindOption
   const tokens = query.normalize('NFKC').toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
   const kinds = options.kinds?.length ? new Set(options.kinds) : undefined;
   if (options.kinds?.some(k => !findKinds.includes(k))) throw new Error(`種類は ${findKinds.join(', ')} から指定してください`);
-  if (options.project !== undefined) projectIdSchema.parse(options.project);
+  if (options.project !== undefined && !projectIdSchema.safeParse(options.project).success) throw new Error('プロジェクトIDは英小文字・数字・ハイフンで指定してください');
   const since = options.since === undefined ? undefined : parseFindTime(options.since), until = options.until === undefined ? undefined : parseFindTime(options.until, true);
   if (since !== undefined && until !== undefined && since > until) throw new Error('期間の開始が終了より後になっています');
   const limit = options.limit ?? 50, offset = options.offset ?? 0;
@@ -90,13 +92,15 @@ export async function find(config: HubConfig, query: string, options: FindOption
     const estimated = new Set(unit.receipt ? associatedProjects(unit.chain.root,unit.receipt,config).filter(p => !owned.has(p)) : []);
     for (const input of [unit.chain.root,...unit.chain.revisions]) assigned.set(input.id,{owned,estimated});
   }
-  type Doc = { path:string; text:string; id:string; at:string; source:string; ids:string[]; kind:FindKind; owner?:string };
-  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind}));
+  // atは表示用、whenは期間と新しい順の判定用。NOWは最終根拠、アイデアは元のメモの発生日時で判断し、再生成や整理の遅れに左右されないようにする。
+  type Doc = { path:string; text:string; id:string; at:string; when:string; source:string; ids:string[]; kind:FindKind; owner?:string; retracted?:boolean };
+  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind}));
   for (const dir of ['20_ideas','30_knowledge','10_projects']) for(const path of await vault.files(dir)) {
     if (!path.endsWith('.md') || (dir === '10_projects' && !path.endsWith('/NOW.md') && !/^10_projects\/[^/]+\/knowledge\/KNW-[^/]+\.md$/.test(path))) continue;
     const {meta,text} = parseMarkdown((await vault.read(path))!);
     const kind: FindKind = dir === '20_ideas' ? 'idea' : path.endsWith('/NOW.md') ? 'now' : 'knowledge';
-    docs.push({path,text,id:String(meta.id ?? meta.project ?? path),at:String(meta.generated_at ?? meta.approved_at ?? ''),source:meta.verified === true ? '人の承認記録付き' : 'AI生成・未検証',ids:Array.isArray(meta.input_ids)?meta.input_ids.map(String):[],kind,...(dir === '10_projects' ? {owner:path.split('/')[1]} : {})});
+    const at=String(meta.generated_at ?? meta.approved_at ?? '');
+    docs.push({path,text,id:String(meta.id ?? meta.project ?? path),at,when:String((kind==='now'?meta.last_evidence_at:kind==='idea'?meta.occurred_at:undefined) ?? at),retracted:meta.retracted===true,source:meta.verified === true ? '人の承認記録付き' : 'AI生成・未検証',ids:Array.isArray(meta.input_ids)?meta.input_ids.map(String):[],kind,...(dir === '10_projects' ? {owner:path.split('/')[1]} : {})});
   }
   // プロジェクトとの関係。NOWとプロジェクト知識はフォルダーで確定し、アイデアは元の入力の帰属に従う。共通知識はどのプロジェクトにも含めない。
   const relation = (doc: Doc, project: string): 'owned' | 'estimated' | undefined => {
@@ -106,17 +110,18 @@ export async function find(config: HubConfig, query: string, options: FindOption
     if (links.some(l => l?.estimated.has(project))) return 'estimated';
     return undefined;
   };
-  const time = (doc: Doc) => Date.parse(doc.at) || 0;
+  const time = (doc: Doc) => Date.parse(doc.when) || 0;
   const hits = docs.map(doc=>{
     const normalized = doc.text.normalize('NFKC').toLocaleLowerCase();
     const score = !tokens.length ? 1 : tokens.every(t=>normalized.includes(t)) ? tokens.reduce((n,t)=>n+normalized.split(t).length-1,0) : 0;
     const related = options.project === undefined ? undefined : relation(doc,options.project);
     return { ...doc, score, related };
   }).filter(doc=>doc.score>0
-    && (kinds === undefined || kinds.has(doc.kind))
+    // 分類を取り消したアイデアは、種類での絞り込みではアイデアとして数えない。
+    && (kinds === undefined || (kinds.has(doc.kind) && !doc.retracted))
     && (options.project === undefined || doc.related !== undefined)
-    && (since === undefined || (Number.isFinite(Date.parse(doc.at)) && Date.parse(doc.at) >= since))
-    && (until === undefined || (Number.isFinite(Date.parse(doc.at)) && Date.parse(doc.at) <= until)))
+    && (since === undefined || (Number.isFinite(Date.parse(doc.when)) && Date.parse(doc.when) >= since))
+    && (until === undefined || (Number.isFinite(Date.parse(doc.when)) && Date.parse(doc.when) <= until)))
     .sort((a,b)=>(sort === 'relevance' ? b.score-a.score : 0) || time(b)-time(a) || a.path.localeCompare(b.path));
   const page = hits.slice(offset, offset+limit);
   const lines = page.map(doc=>{
@@ -130,6 +135,7 @@ export async function find(config: HubConfig, query: string, options: FindOption
   });
   if (!lines.length) return offset > 0 && hits.length ? `見つかりません（該当${hits.length}件。開始位置が件数を超えています）` : '見つかりません';
   const more = offset + page.length < hits.length;
+  if (!options.pagingHint) return lines.join('\n\n');
   return lines.join('\n\n') + (offset > 0 || more ? `\n\n該当${hits.length}件中 ${offset+1}〜${offset+page.length}件目${more ? `。続きは --offset ${offset+page.length}` : ''}` : '');
 }
 export async function resume(config: HubConfig, project: string): Promise<string> {

@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/config.js';
-import { Vault } from '../src/storage.js';
+import { Vault, markdown } from '../src/storage.js';
+import { correctInput } from '../src/corrections.js';
 import { capture } from '../src/capture.js';
 import { addProject } from '../src/projects.js';
 import { runCycle } from '../src/cycle.js';
@@ -63,16 +64,17 @@ test('件数と開始位置で続きを読み、範囲外は件数を示す', as
   const { config } = await setup();
   const all = ids(await find(config, '同期', { kinds: ['memo'] }));
   expect(all).toHaveLength(3);
-  const first = await find(config, '同期', { kinds: ['memo'], limit: 2 });
+  const first = await find(config, '同期', { kinds: ['memo'], limit: 2, pagingHint: true });
   expect(ids(first)).toEqual(all.slice(0, 2));
   expect(first).toContain('該当3件中 1〜2件目。続きは --offset 2');
-  const rest = await find(config, '同期', { kinds: ['memo'], limit: 2, offset: 2 });
+  const rest = await find(config, '同期', { kinds: ['memo'], limit: 2, offset: 2, pagingHint: true });
   expect(ids(rest)).toEqual(all.slice(2));
   expect(rest).toContain('該当3件中 3〜3件目');
   expect(rest).not.toContain('続きは');
   expect(await find(config, '同期', { kinds: ['memo'], offset: 5 })).toContain('開始位置が件数を超えています');
-  // 絞り込みなしで全件が1ページに収まる場合は、従来どおり件数の行を付けない。
-  expect(await find(config, 'トマト')).not.toContain('該当');
+  // チャット経由（案内なし）では、続きがあってもCLIのオプションを案内しない。
+  expect(await find(config, '同期', { kinds: ['memo'], limit: 2 })).not.toContain('該当');
+  expect(await find(config, 'トマト', { pagingHint: true })).not.toContain('該当');
 });
 
 test('不正な条件は検索前に止める', async () => {
@@ -82,7 +84,7 @@ test('不正な条件は検索前に止める', async () => {
   await expect(find(config, '同期', { since: '2026-09-14', until: '2026-09-13' })).rejects.toThrow('開始');
   await expect(find(config, '同期', { kinds: ['note' as never] })).rejects.toThrow('種類');
   await expect(find(config, '同期', { limit: 201 })).rejects.toThrow('表示件数');
-  await expect(find(config, '同期', { project: '../x' })).rejects.toThrow();
+  await expect(find(config, '同期', { project: '../x' })).rejects.toThrow('プロジェクトIDは英小文字');
   expect(parseFindTime('2026-09-14', true) - parseFindTime('2026-09-14')).toBe(86_400_000 - 1);
 });
 
@@ -101,4 +103,31 @@ test('CLIの絞り込みオプションを検索に渡す', async () => {
   const bad = await run(['find', '同期', '--until', 'yesterday']);
   expect(bad.code).toBe(1); expect(bad.err).toContain('期間');
   expect((await run(['find'])).err).toContain('検索語');
+});
+
+test('訂正・アイデア・知識の帰属と、NOWの期間は最終根拠で判断する', async () => {
+  const { config, owned, estimated } = await setup();
+  const vault = new Vault(config);
+  const fixed = await correctInput(config, owned.inputId, { source: 'cli', sourceEventId: 'fix', occurredAt: '2026-09-11T00:00:00Z', text: '同期の設計メモ（訂正）' });
+  const blocks = (await find(config, '同期', { project: 'context-hub' })).split('\n\n');
+  expect(blocks.find(b => b.includes(`[${fixed.inputId}](`))).not.toContain('AI推定');
+  expect(blocks.find(b => b.includes('[IDEA-'))).toContain('関連候補（AI推定、帰属未確定）');
+  expect(blocks.some(b => b.includes(`[${estimated.inputId}](`))).toBe(true);
+  // プロジェクトの知識は含め、共通の知識は含めない。
+  const knowledge = (id: string) => markdown({ schema_version: 1, id, approved_at: '2026-09-20T00:00:00Z', verified: true, input_ids: [] }, '同期は削除も伝える');
+  await vault.write('10_projects/context-hub/knowledge/KNW-01M2DSFVQMH65989604KSVE1PA.md', knowledge('KNW-01M2DSFVQMH65989604KSVE1PA'));
+  await vault.write('30_knowledge/KNW-01M2DSFVQMH65989604KSVE1PB.md', knowledge('KNW-01M2DSFVQMH65989604KSVE1PB'));
+  const scoped = await find(config, '削除', { project: 'context-hub' });
+  expect(scoped).toContain('KNW-01M2DSFVQMH65989604KSVE1PA');
+  expect(scoped).not.toContain('KNW-01M2DSFVQMH65989604KSVE1PB');
+  expect(await find(config, '削除', { kinds: ['knowledge'] })).toContain('KNW-01M2DSFVQMH65989604KSVE1PB');
+  // NOWは再生成時刻ではなく最終根拠（9月）で期間を判断する。
+  const now = await find(config, '', { project: 'garden', kinds: ['now'], until: '2026-09-30' });
+  expect(now).toContain('10_projects/garden/NOW.md');
+  expect(await find(config, '', { project: 'garden', kinds: ['now'], since: '2026-10-01' })).toBe('見つかりません');
+  // 分類を取り消したアイデアは種類の絞り込みに含めない。
+  const idea = (await vault.files('20_ideas'))[0]!;
+  await vault.write(idea, (await vault.read(idea))!.replace('category: idea', 'category: idea\nretracted: true'));
+  expect(await find(config, '同期', { kinds: ['idea'] })).toBe('見つかりません');
+  expect(await find(config, '同期')).toContain('[IDEA-');
 });
