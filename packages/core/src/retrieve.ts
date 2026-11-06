@@ -40,30 +40,97 @@ export async function pending(config: HubConfig): Promise<string> {
   }
   return lines.join('\n\n') || '見つかりません（未整理・失敗なし）';
 }
-export async function find(config: HubConfig, query: string): Promise<string> {
+export const findKinds = ['memo','work-summary','correction','idea','knowledge','now'] as const;
+export type FindKind = typeof findKinds[number];
+export interface FindOptions {
+  /** このContextHubプロジェクトに帰属・関連する記録だけにする。AI推定の関連候補は結果で区別する。 */
+  project?: string;
+  kinds?: FindKind[];
+  /** 日付（YYYY-MM-DD、日本時間の0時）またはタイムゾーン付き日時。この時点以降。 */
+  since?: string;
+  /** 日付（YYYY-MM-DD、日本時間のその日の終わりまで）またはタイムゾーン付き日時。この時点以前。 */
+  until?: string;
+  /** relevanceは一致数の多い順、newestは日時の新しい順。検索語がなければnewest。 */
+  sort?: 'relevance' | 'newest';
+  limit?: number;
+  offset?: number;
+}
+/** 検索の期間指定を解釈する。日付だけなら日本時間の1日の始まり（endOfDayなら終わり）にする。 */
+export function parseFindTime(value: string, endOfDay = false): number {
+  const date = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (date) {
+    const start = Date.parse(`${value}T00:00:00+09:00`);
+    if (!Number.isFinite(start) || new Date(start + 9*3600_000).toISOString().slice(0,10) !== value) throw new Error('期間はYYYY-MM-DDまたはタイムゾーン付き日時で指定してください');
+    return endOfDay ? start + 86_400_000 - 1 : start;
+  }
+  if (!/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Error('期間はYYYY-MM-DDまたはタイムゾーン付き日時で指定してください');
+  return Date.parse(value);
+}
+export async function find(config: HubConfig, query: string, options: FindOptions = {}): Promise<string> {
   const tokens = query.normalize('NFKC').toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length || query.length > 500) throw new Error('検索語は1〜500文字にしてください');
+  const kinds = options.kinds?.length ? new Set(options.kinds) : undefined;
+  if (options.kinds?.some(k => !findKinds.includes(k))) throw new Error(`種類は ${findKinds.join(', ')} から指定してください`);
+  if (options.project !== undefined) projectIdSchema.parse(options.project);
+  const since = options.since === undefined ? undefined : parseFindTime(options.since), until = options.until === undefined ? undefined : parseFindTime(options.until, true);
+  if (since !== undefined && until !== undefined && since > until) throw new Error('期間の開始が終了より後になっています');
+  const limit = options.limit ?? 50, offset = options.offset ?? 0;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new Error('表示件数は1〜200にしてください');
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('開始位置は0以上の整数にしてください');
+  const filtered = options.project !== undefined || kinds !== undefined || since !== undefined || until !== undefined;
+  if (query.length > 500 || (!tokens.length && !filtered)) throw new Error('検索語は1〜500文字にしてください（絞り込み条件があれば検索語は省略できます）');
+  const sort = options.sort ?? (tokens.length ? 'relevance' : 'newest');
+  if (sort !== 'relevance' && sort !== 'newest') throw new Error('並び順はrelevanceまたはnewestにしてください');
+  if (options.project !== undefined && !(await readProjects(config)).some(p => p.id === options.project)) return '見つかりません（プロジェクト未登録）';
   const vault = new Vault(config), inputs = await readInputs(config);
   const effective=await readEffectiveInputs(config);
-  const docs: { path:string; text:string; id:string; at:string; source:string; ids:string[] }[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id]}));
+  // 入力IDごとの帰属。本人が指定したプロジェクトは確定、整理結果の関連候補はAI推定として区別する。
+  const assigned = new Map<string,{ owned:Set<string>; estimated:Set<string> }>();
+  for (const unit of effective) {
+    const owned = new Set(unit.chain.root.project ? [unit.chain.root.project] : []);
+    const estimated = new Set(unit.receipt ? associatedProjects(unit.chain.root,unit.receipt,config).filter(p => !owned.has(p)) : []);
+    for (const input of [unit.chain.root,...unit.chain.revisions]) assigned.set(input.id,{owned,estimated});
+  }
+  type Doc = { path:string; text:string; id:string; at:string; source:string; ids:string[]; kind:FindKind; owner?:string };
+  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind}));
   for (const dir of ['20_ideas','30_knowledge','10_projects']) for(const path of await vault.files(dir)) {
     if (!path.endsWith('.md') || (dir === '10_projects' && !path.endsWith('/NOW.md') && !/^10_projects\/[^/]+\/knowledge\/KNW-[^/]+\.md$/.test(path))) continue;
     const {meta,text} = parseMarkdown((await vault.read(path))!);
-    docs.push({path,text,id:String(meta.id ?? meta.project ?? path),at:String(meta.generated_at ?? meta.approved_at ?? ''),source:meta.verified === true ? '人の承認記録付き' : 'AI生成・未検証',ids:Array.isArray(meta.input_ids)?meta.input_ids.map(String):[]});
+    const kind: FindKind = dir === '20_ideas' ? 'idea' : path.endsWith('/NOW.md') ? 'now' : 'knowledge';
+    docs.push({path,text,id:String(meta.id ?? meta.project ?? path),at:String(meta.generated_at ?? meta.approved_at ?? ''),source:meta.verified === true ? '人の承認記録付き' : 'AI生成・未検証',ids:Array.isArray(meta.input_ids)?meta.input_ids.map(String):[],kind,...(dir === '10_projects' ? {owner:path.split('/')[1]} : {})});
   }
+  // プロジェクトとの関係。NOWとプロジェクト知識はフォルダーで確定し、アイデアは元の入力の帰属に従う。共通知識はどのプロジェクトにも含めない。
+  const relation = (doc: Doc, project: string): 'owned' | 'estimated' | undefined => {
+    if (doc.kind === 'now' || doc.kind === 'knowledge') return doc.owner === project ? 'owned' : undefined;
+    const links = doc.ids.map(id => assigned.get(id));
+    if (links.some(l => l?.owned.has(project))) return 'owned';
+    if (links.some(l => l?.estimated.has(project))) return 'estimated';
+    return undefined;
+  };
+  const time = (doc: Doc) => Date.parse(doc.at) || 0;
   const hits = docs.map(doc=>{
     const normalized = doc.text.normalize('NFKC').toLocaleLowerCase();
-    const score = tokens.every(t=>normalized.includes(t)) ? tokens.reduce((n,t)=>n+normalized.split(t).length-1,0) : 0;
-    return { ...doc, score };
-  }).filter(doc=>doc.score>0).sort((a,b)=>b.score-a.score || (Date.parse(b.at)||0)-(Date.parse(a.at)||0));
-  return hits.slice(0,50).map(doc=>{
+    const score = !tokens.length ? 1 : tokens.every(t=>normalized.includes(t)) ? tokens.reduce((n,t)=>n+normalized.split(t).length-1,0) : 0;
+    const related = options.project === undefined ? undefined : relation(doc,options.project);
+    return { ...doc, score, related };
+  }).filter(doc=>doc.score>0
+    && (kinds === undefined || kinds.has(doc.kind))
+    && (options.project === undefined || doc.related !== undefined)
+    && (since === undefined || (Number.isFinite(Date.parse(doc.at)) && Date.parse(doc.at) >= since))
+    && (until === undefined || (Number.isFinite(Date.parse(doc.at)) && Date.parse(doc.at) <= until)))
+    .sort((a,b)=>(sort === 'relevance' ? b.score-a.score : 0) || time(b)-time(a) || a.path.localeCompare(b.path));
+  const page = hits.slice(offset, offset+limit);
+  const lines = page.map(doc=>{
     const normalized = doc.text.normalize('NFKC').toLocaleLowerCase();
-    const start = Math.max(0, normalized.indexOf(tokens[0])-60);
+    const start = tokens.length ? Math.max(0, normalized.indexOf(tokens[0])-60) : 0;
     const refs = doc.ids.map(id=>{const input=inputs.find(i=>i.id===id);return input?`[${id}](${input.path})`:id;}).join(', ');
     const notices=effective.filter(e=>[e.chain.root,...e.chain.revisions].some(i=>doc.ids.includes(i.id))).map(correctionNotice).filter(Boolean);
     const knowledgeNotice=(/KNW-[^/]+\.md$/.test(doc.path))&&notices.length?'承認済み知識の根拠が訂正されています。本文は自動改訂されていません。再確認してください。\n  ':'';
-    return `- [${doc.id}](${doc.path}) | ${displayTime(doc.at)} | ${doc.source}\n  出典: ${refs || '原文参照なし'}\n  ${knowledgeNotice}${notices.join('\n  ')}\n  ${doc.text.slice(start,start+220).replace(/\r?\n/g,' ')}`;
-  }).join('\n\n') || '見つかりません';
+    const relatedNotice=doc.related==='estimated'?'関連候補（AI推定、帰属未確定）\n  ':'';
+    return `- [${doc.id}](${doc.path}) | ${displayTime(doc.at)} | ${doc.source}\n  出典: ${refs || '原文参照なし'}\n  ${relatedNotice}${knowledgeNotice}${notices.join('\n  ')}\n  ${doc.text.slice(start,start+220).replace(/\r?\n/g,' ')}`;
+  });
+  if (!lines.length) return offset > 0 && hits.length ? `見つかりません（該当${hits.length}件。開始位置が件数を超えています）` : '見つかりません';
+  const more = offset + page.length < hits.length;
+  return lines.join('\n\n') + (offset > 0 || more ? `\n\n該当${hits.length}件中 ${offset+1}〜${offset+page.length}件目${more ? `。続きは --offset ${offset+page.length}` : ''}` : '');
 }
 export async function resume(config: HubConfig, project: string): Promise<string> {
   projectIdSchema.parse(project);
