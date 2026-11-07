@@ -4,13 +4,16 @@ import { rebuildDashboard } from './dashboard.js';
 import { rebuildDigest } from './digest.js';
 import { collectGitDrafts,type CollectOutcome } from './git-drafts.js';
 import { nowItemsPath } from './item-resolutions.js';
-import { readProjects } from './projects.js';
+import { readProjects,inspectProjects } from './projects.js';
 import { rebuildNow } from './views.js';
 import { Vault } from './storage.js';
 import type { HubConfig,LlmClient } from './types.js';
 export interface CycleResult { intake:IntakeRunResult; organize:OrganizeRunResult; dashboard?:{path:string;conflict?:string}; digest?:{path:string;conflict?:string}; git?:CollectOutcome; dryRun:boolean }
 export async function runCycle(config:HubConfig,llm:LlmClient,options:OrganizeOptions={}):Promise<CycleResult>{
- const intake=await ingest(config,{dryRun:options.dryRun}),organized=await organize(config,llm,options);
+ const intake=await ingest(config,{dryRun:options.dryRun});
+ // 不正なプロジェクト定義があるときはモデルを呼ばず、HOMEに不正な箇所を示してから止める。
+ if((await inspectProjects(config)).issues.length){if(!options.dryRun)await rebuildDashboard(config);await readProjects(config);}
+ const organized=await organize(config,llm,options);
  // HOMEがふりかえりへリンクできるよう、REVIEW.mdを先に生成する。
  if(options.dryRun)return{intake,organize:organized,dryRun:true};
  // 旧版で生成したNOWには項目一覧がないため、一覧のないプロジェクトだけNOWを作り直す。

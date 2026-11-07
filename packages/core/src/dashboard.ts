@@ -4,7 +4,7 @@ import { readNowItems } from './item-resolutions.js';
 import { Vault,hash,parseMarkdown } from './storage.js';
 import { lifecycleOf,projectStatusLabels } from './project-status.js';
 import { decodeIntake } from './intake-format.js';
-import { readProjects } from './projects.js';
+import { readProjects,inspectProjects,projectIssueFields } from './projects.js';
 import {buildReviewIndex,writeReviewIndexLocked,type ReviewCandidate} from './candidate-review.js';
 import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
 import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel } from './views.js';
@@ -30,6 +30,12 @@ export async function rebuildDashboard(config:HubConfig,options:{now?:Date}={}):
 export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,options:{now?:Date}={}):Promise<{path:string;conflict?:string}>{
  const clock=options.now??new Date();
  {
+  // 不正なプロジェクト定義があると一覧・方針・候補を組み立てられない。どのファイルのどの項目かをHOMEに示して止める。
+  const definitionIssues=(await inspectProjects(config)).issues;
+  if(definitionIssues.length){
+   const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n\n## プロジェクト定義の不正（${definitionIssues.length}件）\n次のプロジェクト定義を読めないため、整理・HOMEの一覧・方針の更新を止めています。端末からのメモは受け付けて記録し、失われません（プロジェクトへの関連付けは定義を直すまで待ちます）。括弧内の項目を直してから、次のcycleを待つか \`ctx doctor\` で確認してください。\n${definitionIssues.map(i=>`- [${plain(i.path)}](<${i.path}>): ${plain(projectIssueFields(i))}`).join('\n')}\n\n名前（title）は1〜200文字、別名（aliases）とキーワード（keywords）は1件100文字までの文字列を50件まで、状態（status）は文字列で書きます。\n`;
+   return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
+  }
   await rebuildPoliciesLocked(config,vault);
   const projects=await readProjects(config),review=await buildReviewIndex(config),effective=await readEffectiveInputs(config),receipts=await readReceipts(config),acks=await readIntakeReceipts(config);
   await writeReviewIndexLocked(vault,review);
