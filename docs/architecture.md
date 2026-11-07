@@ -25,6 +25,7 @@ POLICY.md                      共通の有効方針（派生集約）
 HOME.md                        受領と整理状況への入口
 REVIEW.md                      直近の期間のふりかえり（派生）
 _ContextHub/                   共有する入力ツールとテンプレート
+.claude/skills/                Claude Code用のスキル（選んで深掘り、任意）
 ```
 
 ロック、ログ、個人設定、認証情報、バックアップはVaultの外へ置きます。端末別のObsidian設定は標準では同期しません。

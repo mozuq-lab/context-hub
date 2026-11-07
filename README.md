@@ -66,9 +66,10 @@ flowchart LR
 - プロジェクトの「現在地・次の一手・未解決・提案」と、元のメモ・出典の確認
 - 最近のメモ・アイデアの一覧、本文検索、出典付きcontextのコピー
 - メモ・AI作業要約のInputへの追加
+- 選択肢を選びながら記録・壁打ちを進め、確認したまとめをメモとして追加する「選んで深掘り」（任意）
 - プロジェクト案・知識・方針の候補の採用・却下・適用停止の依頼
 
-アプリは同期済みVaultのファイルを読み、依頼をInputへ新しく保存するだけです。同期はSyncthingなど、受領・整理・承認の反映はこの本体が行います。候補の確認待ち一覧は本体の`dashboard`または`cycle`が生成するため、アプリの0.3.0は候補一覧と採用先付き方針に対応した本体と組み合わせて使います。
+アプリは同期済みVaultのファイルを読み、依頼をInputへ新しく保存するだけです。「選んで深掘り」を使う場合だけ、本人が設定したClaudeのAPIキーで、端末から問いとまとめの作成をClaude APIへ依頼します。同期はSyncthingなど、受領・整理・承認の反映はこの本体が行います。候補の確認待ち一覧は本体の`dashboard`または`cycle`が生成するため、アプリの0.3.0は候補一覧と採用先付き方針に対応した本体と組み合わせて使います。
 
 クライアントは対応する本体のcommitをsubmoduleで固定し、protocolの互換性をテストしています。本体のCIでも、クライアントの既定ブランチを取得してDartテストを実行し、fixtureとの形式差分を警告として示します（失敗しても本体のPRは止めません。[開発と検証](docs/development.md#ciと公開物)）。ビルド済みアプリは配布していないため、ビルド方法と使い方はクライアントのREADMEを参照してください。
 
@@ -79,6 +80,7 @@ flowchart LR
 - [停止・同期・バックアップ・復元](docs/operations.md)
 - [Codex・Claude CodeからVaultを参照する](docs/prompts/vault-access.md)
 - [AI作業要約の形式](docs/prompts/handoff-summary.md)
+- [選択肢を選んで記録・壁打ちする（選んで深掘り）](docs/prompts/guided-capture.md)
 - [候補の確認待ちを使う](docs/candidate-review.md)
 - [プロジェクトの状態とふりかえり](docs/project-lifecycle.md)
 - [開発と検証](docs/development.md)
