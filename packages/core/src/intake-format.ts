@@ -5,6 +5,8 @@ import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, PROJECT_TITLE_CHARS } from './pr
 import { projectStatusSchema } from './project-status.js';
 import { itemActionSchema, itemKeySchema } from './item-resolutions.js';
 import { parseMarkdown } from './storage.js';
+import { newProjectIdSchema, projectCreateFieldsSchema } from './project-creations.js';
+import { resolvableTargetSchema } from './conflicts.js';
 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
@@ -24,7 +26,10 @@ const itemResolution=z.object({...base,operation:z.literal('item-resolution'),pr
 const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss'),draft_id:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),draft_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 名前・別名・キーワードは変更後の全体を送る。上限と重複の整理は本体が検証する。
 const projectDefinition=z.object({...base,operation:z.literal('project-definition'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),title:z.string().max(PROJECT_TITLE_CHARS),aliases:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),keywords:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, itemResolution, gitDraftDismiss]);
+// 本文は任意の最初のメモ。空なら作成だけを行う。
+const projectCreate=z.object({...base,operation:z.literal('project-create'),project_id:newProjectIdSchema,title:z.string(),aliases:z.array(z.string()),keywords:z.array(z.string()),confirmed:z.literal(true),text:z.string()}).strict().superRefine((value,ctx)=>{const result=projectCreateFieldsSchema.safeParse({title:value.title,aliases:value.aliases,keywords:value.keywords});if(!result.success)ctx.addIssue({code:z.ZodIssueCode.custom,message:'プロジェクトの名前・別名・キーワードが不正です'});});
+const conflictResolve=z.object({...base,operation:z.literal('conflict-resolve'),target:resolvableTargetSchema,target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, itemResolution, gitDraftDismiss, projectCreate, conflictResolve]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
@@ -37,6 +42,8 @@ export function parseIntake(path: string, content: string, maxInputChars: number
   if (path !== `Input/${packet.request_id}.md`) throw new Error('受付IDとパスが一致しません');
   if (packet.operation === 'capture' || packet.operation === 'correct') {
     if (!text.trim() || text.length > maxInputChars) throw new Error('受付本文が空か文字数上限を超えています');
+  } else if (packet.operation === 'project-create') {
+    if (text.length > maxInputChars) throw new Error('最初のメモが文字数上限を超えています');
   } else if (text.trim()) throw new Error('承認操作に本文は指定できません');
   return packet;
 }

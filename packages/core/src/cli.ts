@@ -20,6 +20,7 @@ import { Vault, unlockVault, LOCK_SCOPES, hash } from './storage.js';
 import { addProject, readProjects } from './projects.js';
 import { find, findKinds, recent, pending, resume, context, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
+import { listConflicts,resolveConflict } from './conflicts.js';
 import { organize } from './organize.js';
 import { MockLlm } from './llm.js';
 import { OpenClawInferLlm } from './infer.js';
@@ -81,6 +82,9 @@ git.command('collect').description('下書きを作ってHOMEを更新').action(
 git.command('drafts').description('下書きの一覧').option('--all','入力済み・見送り済みも表示').action(async opts=>output((await readGitDrafts(await config())).filter(d=>opts.all||d.status==='pending').map(d=>({id:d.id,hash:d.hash,status:d.status,project:d.project_id,repo:d.repo,commits:d.commits.length,text:d.text,inputId:d.inputId??null}))));
 git.command('use <id>').description('下書きの本文をそのまま入力にする').requiredOption('--hash <sha256>','git draftsで確認したハッシュ').addOption(new Option('--kind <kind>','入力の種類').choices(['memo','work-summary']).default('memo')).requiredOption('--confirm','本文を確認した本人による保存').action(async(id,opts)=>{const c=await config();const result=await useGitDraft(c,{draftId:id,expectedHash:opts.hash,kind:opts.kind,source:'cli'});await rebuildDashboard(c);output(result);});
 git.command('dismiss <id>').description('下書きを見送る').requiredOption('--hash <sha256>','git draftsで確認したハッシュ').requiredOption('--confirm','本文を確認した本人による見送り').action(async(id,opts)=>{const c=await config();const result=await dismissGitDraft(c,{draftId:id,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:${id}:dismiss`});await rebuildDashboard(c);output(result);});
+const conflict=program.command('conflict').description('生成物の競合（手で書き換えたNOW・HOME・REVIEW）を確認し、生成版へ戻す');
+conflict.command('list').description('対象ごとの退避・手で変えた行・確認用ハッシュを表示').action(async()=>output(await listConflicts(await config())));
+conflict.command('resolve <target>').description('手で変えた行をメモとして残し、最新の入力から作り直して退避を片付ける（例: 10_projects/<id>/NOW.md）').requiredOption('--hash <sha256>','conflict listで確認した対象のハッシュ').option('--no-memo','NOWの手で変えた行をメモとして保存しない（置き換えた全文は記録に残る）').requiredOption('--confirm','差分を確認した本人による操作').action(async(target,opts)=>{const c=await config();const result=await resolveConflict(c,{target,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:conflict:${target}:${opts.hash}`,saveManualAsMemo:opts.memo});await rebuildDashboard(c);output(result);});
 program.command('organize').description('未処理入力を整理').option('--limit <n>','処理上限',positive).option('--dry-run','対象一覧のみ。モデル/書き込みなし').option('--retry-failed','失敗分を再処理').option('--id <id>','指定入力を処理').option('--quiet-empty','0件時にNO_REPLYを返す')
   .addOption(new Option('--thinking <level>','推論の思考水準。設定organize.llm.thinkingを上書き').choices(['off','minimal','low','medium','high']))
   .action(async opts=>{const c=await config(opts.thinking?{organize:{llm:{thinking:opts.thinking}}}:{});const llm=c.organize.llm.provider==='mock'?new MockLlm():new OpenClawInferLlm(c.organize.llm);const result=await organize(c,llm,{limit:opts.limit,dryRun:opts.dryRun,retryFailed:opts.retryFailed,id:opts.id});output(opts.quietEmpty&&result.processed===0&&result.failed===0?'NO_REPLY':result);if(result.failed>0)process.exitCode=1;});

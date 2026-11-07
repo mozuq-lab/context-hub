@@ -34,7 +34,9 @@
 | `90_system/approvals/`、`90_system/project-approvals/` | 採用・却下の履歴を詳しく調べる必要があるとき、該当記録だけ |
 | `Input/REQ-*.md`、`90_system/intake/`、`90_system/intake-errors/`、`90_system/receipts/IN-*.json`（直下のみ） | 未受領の入力や保存結果を詳しく確認するときだけ。手順は `_ContextHub/docs/file-input.md` |
 | `_ContextHub/docs/`、`_ContextHub/templates/`、`_ContextHub/scripts/submit-input.mjs` | 書式・コマンド・挙動を確認するときだけ |
-| 上記以外の `90_system/`（`receipts/pending/`、`receipts/events/`、`project-confirmations/`、`policies/`、`review/` など）、設定・認証情報・バックアップ・`.obsidian/`・Vault外の会話履歴 | 読まない。利用者が保守調査を明示的に依頼したときだけ、必要な記録に限って読む |
+| 上記以外の `90_system/`（`receipts/pending/`、`receipts/events/`、`project-confirmations/`、`policies/`、`review/`、`now-generated/`、`conflict-archive/` など）、設定・認証情報・バックアップ・`.obsidian/`・Vault外の会話履歴 | 読まない。利用者が保守調査を明示的に依頼したときだけ、必要な記録に限って読む |
+
+NOWの `<!-- ctx:auto:start -->` から `<!-- ctx:auto:end -->` までは生成領域です。手で書き換えるとそのNOWは更新が止まり、HOMEに「NOWの更新が止まっています」と出ます。AIはこの領域を書き換えません。本人のメモは領域の外に書きます。
 
 `receipts/pending/` は停止回復用で、整理済みの記録も残ります。フォルダー名から未整理と判断しません。`project-confirmations/` は承認画面用の確認情報で、承認・採用の記録ではありません。
 

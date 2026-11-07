@@ -23,6 +23,8 @@ export * from './project-definition.js';
 export * from './item-resolutions.js';
 export * from './git-drafts.js';
 export * from './digest.js';
+export * from './conflicts.js';
+export * from './project-creations.js';
 export * from './candidate-review.js';
 
 export * from './knowledge-scope.js';

@@ -9,6 +9,7 @@ import {buildReviewIndex,writeReviewIndexLocked,type ReviewCandidate} from './ca
 import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
 import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel } from './views.js';
 import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage } from './intake.js';
+import { listConflicts } from './conflicts.js';
 import type { HubConfig } from './types.js';
 // HTMLコメントの開始はNOWと同じく無害化し、以降の行が隠れないようにする。
 const plain=(s:string)=>s.replace(/[\r\n|]/g,' ').replaceAll('[','\\[').replaceAll(']','\\]').replaceAll('<!--','&lt;!--');
@@ -23,8 +24,12 @@ export async function lastEvidenceAt(vault:Vault,projectId:string):Promise<strin
 }
 export function daysSince(iso:string,now:Date):number{return Math.max(0,Math.floor((now.getTime()-Date.parse(iso))/DAY));}
 export async function rebuildDashboard(config:HubConfig,options:{now?:Date}={}):Promise<{path:string;conflict?:string}>{
+ const vault=new Vault(config);return vault.withLock(()=>rebuildDashboardLocked(config,vault,options));
+}
+/** Writerロックを持つ呼び出し元から使う。競合の片付けで、HOMEを作り直すときにも使う。 */
+export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,options:{now?:Date}={}):Promise<{path:string;conflict?:string}>{
  const clock=options.now??new Date();
- const vault=new Vault(config);return vault.withLock(async()=>{
+ {
   // 不正なプロジェクト定義があると一覧・方針・候補を組み立てられない。どのファイルのどの項目かをHOMEに示して止める。
   const definitionIssues=(await inspectProjects(config)).issues;
   if(definitionIssues.length){
@@ -77,11 +82,16 @@ export async function rebuildDashboard(config:HubConfig,options:{now?:Date}={}):
   for(const unit of effective){const latest=receipts.find(r=>r.input_id===unit.chain.latest.id);statuses.push(`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`);}
   const errors:string[]=[];
   for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){try{const e=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(e.status==='error'&&acks.some(a=>a.path===e.path))continue;errors.push(`- [${plain(e.path)}](${e.path}): ${e.status==='conflict'?'競合':'受付失敗'} / ${plain(intakeErrorMessage(e))} / 記録: [詳細](${path})`);}catch{errors.push(`- 受付エラー記録不正: ${plain(path)}`);}}
-  for(const path of await vault.files('90_system/conflicts'))errors.push(`- [生成物の競合](${path})`);
+  // 退避は対象ごとにまとめる。NOWは手で変えた時点から更新が止まっているので、そのことと戻し方を示す。
+  for(const g of await listConflicts(config)){
+   const count=g.files.length>1?`、退避${g.files.length}件`:'';
+   if(g.kind==='now')errors.push(`- [NOWの更新が止まっています](${g.latest}): ${plain(g.title??g.projectId??g.target)} — NOW.mdの自動領域が手で変更されています（${g.stoppedAt?dateLabel(g.stoppedAt,config.timezone)+'の生成から':''}更新なし${count}）。アプリの「生成版に戻す」か\`ctx conflict resolve\`で戻せます。手で変えた行はメモとして残ります`);
+   else errors.push(`- [生成物の競合](${g.latest}): ${plain(g.target)}${count?` / ${count.slice(1)}`:''}${g.resolvable?' — `ctx conflict resolve`で作り直せます':''}`);
+  }
   for(const path of draftRecords.problems)errors.push(`- [作業記録の下書きの記録が不正です](${path})`);
   errors.push(...nextProblems);
   for(const p of gitProblems)errors.push(`- 作業記録の下書き（${plain(p.projectId)} / ${plain(p.repo)}）: ${plain(p.error)}`);
   const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n同期された時点の表示です。端末保存・Mac mini受領・整理完了はそれぞれ別の状態です。${reviewLink}\n\n${projectSections}${draftSection}\n\n## 確認待ち（${pending.length}件）\n${reviewRows(pending)}\n\n候補を開いて内容・理由・出典を確認し、QuickAddの承認／却下を実行してください。保留は閉じるだけです。AI候補は未承認です。\n\n## 要確認（${attention.length}件）\n${reviewRows(attention)}\n\n## 有効方針\n[共通方針](POLICY.md)。各プロジェクトのPOLICY.mdに対象方針を掲載します。参考知識は必要時に検索します。\n\n## 判断履歴\n${reviewRows(history)}\n\n## 受領と整理状況\n${statuses.join('\n')||'入力はありません。'}\n\n## 失敗と競合\n${errors.join('\n')||'記録された失敗・競合はありません。'}\n\n正式知識は根拠が訂正されても自動変更しません。根拠の訂正履歴と承認内容を確認してください。\n`;
   return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
- });
+ }
 }

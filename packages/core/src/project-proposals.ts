@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
 import { generatedMarkdown, isGeneratedIntact } from './views.js';
 import { readCorrectionChains, type CorrectionChain } from './corrections.js';
-import { readProjects, projectSchema } from './projects.js';
+import { readProjects, projectSchema, overlappingProject } from './projects.js';
 import { inputIdSchema } from './capture.js';
 import { projectProposalSchema } from './llm.js';
 import type { HubConfig, ProjectProposal, Receipt } from './types.js';
@@ -22,10 +22,8 @@ const confirmationPath=(id:string)=>`90_system/project-confirmations/${id}.json`
 const decisionPath=(id:string)=>`90_system/project-approvals/PAPR-${id.slice(5)}.json`;
 const materializedPath=(record:Decision)=>`90_system/project-approvals/materialized/${record.id}.json`;
 const materializedSchema=z.object({schema_version:z.literal(1),decision_id:z.string(),decision_hash:digest,project_id:z.string()}).strict();
-const normalize=(s:string)=>s.normalize('NFKC').trim().toLocaleLowerCase();
 function overlaps(proposal:ProjectProposal, projects:Awaited<ReturnType<typeof readProjects>>):boolean {
-  const names=new Set([proposal.title,...proposal.aliases].map(normalize).filter(Boolean));
-  return projects.some(p=>[p.id,p.title,...p.aliases].some(s=>names.has(normalize(s))));
+  return overlappingProject(proposal,projects)!==undefined;
 }
 function parseCandidate(path:string,raw:string){
  if(!isGeneratedIntact(raw))throw new Error('プロジェクト候補の内容が変更されています');
