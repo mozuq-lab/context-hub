@@ -18,7 +18,7 @@ import { setItemResolution,readNowItems,readItemResolutions } from './item-resol
 import { collectGitDrafts,readGitDrafts,useGitDraft,dismissGitDraft } from './git-drafts.js';
 import { Vault, unlockVault, LOCK_SCOPES, hash } from './storage.js';
 import { addProject, readProjects } from './projects.js';
-import { find, recent, pending, resume, context } from './retrieve.js';
+import { find, findKinds, recent, pending, resume, context, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
 import { organize } from './organize.js';
 import { MockLlm } from './llm.js';
@@ -84,7 +84,10 @@ git.command('dismiss <id>').description('下書きを見送る').requiredOption(
 program.command('organize').description('未処理入力を整理').option('--limit <n>','処理上限',positive).option('--dry-run','対象一覧のみ。モデル/書き込みなし').option('--retry-failed','失敗分を再処理').option('--id <id>','指定入力を処理').option('--quiet-empty','0件時にNO_REPLYを返す')
   .addOption(new Option('--thinking <level>','推論の思考水準。設定organize.llm.thinkingを上書き').choices(['off','minimal','low','medium','high']))
   .action(async opts=>{const c=await config(opts.thinking?{organize:{llm:{thinking:opts.thinking}}}:{});const llm=c.organize.llm.provider==='mock'?new MockLlm():new OpenClawInferLlm(c.organize.llm);const result=await organize(c,llm,{limit:opts.limit,dryRun:opts.dryRun,retryFailed:opts.retryFailed,id:opts.id});output(opts.quietEmpty&&result.processed===0&&result.failed===0?'NO_REPLY':result);if(result.failed>0)process.exitCode=1;});
-program.command('find <query>').action(async query=>output(await find(await config(),query)));
+program.command('find [query]').description('原文・アイデア・知識・NOWを検索。絞り込み条件があれば検索語は省略可').option('--project <id>','このプロジェクトに帰属・関連する記録だけ（AI推定は区別して表示）')
+  .option('--kind <kinds>',`種類、カンマ区切り（${findKinds.join(', ')}）`).option('--since <date>','この日付（YYYY-MM-DD、JST）または日時以降').option('--until <date>','この日付（YYYY-MM-DD、JST）または日時以前')
+  .addOption(new Option('--sort <order>','並び順。検索語がなければnewest').choices(['relevance','newest'])).option('--limit <n>','表示件数（1〜200、既定50）',positive).option('--offset <n>','先頭から飛ばす件数',(v:string)=>{const n=Number(v);if(!Number.isSafeInteger(n)||n<0)throw new Error('開始位置は0以上の整数にしてください');return n;})
+  .action(async(query,opts)=>output(await find(await config(),query??'',{project:opts.project,kinds:opts.kind?.split(',').map((k:string)=>k.trim()).filter(Boolean) as FindKind[]|undefined,since:opts.since,until:opts.until,sort:opts.sort,limit:opts.limit,offset:opts.offset,pagingHint:true})));
 program.command('ingest').description('同期受付ファイルを正式保存').option('--limit <n>','受付操作の上限',positive).option('--dry-run','書き込みなし').action(async opts=>{const result=await ingest(await config(),{limit:opts.limit,dryRun:opts.dryRun});output(result);if(result.rejected)process.exitCode=1;});
 program.command('digest').description('直近の期間のふりかえりREVIEW.mdを生成').option('--days <n>','集計日数（既定は設定のretrieve.digestDays）',positive).action(async opts=>output(await rebuildDigest(await config(),opts.days?{days:opts.days}:{})));
 program.command('dashboard').description('プロジェクト一覧と処理状況のHOMEを生成').action(async()=>output(await rebuildDashboard(await config())));
