@@ -29,8 +29,10 @@ Syncthingで新しいVaultを共有し、各端末は専用フォルダーで受
 | docs/prompts/file-input.md | _ContextHub/docs/file-input.md |
 | docs/prompts/policy-check.md | _ContextHub/docs/policy-check.md |
 | docs/prompts/handoff-summary.md | _ContextHub/docs/handoff-summary.md |
+| docs/prompts/guided-capture.md | _ContextHub/docs/guided-capture.md |
 | examples/vault-instructions/AGENTS.md | AGENTS.md |
 | examples/vault-instructions/CLAUDE.md | CLAUDE.md |
+| examples/vault-instructions/.claude/skills/guided-capture/ | .claude/skills/guided-capture/（Claude Code用。使わなければ省略可） |
 
 各端末のObsidianでQuickAddを登録します。[QuickAdd手順](../examples/quickadd/README.md)を参照してください。モバイルでは同期アプリの提供状況と、Obsidianから共有フォルダーへアクセスできることを自分の端末で確認します。
 

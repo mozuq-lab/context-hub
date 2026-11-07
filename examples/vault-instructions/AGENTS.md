@@ -72,6 +72,7 @@ node "<Vaultの絶対パス>/_ContextHub/scripts/submit-input.mjs" --vault "<Vau
 - 山括弧は、この端末の実際の絶対パスに置き換える。Vaultの場所は端末ごとに違う。
 - `--kind` は、利用者メモなら `memo`、AIの作業報告なら `work-summary`。`--project` は、`10_projects/<id>/project.md` で確認した既存の `id` が明確な場合だけ付ける。不明なら省略する。
 - 作業報告の本文は `_ContextHub/docs/handoff-summary.md` の書式に従う（`## 現在地`・`## 次の一手`・`## 未解決`、各項目に `[確認済み]`・`[提案]`・`[未確認]`、末尾にメタ情報）。
+- 本人が選択肢を選ぶ形で記録や壁打ちをしたい（選んで深掘り）と言ったら、`_ContextHub/docs/guided-capture.md` の手順で1問ずつ聞き、本人が確認したまとめを `memo` で保存する。
 - Nodeが22未満または使えない場合は実行せず、本文を返して本人のQuickAdd保存へ渡す。ただし、結果が不明な保存が先にあれば、先に照合して重複を防ぐ。
 
 | 結果 | 次の操作 |

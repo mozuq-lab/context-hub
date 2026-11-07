@@ -48,6 +48,10 @@ Codexは主な作業フォルダーに応じてAGENTS.mdを探索する。Claude
 
 Nodeや保存ツールが使えない場合は、生成された短い作業要約を本人がQuickAddで保存できる。訂正・承認・却下は本人操作を使う。
 
+## 選択肢を選んで記録・壁打ちする
+
+「選んで深掘りで今日の作業を記録したい」のように頼むと、AIが問いと選択肢を1問ずつ出し、本人は選ぶだけで記録・壁打ち・アイデア出しを進められる。手順は[選んで深掘り](guided-capture.md)にある。Claude Codeでは、Vaultに `.claude/skills/guided-capture/` を置くと `/guided-capture 記録 <プロジェクトID>` でも始められ、問いは選択式の画面で出る。まとめは本人が確認してから、メモとしてInputへ保存する。
+
 ## 公式仕様
 
 - [CodexのAGENTS.md探索](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
