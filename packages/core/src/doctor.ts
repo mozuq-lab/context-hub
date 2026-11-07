@@ -22,9 +22,12 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
     try { inputs.push(parseInput(path,(await vault.read(path))!)); }
     catch { issues.push(`不正な入力: ${path}`); }
   }} catch { issues.push('入力の走査に失敗しました'); }
-  try { for (const issue of (await inspectProjects(config)).issues) issues.push(`プロジェクト定義が不正です: ${describeProjectIssue(issue)}`); } catch { issues.push('プロジェクト定義が不正です'); }
-  try { await readEffectiveInputs(config); } catch { issues.push('訂正履歴・有効解釈と根拠が不正です'); }
-  try { await listProjectCandidates(config);if(await recoverProjectApprovalsLocked(config,vault,Number.MAX_SAFE_INTEGER,true))issues.push('プロジェクト承認の回復待ちがあります'); } catch { issues.push('プロジェクト候補・確認・承認記録が不正です'); }
+  // 定義が壊れていると、候補・再関連付けの確認は登録簿を読めずに失敗する。その失敗は定義の不正の結果として示す。
+  let definitionsBroken = false;
+  try { for (const issue of (await inspectProjects(config)).issues) { definitionsBroken = true; issues.push(`プロジェクト定義が不正です: ${describeProjectIssue(issue)}`); } } catch { definitionsBroken = true; issues.push('プロジェクト定義が不正です'); }
+  const afterDefinitions = (label: string) => `${label}（プロジェクト定義を直してから再確認してください）`;
+  try { await readEffectiveInputs(config); } catch { issues.push(definitionsBroken?afterDefinitions('訂正履歴・有効解釈と根拠を確認できません'):'訂正履歴・有効解釈と根拠が不正です'); }
+  try { await listProjectCandidates(config);if(await recoverProjectApprovalsLocked(config,vault,Number.MAX_SAFE_INTEGER,true))issues.push('プロジェクト承認の回復待ちがあります'); } catch { issues.push(definitionsBroken?afterDefinitions('プロジェクト候補・確認・承認記録を確認できません'):'プロジェクト候補・確認・承認記録が不正です'); }
   try {
     const acks=await readIntakeReceipts(config);
     for(const ack of acks){
@@ -44,7 +47,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
       if(path!==`90_system/associations/${record.input_id}/${record.evidence_hash}.${record.registry_hash}.json`)issues.push(`再関連付け記録のパス不一致: ${path}`);
       if(record.status==='associated'&&!await associationViewsComplete(vault,record)&&record.registry_hash===registry&&effective.some(e=>e.chain.root.id===record.input_id&&e.chain.evidenceHash===record.evidence_hash))issues.push(`再関連付け表示の回復待ち: ${record.input_id}`);
     }
-  }catch{issues.push('再関連付け記録・表示完了記録が不正です');}
+  }catch{issues.push(definitionsBroken?afterDefinitions('再関連付け記録・表示完了記録を確認できません'):'再関連付け記録・表示完了記録が不正です');}
   const seen=new Set<string>();
   for(const input of inputs) {
     const key=JSON.stringify([input.source,input.source_event_id]);if(seen.has(key))issues.push(`イベント重複: ${input.id}`);seen.add(key);
@@ -78,7 +81,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
     for(const path of await vault.files(dir))if(path.endsWith('.md')&&!isGeneratedIntact((await vault.read(path))!))issues.push(`生成物の手動変更・形式不正: ${path}`);
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
   try{for(const path of await knowledgePaths(vault)){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
-  try{await readPolicies(config);}catch{issues.push('方針manifest・正本・停止記録の同期または集約が未完了です');}
+  try{await readPolicies(config);}catch{issues.push(definitionsBroken?afterDefinitions('方針の同期・集約を確認できません'):'方針manifest・正本・停止記録の同期または集約が未完了です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}
   try { for(const path of await vault.files('90_system/conflicts'))issues.push(`生成物の競合: ${path}`); } catch {issues.push('競合フォルダ走査失敗');}
   try { for (const scope of LOCK_SCOPES) { const lock = await lockPath(config, scope); for(const path of [lock, `${lock}.reap`]) {

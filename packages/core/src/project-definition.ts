@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
-import { parseDocument } from 'yaml';
+import { parse, parseDocument, isMap, isScalar, isSeq } from 'yaml';
 import { Vault, hash, parseMarkdown } from './storage.js';
-import { projectIdSchema, projectSchema } from './projects.js';
+import { projectIdSchema, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig } from './types.js';
 
@@ -14,15 +14,21 @@ export const PROJECT_TITLE_CHARS = 200;
 
 const termSchema = z.string().min(1).max(PROJECT_TERM_CHARS);
 export const projectDefinitionSchema = z.object({
-  title: z.string().trim().min(1).max(PROJECT_TITLE_CHARS),
+  title: z.string().min(1).max(PROJECT_TITLE_CHARS),
   aliases: z.array(termSchema).max(PROJECT_TERMS_MAX),
   keywords: z.array(termSchema).max(PROJECT_TERMS_MAX),
+}).strict();
+/** 変更前の定義。人が手で書いた値なので、project.mdの読取と同じ範囲（空の語・前後の空白を含む）を記録できる。 */
+const storedDefinitionSchema = z.object({
+  title: z.string().min(1).max(PROJECT_TITLE_CHARS),
+  aliases: z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),
+  keywords: z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),
 }).strict();
 const changeIdSchema = z.string().regex(/^PDEF-[0-9A-HJKMNP-TV-Z]{26}$/);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const projectDefinitionChangeSchema = z.object({
   schema_version: z.literal(1), id: changeIdSchema, project_id: projectIdSchema,
-  before: projectDefinitionSchema, after: projectDefinitionSchema, before_hash: digest, after_hash: digest,
+  before: storedDefinitionSchema, after: projectDefinitionSchema, before_hash: digest, after_hash: digest,
   source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(200).optional(),
   changed_at: z.string().datetime({ offset: true }),
 }).strict();
@@ -52,25 +58,70 @@ export function changedFields(before: ProjectDefinition, after: ProjectDefinitio
   return (['title', 'aliases', 'keywords'] as const).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
 }
 
+/** YAMLとして元の値に戻る、なるべく素の書き方。戻らなければJSON（YAMLの二重引用符）で書く。 */
+function scalar(value: string, wrap: (text: string) => string, read: (parsed: unknown) => unknown): string {
+  try { if (/^[^\s].*[^\s]$|^[^\s]$/.test(value) && read(parse(wrap(value))) === value) return value; } catch { /* 引用符で書く */ }
+  return JSON.stringify(value);
+}
+const flowItem = (v: string) => scalar(v, t => `[${t}]`, p => Array.isArray(p) && p.length === 1 ? p[0] : undefined);
+const blockItem = (v: string) => scalar(v, t => `- ${t}`, p => Array.isArray(p) && p.length === 1 ? p[0] : undefined);
+const titleText = (v: string) => scalar(v, t => `k: ${t}`, p => (p as Record<string, unknown> | null)?.k);
+const flowList = (values: readonly string[]) => `[${values.map(flowItem).join(', ')}]`;
+
 /**
- * 人が保守するfrontmatterのほかのキー・コメント・本文を保ったまま、名前・別名・キーワードだけを置き換える。
+ * 人が保守するfrontmatterのほかのキー・コメント・書式・本文を保ったまま、名前・別名・キーワードの値の部分だけを書き換える。
+ * 一覧の書き方（ブロック・フロー）とキー行のコメントを保ち、残る語の行はコメントごと元の行を使う。
  */
 export function withDefinition(raw: string, definition: ProjectDefinition): string {
   const match = /^---(\r?\n)([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
   if (!match) throw new Error('プロジェクト定義のfrontmatterを確認できません');
   const eol = match[1], body = match[2];
-  // aliasの展開は文字列化では起きない。書き換え後はparseMarkdown（aliasを許さない）で検査する。
   const doc = parseDocument(body);
-  if (doc.errors.length) throw new Error('プロジェクト定義のfrontmatterを読めません');
-  doc.set('title', definition.title);
-  doc.set('aliases', doc.createNode([...definition.aliases]));
-  doc.set('keywords', doc.createNode([...definition.keywords]));
-  const yaml = doc.toString({ lineWidth: 0 }).replace(/\r?\n$/, '').replace(/\r?\n/g, eol);
-  const result = `---${eol}${yaml}${raw.slice(3 + eol.length + body.length)}`;
+  if (doc.errors.length || !isMap(doc.contents)) throw new Error('プロジェクト定義のfrontmatterを読めません');
+  const edits: { start: number; end: number; text: string }[] = [], appended: string[] = [];
+  for (const key of ['title', 'aliases', 'keywords'] as const) {
+    const pair = doc.contents.items.find(p => isScalar(p.key) && p.key.value === key);
+    const node = pair?.value;
+    if (!pair || !node || !(isScalar(node) || isSeq(node)) || !node.range) {
+      if (pair) throw new Error('プロジェクト定義のfrontmatterを書き換えられません');
+      appended.push(`${key}: ${key === 'title' ? titleText(definition.title) : flowList(definition[key])}`);
+      continue;
+    }
+    const [start, valueEnd] = node.range;
+    let text: string;
+    if (key === 'title') text = titleText(definition.title);
+    else if (!isSeq(node)) throw new Error('プロジェクト定義のfrontmatterを書き換えられません');
+    else if (node.flow) text = flowList(definition[key]);
+    else if (!definition[key].length) text = flowList([]) + (body.slice(start, valueEnd).match(/(\r?\n)*$/)?.[0] ?? '');
+    else {
+      // ブロックの一覧は、元の字下げで1行ずつ書く。残る語はコメントを含む元の行を使う。
+      const lineStart = body.lastIndexOf('\n', start - 1) + 1, indent = body.slice(lineStart, start);
+      if (indent.trim()) throw new Error('プロジェクト定義のfrontmatterを書き換えられません');
+      const lines = definition[key].map(term => {
+        const item = node.items.find(i => isScalar(i) && i.value === term && i.range);
+        if (item && isScalar(item) && item.range) {
+          const from = body.lastIndexOf('-', item.range[0]), to = body.indexOf('\n', item.range[0]);
+          const line = body.slice(from, to < 0 ? body.length : to).replace(/\r$/, '');
+          if (from >= lineStart && /^-\s/.test(line)) return line;
+        }
+        return `- ${blockItem(term)}`;
+      });
+      text = lines.join(`${eol}${indent}`);
+      const tail = body.slice(start, valueEnd).match(/(\r?\n)*$/)?.[0] ?? '';
+      text += tail;
+    }
+    edits.push({ start, end: valueEnd, text });
+  }
+  let next = body;
+  for (const e of edits.sort((x, y) => y.start - x.start)) next = next.slice(0, e.start) + e.text + next.slice(e.end);
+  if (appended.length) next = `${next.replace(/\s*$/, '')}${eol}${appended.join(eol)}`;
+  const result = `---${eol}${next}${raw.slice(3 + eol.length + body.length)}`;
   const parsed = projectSchema.parse(parseMarkdown(result).meta);
-  if (parsed.title !== definition.title || !same({ title: parsed.title, aliases: parsed.aliases, keywords: parsed.keywords }, definition)) throw new Error('プロジェクト定義を書き換えられません');
+  if (!same({ title: parsed.title, aliases: parsed.aliases, keywords: parsed.keywords }, definition)) throw new Error('プロジェクト定義を書き換えられません');
   return result;
 }
+
+export const definitionLimitMessage = `名前は1〜${PROJECT_TITLE_CHARS}文字、別名・キーワードはそれぞれ${PROJECT_TERMS_MAX}件まで・1件${PROJECT_TERM_CHARS}文字までにしてください`;
 
 export async function readProjectDefinitionChanges(vault: Vault): Promise<ProjectDefinitionChange[]> {
   const result: ProjectDefinitionChange[] = [];
@@ -97,8 +148,10 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
   const r = requestSchema.parse(request), vault = new Vault(config), path = `10_projects/${r.projectId}/project.md`;
   let after: ProjectDefinition;
   try { after = normalizeDefinition(r); }
-  catch { throw new Error(`名前は1〜${PROJECT_TITLE_CHARS}文字、別名・キーワードはそれぞれ${PROJECT_TERMS_MAX}件まで・1件${PROJECT_TERM_CHARS}文字までにしてください`); }
+  catch { throw new Error(definitionLimitMessage); }
   return vault.withLock(async () => {
+    // ほかの定義が壊れているときは書き換えない。登録簿を読めず、方針の更新も止まるため。
+    await readProjects(config);
     const raw = await vault.read(path);
     if (raw === undefined) throw new Error('プロジェクトが見つかりません');
     const project = projectSchema.parse(parseMarkdown(raw).meta);
@@ -120,7 +173,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
     if (!changed.length) throw new Error('名前・別名・キーワードに変更がありません');
     const next = withDefinition(raw, after);
     const change: ProjectDefinitionChange = {
-      schema_version: 1, id: `PDEF-${ulid()}`, project_id: r.projectId, before: projectDefinitionSchema.parse(before), after,
+      schema_version: 1, id: `PDEF-${ulid()}`, project_id: r.projectId, before: storedDefinitionSchema.parse(before), after,
       before_hash: current, after_hash: hash(next), source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), changed_at: new Date().toISOString(),
     };
     if (!await vault.create(`${changeDir}/${change.id}.json`, JSON.stringify(change, null, 2) + '\n')) throw new Error('定義変更の記録が競合しました');

@@ -48,6 +48,32 @@ test('CLIの追加・削除の指定を今の定義へ当てはめ、ない語�
   expect(() => withDefinition('本文だけ', current)).toThrow('frontmatter');
 });
 
+test('書き換えるのは名前・別名・キーワードの値だけで、コメント・一覧の書き方・ほかのキーの書式を保つ', () => {
+  const raw = '---\nid: garden\ntitle: 家庭菜園 # 名前のコメント\naliases: [菜園, 畑] # 別名のコメント\nkeywords:\n    - 苗 # 苗のコメント\n    - 肥料\nstatus: active # 状態\nowner: { name: 本人 }\n---\n本文\n';
+  const next = withDefinition(raw, { title: 'ベランダ: 菜園', aliases: ['菜園', '#タグ'], keywords: ['肥料', '苗', '水やり'] });
+  expect(next).toBe('---\nid: garden\ntitle: "ベランダ: 菜園" # 名前のコメント\naliases: [菜園, "#タグ"] # 別名のコメント\nkeywords:\n    - 肥料\n    - 苗 # 苗のコメント\n    - 水やり\nstatus: active # 状態\nowner: { name: 本人 }\n---\n本文\n');
+  expect(parseMarkdown(withDefinition(raw, { title: '家庭菜園', aliases: [], keywords: [] })).meta).toMatchObject({ aliases: [], keywords: [], status: 'active', owner: { name: '本人' } });
+  // 項目がなければ末尾に足し、改行コードを保つ。
+  expect(withDefinition('---\r\nid: gg\r\ntitle: g\r\nstatus: active\r\n---\r\n', { title: 'g', aliases: ['b'], keywords: [] })).toBe('---\r\nid: gg\r\ntitle: g\r\nstatus: active\r\naliases: [b]\r\nkeywords: []\r\n---\r\n');
+});
+
+test('手で書いた空の語を含む定義も変更前として記録し、ほかの定義が壊れているときは書き換えない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'garden', title: '家庭菜園' });
+  await vault.write(path, (await read(vault)).replace('aliases: []', 'aliases: ["", " 菜園 "]'));
+  const before = await read(vault);
+  const result = await setProjectDefinition(config, { projectId: 'garden', expectedHash: hash(before), title: '家庭菜園', aliases: ['菜園'], keywords: [], source: 'cli' });
+  expect(await readProjectDefinitionChanges(vault)).toMatchObject([{ id: result.changeId, before: { aliases: ['', ' 菜園 '] }, after: { aliases: ['菜園'] } }]);
+  await addProject(config, { id: 'work', title: '仕事' });
+  await vault.write('10_projects/work/project.md', '---\nid: work\ntitle: 仕事\naliases: 3\nkeywords: []\nstatus: active\n---\n');
+  const saved = await read(vault);
+  await expect(setProjectDefinition(config, { projectId: 'garden', expectedHash: hash(saved), title: '畑', aliases: ['菜園'], keywords: [], source: 'cli' })).rejects.toThrow('10_projects/work/project.md');
+  expect(await read(vault)).toBe(saved);
+  const issues = (await doctor(config)).issues;
+  expect(issues).toContain('プロジェクト定義が不正です: 10_projects/work/project.md（別名（aliases））');
+  expect(issues.filter(i => !i.startsWith('プロジェクト定義が不正です')).every(i => i.endsWith('（プロジェクト定義を直してから再確認してください）'))).toBe(true);
+});
+
 test('Inputからの定義変更を受け付け、書き込み前の停止を同じ受付IDで回復する', async () => {
   const { config, vault } = await workflowSetup(roots);
   await addProject(config, { id: 'garden', title: '家庭菜園', aliases: ['菜園'] });
@@ -100,7 +126,7 @@ test('壊れた定義はファイルと項目を示して止め、モデルを�
   expect(llm.complete).not.toHaveBeenCalled();
   const home = (await vault.read('HOME.md'))!;
   expect(home).toContain('## プロジェクト定義の不正（2件）');
-  expect(home).toContain('[10_projects/work/project.md](10_projects/work/project.md): 名前（title）・別名（aliases）');
+  expect(home).toContain('[10_projects/work/project.md](<10_projects/work/project.md>): 名前（title）・別名（aliases）');
   // 直すと通常のHOMEに戻る。
   await vault.write('10_projects/work/project.md', (await vault.read('10_projects/work/project.md'))!.replace('aliases: 3', 'aliases: []').replace(/title: 長+/, 'title: 仕事'));
   await vault.write('10_projects/garden/project.md', '---\nid: garden\ntitle: 家庭菜園\naliases: []\nkeywords: []\nstatus: active\n---\n本文');
