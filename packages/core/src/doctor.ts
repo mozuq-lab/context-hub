@@ -4,7 +4,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Vault, VAULT_DIRS, LOCK_SCOPES, parseMarkdown, lockPath, hash } from './storage.js';
 import { parseInput, eventMarker } from './capture.js';
-import { readProjects } from './projects.js';
+import { readProjects,inspectProjects,describeProjectIssue } from './projects.js';
 import { readEffectiveInputs } from './effective-inputs.js';
 import { listProjectCandidates,recoverProjectApprovalsLocked } from './project-proposals.js';
 import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths } from './intake.js';
@@ -22,7 +22,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
     try { inputs.push(parseInput(path,(await vault.read(path))!)); }
     catch { issues.push(`不正な入力: ${path}`); }
   }} catch { issues.push('入力の走査に失敗しました'); }
-  try { await readProjects(config); } catch { issues.push('プロジェクト定義が不正です'); }
+  try { for (const issue of (await inspectProjects(config)).issues) issues.push(`プロジェクト定義が不正です: ${describeProjectIssue(issue)}`); } catch { issues.push('プロジェクト定義が不正です'); }
   try { await readEffectiveInputs(config); } catch { issues.push('訂正履歴・有効解釈と根拠が不正です'); }
   try { await listProjectCandidates(config);if(await recoverProjectApprovalsLocked(config,vault,Number.MAX_SAFE_INTEGER,true))issues.push('プロジェクト承認の回復待ちがあります'); } catch { issues.push('プロジェクト候補・確認・承認記録が不正です'); }
   try {
