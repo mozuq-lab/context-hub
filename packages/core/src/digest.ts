@@ -117,5 +117,10 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
 export async function rebuildDigest(config: HubConfig, options: DigestOptions = {}): Promise<{ path: string; conflict?: string }> {
   const now = options.now ?? new Date(), vault = new Vault(config);
   // HOMEと同じく、集計と書き込みをWriterロック内で行い、途中の承認や受付と混ざらないようにする。
-  return vault.withLock(async () => { const text = await buildDigest(config, { ...options, now }); return writeGeneratedLocked(vault, 'REVIEW.md', generatedMarkdown({ schema_version: 1, generated_by: { model: 'deterministic-writer', prompt_version: 1 }, generated_at: now.toISOString(), period_days: options.days ?? config.retrieve.digestDays, verified: false }, text)); });
+  return vault.withLock(() => rebuildDigestLocked(config, vault, { ...options, now }));
+}
+/** Writerロックを持つ呼び出し元から使う。競合の片付けで、ふりかえりを作り直すときにも使う。 */
+export async function rebuildDigestLocked(config: HubConfig, vault: Vault, options: DigestOptions = {}): Promise<{ path: string; conflict?: string }> {
+  const now = options.now ?? new Date();
+  { const text = await buildDigest(config, { ...options, now }); return writeGeneratedLocked(vault, 'REVIEW.md', generatedMarkdown({ schema_version: 1, generated_by: { model: 'deterministic-writer', prompt_version: 1 }, generated_at: now.toISOString(), period_days: options.days ?? config.retrieve.digestDays, verified: false }, text)); }
 }

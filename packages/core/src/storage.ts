@@ -176,6 +176,12 @@ export class Vault {
   }
   async write(rel: string, text: string): Promise<void> { await this.atomic(rel, text, false); }
   async create(rel: string, text: string): Promise<boolean> { return this.atomic(rel, text, true); }
+  /** 1ファイルを削除する。無い場合はfalse。Writerロック内で、退避の片付けなど記録を残した操作からだけ使う。 */
+  async remove(rel: string): Promise<boolean> {
+    const target = await this.path(rel);
+    try { await unlink(target); } catch (error) { if (missing(error)) return false; throw error; }
+    await syncDirectory(dirname(target)); return true;
+  }
   async files(rel: string): Promise<string[]> {
     const base = await this.path(rel); let entries;
     try { entries = await readdir(base, { withFileTypes: true }); } catch (error) { if (missing(error)) return []; throw error; }

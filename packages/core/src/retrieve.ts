@@ -150,7 +150,7 @@ export async function resume(config: HubConfig, project: string): Promise<string
   const storedHash = typeof meta.generated_hash==='string'?meta.generated_hash.replace(/^sha256:/,''):'';
   const intact = [hash(auto[1]),hash(auto[1].trim()),hash(auto[0])].includes(storedHash);
   const conflicts = (await new Vault(config).files('90_system/conflicts')).some(p=>p.includes(`NOW.${project}.`));
-  return `# ${definition.title}\n\n更新: ${displayTime(String(meta.generated_at))} / 最終根拠: ${displayTime(String(meta.last_evidence_at))}\n参照: [NOW.md](${path})\n${notices?notices+'\n':''}${!intact?'注意: 自動領域に手動変更またはハッシュ欠損があります。\n':''}${conflicts?'注意: 競合ファイルがあります。doctorで確認してください。\n':''}\n${auto[1].trim().replace(/\]\(\.\.\/\.\.\/(00_inbox\/[^)]*)\)/g, ']($1)')}\n`;
+  return `# ${definition.title}\n\n更新: ${displayTime(String(meta.generated_at))} / 最終根拠: ${displayTime(String(meta.last_evidence_at))}\n参照: [NOW.md](${path})\n${notices?notices+'\n':''}${!intact?'注意: 自動領域に手動変更またはハッシュ欠損があります。\n':''}${conflicts?'注意: 自動領域が手で変更されたため、このNOWは更新が止まっています。`ctx conflict list`で差分を確認し、`ctx conflict resolve`で生成版に戻せます（手で変えた行はメモとして残ります）。\n':''}\n${auto[1].trim().replace(/\]\(\.\.\/\.\.\/(00_inbox\/[^)]*)\)/g, ']($1)')}\n`;
 }
 export async function context(config: HubConfig, project: string, maxChars = config.retrieve.contextMaxChars): Promise<string> {
   projectIdSchema.parse(project);
