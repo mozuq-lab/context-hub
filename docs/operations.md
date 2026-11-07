@@ -8,9 +8,12 @@ HOMEで受領、整理待ち、失敗、競合、停滞しているプロジェ�
 node packages/core/dist/cli.js --config "<設定ファイル>" doctor
 node packages/core/dist/cli.js --config "<設定ファイル>" pending
 node packages/core/dist/cli.js --config "<設定ファイル>" find "<検索語>"
+node packages/core/dist/cli.js --config "<設定ファイル>" find --project "<project-id>" --kind memo,work-summary --since 2026-10-01
 node packages/core/dist/cli.js --config "<設定ファイル>" context "<project-id>" --max-chars 6000
 node packages/core/dist/cli.js --config "<設定ファイル>" digest
 ```
+
+`find`は空白区切りの語をすべて含む記録を、一致数の多い順に最大50件返します。`--project`（帰属・関連するプロジェクト。AI推定の関連は「関連候補（AI推定、帰属未確定）」と表示）、`--kind`（`memo`・`work-summary`・`correction`・`idea`・`knowledge`・`now`のカンマ区切り）、`--since`・`--until`（`YYYY-MM-DD`は日本時間の日付、またはタイムゾーン付き日時）で絞り込めます。絞り込み条件があれば検索語は省略でき、その場合は新しい順に並べます。`--sort newest`で新しい順、`--limit`（1〜200）と`--offset`で続きを読めます。期間と新しい順は、原文は発生日時、NOWは最終根拠の日時、アイデアは元のメモの発生日時、知識は採用日時で判断します。共通の知識はプロジェクトで絞り込んだ結果に含めず、分類を取り消したアイデアは`--kind idea`に含めません。
 
 原文や生成物を手動で書き換える前に、訂正履歴と競合を確認してください。同期による削除はほかの端末にも伝わるため、同期だけをバックアップとして扱いません。
 
