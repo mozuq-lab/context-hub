@@ -77,7 +77,11 @@ export function dateLabel(iso: string, timezone: string): string { return new In
 
 /** 最後に書いたNOWの自動領域。手で変えた行を求める基準。 */
 export const nowBaselinePath = (projectId: string) => `90_system/now-generated/${projectId}.json`;
-export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectId: string, inputs: Input[], receipts: Receipt[], generatedAt = new Date().toISOString()): Promise<{ path: string; conflict?: string }> {
+/**
+ * NOWを根拠から作り直す。overwriteAutoは本人が「生成版に戻す」を確認した場合だけ使い、
+ * 手で書き換えた自動領域を上書きする（自動領域の外の手動領域は保持する）。
+ */
+export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectId: string, inputs: Input[], receipts: Receipt[], generatedAt = new Date().toISOString(), options: { overwriteAuto?: boolean } = {}): Promise<{ path: string; conflict?: string }> {
   if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(projectId)) throw new Error('プロジェクトIDが不正です');
   const chains=await readCorrectionChains(config), hashes=new Map(chains.map(c=>[c.root.id,c.evidenceHash]));
   const units = await applyAssociations(config,effectiveFromInputs(inputs,receipts).map(e=>({...e,chain:{...e.chain,evidenceHash:hashes.get(e.chain.root.id)??''}})));
@@ -130,6 +134,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
       if (!region) conflict = true;
       else { before = region.before; after = region.after; conflict = parsed.meta.generated_hash !== `sha256:${hash(region.auto)}`; }
     } catch { conflict = true; }
+    if (options.overwriteAuto) conflict = false;
   }
   const meta = { ...oldMeta, schema_version: 1, project: projectId, generated_by: { model: 'deterministic-writer', prompt_version: 1 }, generated_at: generatedAt, last_evidence_at: evidence.at(-1)?.input.occurred_at ?? null, input_ids: evidence.map(({ input }) => input.id), verified: false, generated_hash: `sha256:${hash(auto)}` };
   const content = markdown(meta, `${before}${autoStart}${auto}${autoEnd}${after}`);

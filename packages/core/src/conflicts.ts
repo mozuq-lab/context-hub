@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
-import { Vault, hash, markdown, parseMarkdown } from './storage.js';
-import { capture, readInputs } from './capture.js';
+import { Vault, hash, parseMarkdown } from './storage.js';
+import { captureLocked, readInputs } from './capture.js';
 import { projectIdSchema, readProjects } from './projects.js';
 import { autoRegion, nowBaselinePath, readReceipts, rebuildNowLocked } from './views.js';
 import type { HubConfig } from './types.js';
@@ -63,6 +63,8 @@ export function manualLines(current: string, generated: string): string[] {
   const known = new Set(generated.split(/\r?\n/).map(l => l.trim()));
   return [...new Set(current.split(/\r?\n/).map(l => l.trim()).filter(l => l && !known.has(l)))];
 }
+/** NOWの生成行に付く出典（入力IDへのリンクと日時・出典の注記）。 */
+export const generatedRowPattern = /\[IN-[0-9A-HJKMNP-TV-Z]{26}\]\(\.\.\/\.\.\/00_inbox\/[^)]*\)\s*\[[^\]]*出典:/;
 /** 手で変える前に書いた自動領域。NOWのgenerated_hashと一致する基準がなければ最新の退避と比べる。 */
 async function nowManualLines(vault: Vault, target: string, raw: string | undefined, latest: string): Promise<{ lines: string[]; baseline: 'generated' | 'latest' }> {
   const projectId = target.split('/')[1]!;
@@ -71,7 +73,9 @@ async function nowManualLines(vault: Vault, target: string, raw: string | undefi
     const base = z.object({ schema_version: z.literal(1), project: z.string(), generated_hash: z.string(), auto: z.string() }).strict().parse(JSON.parse((await vault.read(nowBaselinePath(projectId))) ?? 'null'));
     if (base.project === projectId && typeof expected === 'string' && base.generated_hash === expected && `sha256:${hash(base.auto)}` === expected) return { lines: manualLines(editableText(raw, 'now'), base.auto), baseline: 'generated' };
   } catch { /* 基準がない旧版のNOWは、最新の退避と比べる。 */ }
-  return { lines: manualLines(editableText(raw, 'now'), editableText(await vault.read(latest), 'now')), baseline: 'latest' };
+  // 基準がなければ最新の退避と比べる。出典付きの行は、その後の入力で生成側が変わった行と手で直した行を区別できないため含めない。
+  const lines = manualLines(editableText(raw, 'now'), editableText(await vault.read(latest), 'now')).filter(l => !generatedRowPattern.test(l));
+  return { lines, baseline: 'latest' };
 }
 function generatedAt(raw: string | undefined): string | null {
   if (raw === undefined) return null;
@@ -99,7 +103,7 @@ export async function listConflicts(config: HubConfig): Promise<ConflictGroup[]>
 
 export const conflictResolutionSchema = z.object({
   schema_version: z.literal(1), id: conflictResolutionIdSchema, target: resolvableTargetSchema, kind: z.enum(['now', 'home', 'review']),
-  before_hash: digest, replaced_text: z.string(), conflict_files: z.array(z.string()).min(1), memo_input_id: z.string().regex(new RegExp(`^IN-${ulidPart}$`)).optional(),
+  before_hash: digest, replaced_text: z.string(), conflict_files: z.array(z.string().regex(/^90_system\/conflicts\/[^/]+$/)).min(1), memo_input_id: z.string().regex(new RegExp(`^IN-${ulidPart}$`)).optional(),
   source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(1000).optional(), resolved_at: z.string().datetime({ offset: true }),
 }).strict();
 export type ConflictResolution = z.infer<typeof conflictResolutionSchema>;
@@ -140,78 +144,66 @@ function memoText(target: string, title: string | undefined, lines: string[], ma
 
 /**
  * 本人が確認した対象ファイルのハッシュに結び付けて、生成物を最新の入力から作り直し、退避を片付ける。
- * NOWでは手で変えた行をメモ（memo、同じプロジェクト）として先に保存する。置き換えた内容は記録に全文残す。
- * 同じ受付IDの再送では、途中で止まった手順だけを続ける。
+ * NOWでは手で変えた行をメモ（memo、同じプロジェクト）として保存する。置き換えた内容は記録に全文残す。
+ * 全手順を1つのWriterロック内で行い、確認後に対象が変わっていればメモも作らない。
+ * 同じ受付IDの再送では、記録に結び付いた退避と作り直しのうち、途中で止まった手順だけを続ける。
  */
 export async function resolveConflict(config: HubConfig, request: ConflictResolveRequest): Promise<ConflictResolveResult> {
   const r = requestSchema.parse(request), vault = new Vault(config), kind = kindOf(r.target);
   const projectId = kind === 'now' ? projectIdSchema.parse(r.target.split('/')[1]) : undefined;
-  const findPrevious = async () => r.sourceEventId ? (await readConflictResolutions(vault)).find(x => x.source === r.source && x.source_event_id === r.sourceEventId) : undefined;
-  // 1. 対象と退避を確認し、手で変えた行を求める。モデルは呼ばない。
-  const plan = await vault.withLock(async () => {
-    const previous = await findPrevious();
-    if (previous) {
-      if (previous.target !== r.target || previous.before_hash !== r.expectedHash) throw new Error('同じ受付IDで別の競合の片付けが記録されています');
-      return { previous };
-    }
-    const raw = await vault.read(r.target), files = await conflictFilesFor(vault, r.target);
-    if (raw === undefined || hash(raw) !== r.expectedHash) throw new ConflictResolveError({ code: 'conflict-target-changed' });
-    if (!files.length) throw new ConflictResolveError({ code: 'conflict-missing' });
-    const title = projectId ? (await readProjects(config)).find(p => p.id === projectId)?.title : undefined;
-    if (projectId && title === undefined) throw new Error('プロジェクトが見つかりません');
-    if (kind !== 'now' || r.saveManualAsMemo === false) return { memo: undefined };
-    const { lines } = await nowManualLines(vault, r.target, raw, files.at(-1)!);
-    return { memo: memoText(r.target, title, lines, config.capture.maxInputChars) };
-  });
-  // 2. 手で変えた行をメモとして保存する（captureは自身でロックを取り、同じイベントIDの再送では重複保存しない）。
-  let memoInputId = 'previous' in plan ? plan.previous?.memo_input_id : undefined;
-  if ('memo' in plan && plan.memo) {
-    const eventId = r.sourceEventId ? `${r.sourceEventId}:now-manual-edit` : `conflict:${r.target}:${r.expectedHash}`;
-    memoInputId = (await capture(config, { source: r.source, sourceEventId: eventId, text: plan.memo, kind: 'memo', occurredAt: new Date().toISOString(), project: projectId })).inputId;
-  }
-  // 3. 記録を先に作り、作り直しと退避の片付けを行う。
   return vault.withLock(async () => {
-    let record = await findPrevious(), deduped = true;
-    const raw = await vault.read(r.target);
-    if (!record) {
-      deduped = false;
+    let record = r.sourceEventId ? (await readConflictResolutions(vault)).find(x => x.source === r.source && x.source_event_id === r.sourceEventId) : undefined;
+    const raw = await vault.read(r.target), deduped = record !== undefined;
+    if (record) {
+      if (record.target !== r.target || record.before_hash !== r.expectedHash) throw new Error('同じ受付IDで別の競合の片付けが記録されています');
+    } else {
       if (raw === undefined || hash(raw) !== r.expectedHash) throw new ConflictResolveError({ code: 'conflict-target-changed' });
       const files = await conflictFilesFor(vault, r.target);
       if (!files.length) throw new ConflictResolveError({ code: 'conflict-missing' });
+      const title = projectId ? (await readProjects(config)).find(p => p.id === projectId)?.title : undefined;
+      if (projectId && title === undefined) throw new Error('プロジェクトが見つかりません');
+      // 手で変えた行をメモとして残す。同じイベントIDの再送では同じ入力を返す。
+      let memoInputId: string | undefined;
+      if (kind === 'now' && r.saveManualAsMemo !== false) {
+        const memo = memoText(r.target, title, (await nowManualLines(vault, r.target, raw, files.at(-1)!)).lines, config.capture.maxInputChars);
+        const eventId = r.sourceEventId ? `${r.sourceEventId}:now-manual-edit` : `conflict:${r.target}:${r.expectedHash}`;
+        if (memo) memoInputId = (await captureLocked(config, vault, { source: r.source, sourceEventId: eventId, text: memo, kind: 'memo', occurredAt: new Date().toISOString(), project: projectId })).inputId;
+      }
       record = { schema_version: 1, id: `CRS-${ulid()}`, target: r.target, kind, before_hash: r.expectedHash, replaced_text: raw, conflict_files: files, ...(memoInputId ? { memo_input_id: memoInputId } : {}), source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), resolved_at: new Date().toISOString() };
       if (!await vault.create(`${resolutionDir}/${record.id}.json`, JSON.stringify(record, null, 2) + '\n')) throw new Error('競合の片付けの記録が競合しました');
     }
-    // 記録時点の内容のままなら作り直す。既に作り直した後の再送では、残った退避の片付けだけを行う。
-    if (raw !== undefined && hash(raw) === record.before_hash) await regenerateLocked(config, vault, record.target, raw);
+    // 記録に結び付いた退避だけを片付ける。記録後に手で書き換えて新しく退避されたものは残す。
     let archived = 0;
-    for (const path of new Set([...record.conflict_files, ...await conflictFilesFor(vault, record.target)])) {
+    for (const path of record.conflict_files) {
+      const t = conflictTargetOf(path);
+      if (t.kind === 'other' || t.target !== record.target) throw new Error('競合の片付けの記録が不正です。doctorで確認してください');
       const content = await vault.read(path); if (content === undefined) continue;
       await vault.create(`${conflictArchiveDir}/${record.id}/${path.slice(conflictDir.length + 1)}`, content);
       await vault.remove(path); archived++;
     }
+    // 退避を片付けた後に作り直す（HOMEが片付けた競合を載せないように）。記録時点の内容のまま、
+    // または作り直しの途中で対象が消えた場合だけ作り直し、その後に手で書き換えた内容は上書きしない。
+    if (raw === undefined || hash(raw) === record.before_hash) await regenerateLocked(config, vault, record.target, record.replaced_text);
     return { target: record.target, conflictResolutionId: record.id, ...(record.memo_input_id ? { memoInputId: record.memo_input_id } : {}), archived, deduped };
   });
 }
 
-async function regenerateLocked(config: HubConfig, vault: Vault, target: string, raw: string): Promise<void> {
+async function regenerateLocked(config: HubConfig, vault: Vault, target: string, replaced: string): Promise<void> {
   const kind = kindOf(target);
   if (kind === 'now') {
-    const projectId = target.split('/')[1]!;
-    // 自動領域の外（人が書く手動領域）を残すため、今の自動領域のハッシュを付け直してから通常の再生成で置き換える。
-    let region: ReturnType<typeof autoRegion>, meta: Record<string, unknown> | undefined;
-    try { const parsed = parseMarkdown(raw); meta = parsed.meta; region = autoRegion(parsed.text); if (region) await vault.write(target, markdown({ ...meta, generated_hash: `sha256:${hash(region.auto)}` }, parsed.text)); } catch { region = undefined; }
-    if (!region) await vault.remove(target);
-    const written = await rebuildNowLocked(vault, config, projectId, await readInputs(config), await readReceipts(config));
+    // 自動領域だけを置き換え、外の手動領域は保持する。途中で止まってもNOWは手で書き換えたままか、作り直し後のどちらかになる。
+    const written = await rebuildNowLocked(vault, config, target.split('/')[1]!, await readInputs(config), await readReceipts(config), new Date().toISOString(), { overwriteAuto: true });
     if (written.conflict) throw new Error('NOWを作り直せませんでした。doctorで確認してください');
     return;
   }
+  // HOME・REVIEWは全体が派生物なので、消してから作り直す。途中で止まった場合は同じ受付IDの再送で作り直す。
   await vault.remove(target);
   if (kind === 'home') {
     const { rebuildDashboardLocked } = await import('./dashboard.js');
     if ((await rebuildDashboardLocked(config, vault)).conflict) throw new Error('HOMEを作り直せませんでした');
   } else {
     let days: number | undefined;
-    try { const d = parseMarkdown(raw).meta.period_days; if (typeof d === 'number' && Number.isSafeInteger(d) && d > 0) days = d; } catch { /* 読めないふりかえりは設定の日数で作り直す。 */ }
+    try { const d = parseMarkdown(replaced).meta.period_days; if (typeof d === 'number' && Number.isSafeInteger(d) && d > 0) days = d; } catch { /* 読めないふりかえりは設定の日数で作り直す。 */ }
     const { rebuildDigestLocked } = await import('./digest.js');
     if ((await rebuildDigestLocked(config, vault, days ? { days } : {})).conflict) throw new Error('ふりかえりを作り直せませんでした');
   }

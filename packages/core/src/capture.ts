@@ -27,15 +27,14 @@ export async function readInputs(config: HubConfig): Promise<Input[]> {
   return result.sort((a,b) => Date.parse(a.occurred_at)-Date.parse(b.occurred_at) || a.id.localeCompare(b.id));
 }
 export function eventMarker(source: string, eventId: string): string { return `90_system/receipts/events/${hash(source)}/${hash(eventId)}`; }
-export async function capture(config: HubConfig, request: CaptureRequest): Promise<CaptureResult> {
+/** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
+export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
   if (!request.text?.trim() || request.text.length > config.capture.maxInputChars) throw new Error('本文が空か文字数上限を超えています');
   const meta = inputSchema.omit({ text: true, path: true }).parse({ schema_version: 1, id: `IN-${ulid()}`,
     source: request.source, source_event_id: request.sourceEventId ?? ulid(), occurred_at: request.occurredAt,
     received_at: request.receivedAt ?? new Date().toISOString(), kind: request.kind ?? 'memo', project: request.project,
     tool: request.tool, meta: request.meta, origin: request.kind === 'work-summary' ? 'ai-self-report' : 'user-note' });
-  const vault = new Vault(config);
-  const started = Date.now();
-  const result = await vault.withLock(async () => {
+  {
     const marker = eventMarker(meta.source, meta.source_event_id), existing = await vault.read(marker);
     const inputs = await readInputs(config);
     const matching = inputs.filter(x => x.source === meta.source && x.source_event_id === meta.source_event_id);
@@ -52,7 +51,12 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
     if (!await vault.create(path, markdown(meta, request.text))) throw new Error('入力IDが競合しました。再送してください');
     if (!await vault.create(marker, `${meta.id}\n`)) throw new Error('イベント記録が競合しました。再送してください');
     return { inputId: meta.id, deduped: false, path, receivedAt: meta.received_at };
-  });
+  }
+}
+export async function capture(config: HubConfig, request: CaptureRequest): Promise<CaptureResult> {
+  const vault = new Vault(config);
+  const started = Date.now();
+  const result = await vault.withLock(() => captureLocked(config, vault, request));
   if (!await logOperation(config, { op: 'capture', input_id: result.inputId, ms: Date.now() - started, counts: { deduped: Number(result.deduped) } })) process.stderr.write('警告: 運用ログを書き込めませんでした。原文は保存済みです。\n');
   return result;
 }

@@ -125,6 +125,8 @@ test('HOMEとふりかえりの競合も作り直し、メモは作らない', a
   const r2 = await resolveConflict(config, { target: 'REVIEW.md', expectedHash: hash(review), source: 'cli' });
   expect(r1.memoInputId).toBeUndefined(); expect(r2.memoInputId).toBeUndefined();
   expect(await vault.read('HOME.md')).not.toContain('手で追記');
+  // 片付けたHOMEの競合を、作り直したHOMEに載せない。
+  expect(await vault.read('HOME.md')).not.toContain('conflicts/HOME.md.');
   expect(parseMarkdown((await vault.read('REVIEW.md'))!).meta.period_days).toBe(3);
   expect(await listConflicts(config)).toEqual([]);
 });
@@ -141,6 +143,8 @@ test('Inputからの依頼を受け付け、確認後の変更や競合のない
   const errors = await vault.files('90_system/intake-errors');
   const reasons = await Promise.all(errors.map(async p => JSON.parse((await vault.read(p))!)));
   expect(reasons.find(r => r.path === stale.path)?.reason).toEqual({ code: 'conflict-target-changed' });
+  // 確認後に変わっていた依頼では、手で変えた行のメモも作らない。
+  expect((await readInputs(config)).filter(i => i.kind === 'memo')).toHaveLength(0);
   const ok = await packet(config, { operation: 'conflict-resolve', target: nowPath, target_hash: hash(edited), confirmed: true });
   expect((await ingest(config)).accepted).toBe(1);
   const receipt = (await readIntakeReceipts(config)).find(r => r.request_id === ok.requestId)!;
@@ -157,9 +161,11 @@ test('作り直しの前に止まっても、同じ受付IDの再送で続きか
   vi.spyOn(Vault.prototype, 'remove').mockImplementation(async function (this: Vault, rel) { if (rel.startsWith('90_system/conflicts/')) throw new Error('停止'); return remove.call(this, rel); });
   await expect(resolveConflict(config, { target: nowPath, expectedHash: hash(edited), source: 'app', sourceEventId: 'REQ-x' })).rejects.toThrow('停止');
   vi.restoreAllMocks();
-  expect(await vault.read(nowPath)).toContain('公開準備中');
+  // 退避を片付けてから作り直すので、途中で止まったNOWは手で書き換えたままになる。
+  expect(await vault.read(nowPath)).toBe(edited);
   const again = await resolveConflict(config, { target: nowPath, expectedHash: hash(edited), source: 'app', sourceEventId: 'REQ-x' });
   expect(again).toMatchObject({ deduped: true, archived: 1 });
+  expect(await vault.read(nowPath)).toContain('公開準備中');
   expect(await listConflicts(config)).toEqual([]);
   expect(await readConflictResolutions(vault)).toHaveLength(1);
   expect((await readInputs(config)).filter(i => i.kind === 'memo')).toHaveLength(1);
@@ -169,8 +175,42 @@ test('基準が残っていない旧版のNOWは、最新の退避と比べて�
   const config = await setup(), vault = new Vault(config);
   await report(config, '2026-09-14T12:00:00+09:00', '実装済み');
   await vault.remove('90_system/now-generated/context-hub.json');
-  await editNow(vault); await report(config, '2026-09-15T12:00:00+09:00', '実装済み');
+  await editNow(vault);
+  await vault.write(nowPath, (await vault.read(nowPath))!.replace('<!-- ctx:auto:end -->', '- 手で足した行\n<!-- ctx:auto:end -->'));
+  await report(config, '2026-09-15T12:00:00+09:00', '公開準備中');
   const [group] = await listConflicts(config);
   expect(group!.baseline).toBe('latest');
-  expect(group!.manualLines.some(l => l.startsWith('- 人が直した現在地'))).toBe(true);
+  // 出典付きの行は、生成側の更新と手で直した行を区別できないため含めない。
+  expect(group!.manualLines).toEqual(['- 手で足した行']);
+});
+
+test('同じ受付IDの再送では、記録後に新しく退避された競合を片付けず、手で書き換えたNOWも上書きしない', async () => {
+  const config = await setup(), vault = new Vault(config);
+  await report(config, '2026-09-14T12:00:00+09:00', '実装済み');
+  const edited = await editNow(vault); await report(config, '2026-09-15T12:00:00+09:00', '公開準備中');
+  await resolveConflict(config, { target: nowPath, expectedHash: hash(edited), source: 'app', sourceEventId: 'REQ-y' });
+  const again = (await vault.read(nowPath))!.replace('- 公開準備中', '- また手で直した');
+  await vault.write(nowPath, again); await report(config, '2026-09-16T12:00:00+09:00', 'レビュー中');
+  expect(await listConflicts(config)).toHaveLength(1);
+  const resend = await resolveConflict(config, { target: nowPath, expectedHash: hash(edited), source: 'app', sourceEventId: 'REQ-y' });
+  expect(resend).toMatchObject({ deduped: true, archived: 0 });
+  expect(await vault.read(nowPath)).toBe(again);
+  expect(await listConflicts(config)).toHaveLength(1);
+});
+
+test('記録の退避一覧が対象と合わない場合は、ファイルを消さずに止める', async () => {
+  const config = await setup(), vault = new Vault(config);
+  await report(config, '2026-09-14T12:00:00+09:00', '実装済み');
+  const edited = await editNow(vault); await report(config, '2026-09-15T12:00:00+09:00', '公開準備中');
+  vi.spyOn(Vault.prototype, 'remove').mockImplementationOnce(async () => { throw new Error('停止'); });
+  await expect(resolveConflict(config, { target: nowPath, expectedHash: hash(edited), source: 'app', sourceEventId: 'REQ-z' })).rejects.toThrow('停止');
+  vi.restoreAllMocks();
+  const [record] = await readConflictResolutions(vault);
+  const other = '90_system/conflicts/HOME.md.01JZ0000000000000000000000.md';
+  await vault.write(other, '# 別の競合\n');
+  await vault.write(`90_system/conflict-resolutions/${record!.id}.json`, JSON.stringify({ ...record, conflict_files: [other] }));
+  await expect(resolveConflict(config, { target: nowPath, expectedHash: hash(edited), source: 'app', sourceEventId: 'REQ-z' })).rejects.toThrow('不正');
+  expect(await vault.read(other)).toBe('# 別の競合\n');
+  await vault.write(`90_system/conflict-resolutions/${record!.id}.json`, JSON.stringify({ ...record, conflict_files: ['00_inbox/x.md'] }));
+  await expect(readConflictResolutions(vault)).rejects.toThrow();
 });

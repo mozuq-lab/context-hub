@@ -82,3 +82,15 @@ test('定義の書き込み前に止まっても、同じ受付IDの再送で同
   expect(parseMarkdown((await vault.read(`10_projects/${id}/project.md`))!).meta).toMatchObject({ id, title: '家庭菜園' });
   expect((await readInputs(config)).filter(i => i.project === id)).toHaveLength(1);
 });
+
+test('定義の書き込み前に止まった間に重なる名前のプロジェクトが作られたら、再送でも作らない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  const request = { projectId: id, title: '家庭菜園', aliases: ['菜園'], keywords: [], occurredAt: '2026-10-03T10:00:00Z', source: 'android-app', sourceEventId: 'REQ-1' };
+  const create = Vault.prototype.create;
+  vi.spyOn(Vault.prototype, 'create').mockImplementation(async function (this: Vault, rel, text) { if (rel === `10_projects/${id}/project.md`) throw new Error('停止'); return create.call(this, rel, text); });
+  await expect(createProject(config, request)).rejects.toThrow('停止');
+  vi.restoreAllMocks();
+  await createProject(config, { ...request, projectId: 'project-01jc3b7q8k9m0n1p2q3r4s5t6w', aliases: [], sourceEventId: 'REQ-2' });
+  await expect(createProject(config, request)).rejects.toMatchObject({ reason: { code: 'project-overlap', project_id: 'project-01jc3b7q8k9m0n1p2q3r4s5t6w' } });
+  expect(await vault.read(`10_projects/${id}/project.md`)).toBeUndefined();
+});

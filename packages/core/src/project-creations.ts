@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault, hash, markdown } from './storage.js';
-import { capture } from './capture.js';
+import { captureLocked } from './capture.js';
 import { overlappingProject, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig } from './types.js';
@@ -54,26 +54,31 @@ export async function createProject(config: HubConfig, request: ProjectCreateReq
   const memo = r.firstMemo?.trim() ? r.firstMemo : undefined;
   if (memo !== undefined && memo.length > config.capture.maxInputChars) throw new Error('最初のメモが文字数上限を超えています');
   const vault = new Vault(config), path = `10_projects/${r.projectId}/project.md`, content = definition(r.projectId, fields);
-  const created = await vault.withLock(async () => {
-    const previous = r.sourceEventId ? (await readProjectCreations(vault)).find(c => c.source === r.source && c.source_event_id === r.sourceEventId) : undefined;
-    if (previous) {
-      if (previous.project_id !== r.projectId || previous.project_hash !== hash(content) || previous.first_memo_hash !== (memo === undefined ? undefined : hash(memo))) throw new Error('同じ受付IDで別のプロジェクト作成が記録されています');
-      // 記録後・定義の書き込み前に止まった場合は、同じ内容で定義を作る。
-      if (await vault.read(path) === undefined) { await vault.create(path, content); await rebuildPoliciesLocked(config, vault); }
-      return { record: previous, deduped: true };
+  return vault.withLock(async () => {
+    const creations = await readProjectCreations(vault), projects = await readProjects(config);
+    let record = r.sourceEventId ? creations.find(c => c.source === r.source && c.source_event_id === r.sourceEventId) : undefined;
+    const deduped = record !== undefined;
+    if (record) {
+      if (record.project_id !== r.projectId || record.project_hash !== hash(content) || record.first_memo_hash !== (memo === undefined ? undefined : hash(memo))) throw new Error('同じ受付IDで別のプロジェクト作成が記録されています');
+      // 記録後・定義の書き込み前に止まった場合は、その間に重なる名前のプロジェクトが作られていないことを確かめて同じ内容で定義を作る。
+      // 定義のない記録は新しい依頼の重なり判定に含めない（手で消したプロジェクトの名前を使えなくしないため）。
+      if (await vault.read(path) === undefined) {
+        const overlap = overlappingProject(fields, projects.filter(p => p.id !== r.projectId));
+        if (overlap) throw new ProjectCreateError({ code: 'project-overlap', project_id: overlap.id });
+        if (!await vault.create(path, content)) throw new Error('プロジェクト定義の作成が競合しました');
+        await rebuildPoliciesLocked(config, vault);
+      }
+    } else {
+      if (projects.some(p => p.id === r.projectId) || creations.some(c => c.project_id === r.projectId) || await vault.read(path) !== undefined) throw new ProjectCreateError({ code: 'project-exists' });
+      const overlap = overlappingProject(fields, projects);
+      if (overlap) throw new ProjectCreateError({ code: 'project-overlap', project_id: overlap.id });
+      record = { schema_version: 1, id: `PCR-${ulid()}`, project_id: r.projectId, ...fields, project_hash: hash(content), ...(memo !== undefined ? { first_memo_hash: hash(memo) } : {}), source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString() };
+      if (!await vault.create(`${creationDir}/${record.id}.json`, JSON.stringify(record, null, 2) + '\n')) throw new Error('プロジェクト作成の記録が競合しました');
+      if (!await vault.create(path, content)) throw new ProjectCreateError({ code: 'project-exists' });
+      await rebuildPoliciesLocked(config, vault);
     }
-    const projects = await readProjects(config);
-    if (projects.some(p => p.id === r.projectId) || await vault.read(path) !== undefined) throw new ProjectCreateError({ code: 'project-exists' });
-    const overlap = overlappingProject(fields, projects);
-    if (overlap) throw new ProjectCreateError({ code: 'project-overlap', project_id: overlap.id });
-    const record: ProjectCreation = { schema_version: 1, id: `PCR-${ulid()}`, project_id: r.projectId, ...fields, project_hash: hash(content), ...(memo !== undefined ? { first_memo_hash: hash(memo) } : {}), source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString() };
-    if (!await vault.create(`${creationDir}/${record.id}.json`, JSON.stringify(record, null, 2) + '\n')) throw new Error('プロジェクト作成の記録が競合しました');
-    if (!await vault.create(path, content)) throw new ProjectCreateError({ code: 'project-exists' });
-    await rebuildPoliciesLocked(config, vault);
-    return { record, deduped: false };
+    // 最初のメモは、作ったプロジェクトの入力として同じロック内で保存する。同じ受付の再送では同じ入力を返す。
+    const inputId = memo === undefined ? undefined : (await captureLocked(config, vault, { source: r.source, sourceEventId: `${r.sourceEventId ?? record.id}:first-memo`, text: memo, kind: 'memo', occurredAt: r.occurredAt, project: r.projectId })).inputId;
+    return { projectId: r.projectId, creationId: record.id, ...(inputId ? { firstMemoInputId: inputId } : {}), deduped };
   });
-  // 最初のメモは、作ったプロジェクトの入力として保存する。同じ受付の再送では同じ入力を返す。
-  let inputId: string | undefined;
-  if (memo !== undefined) inputId = (await capture(config, { source: r.source, sourceEventId: `${r.sourceEventId ?? created.record.id}:first-memo`, text: memo, kind: 'memo', occurredAt: r.occurredAt, project: r.projectId })).inputId;
-  return { projectId: r.projectId, creationId: created.record.id, ...(inputId ? { firstMemoInputId: inputId } : {}), deduped: created.deduped };
 }
