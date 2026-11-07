@@ -11,22 +11,32 @@ import { decideProject } from './project-proposals.js';
 import { setProjectStatus,projectStatusSchema } from './project-status.js';
 import { setItemResolution,itemActionSchema } from './item-resolutions.js';
 import { dismissGitDraft } from './git-drafts.js';
+import { createProject,ProjectCreateError,newProjectIdSchema,projectCreationIdSchema } from './project-creations.js';
+import { resolveConflict,ConflictResolveError,resolvableTargetSchema,conflictResolutionIdSchema } from './conflicts.js';
 import { projectIdSchema } from './projects.js';
 import { parseIntake,decodeIntake,requestIdSchema,type IntakeRequest } from './intake-format.js';
 import type { HubConfig } from './types.js';
 export interface IntakeRunResult { accepted:number; rejected:number; deferred:number; deduped:number; conflicts:string[]; requestIds:string[]; dryRun:boolean }
 const digest=z.string().regex(/^[a-f0-9]{64}$/);
-const operations=z.enum(['capture','correct','project-approve','project-reject','knowledge-approve','knowledge-reject','knowledge-retire','project-status','item-resolution','git-draft-dismiss']);
-export const intakeReceiptSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),operation:operations,status:z.literal('accepted'),received_at:z.string().datetime({offset:true}),result:z.union([z.object({draftId:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),dismissed:z.literal(true),deduped:z.boolean()}).strict(),z.object({projectId:projectIdSchema,itemKey:digest,action:itemActionSchema,resolutionId:z.string().regex(/^RES-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({projectId:projectIdSchema,status:projectStatusSchema,changeId:z.string().regex(/^PST-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({knowledgeId:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),retirementId:z.string().regex(/^KRET-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({inputId:inputIdSchema,path:z.string(),receivedAt:z.string(),deduped:z.boolean()}).strict(),z.object({candidateId:z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/),projectId:z.string().regex(/^project-[0-9a-hjkmnp-tv-z]{26}$/),decisionId:z.string().regex(/^PAPR-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({candidateId:z.string().regex(/^CAN-[0-9A-HJKMNP-TV-Z]{26}$/),approvalId:z.string().regex(/^APR-[0-9A-HJKMNP-TV-Z]{26}$/),knowledgeId:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/).optional(),adoptedTarget:adoptionTargetSchema.optional(),deduped:z.boolean()}).strict()])}).strict().refine(r=>{if(r.operation==='capture'||r.operation==='correct')return 'inputId'in r.result;if(r.operation==='project-approve'||r.operation==='project-reject')return 'decisionId'in r.result;if(r.operation==='knowledge-retire')return 'retirementId'in r.result;if(r.operation==='project-status')return 'changeId'in r.result;if(r.operation==='item-resolution')return 'resolutionId'in r.result;if(r.operation==='git-draft-dismiss')return 'dismissed'in r.result;return 'approvalId'in r.result&&(r.operation==='knowledge-approve'?'knowledgeId'in r.result:!('knowledgeId'in r.result));});
+const operations=z.enum(['capture','correct','project-approve','project-reject','knowledge-approve','knowledge-reject','knowledge-retire','project-status','item-resolution','git-draft-dismiss','project-create','conflict-resolve']);
+export const intakeReceiptSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),operation:operations,status:z.literal('accepted'),received_at:z.string().datetime({offset:true}),result:z.union([z.object({projectId:newProjectIdSchema,creationId:projectCreationIdSchema,firstMemoInputId:inputIdSchema.optional(),deduped:z.boolean()}).strict(),z.object({target:resolvableTargetSchema,conflictResolutionId:conflictResolutionIdSchema,memoInputId:inputIdSchema.optional(),archived:z.number().int().min(0),deduped:z.boolean()}).strict(),z.object({draftId:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),dismissed:z.literal(true),deduped:z.boolean()}).strict(),z.object({projectId:projectIdSchema,itemKey:digest,action:itemActionSchema,resolutionId:z.string().regex(/^RES-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({projectId:projectIdSchema,status:projectStatusSchema,changeId:z.string().regex(/^PST-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({knowledgeId:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),retirementId:z.string().regex(/^KRET-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({inputId:inputIdSchema,path:z.string(),receivedAt:z.string(),deduped:z.boolean()}).strict(),z.object({candidateId:z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/),projectId:z.string().regex(/^project-[0-9a-hjkmnp-tv-z]{26}$/),decisionId:z.string().regex(/^PAPR-[0-9A-HJKMNP-TV-Z]{26}$/),deduped:z.boolean()}).strict(),z.object({candidateId:z.string().regex(/^CAN-[0-9A-HJKMNP-TV-Z]{26}$/),approvalId:z.string().regex(/^APR-[0-9A-HJKMNP-TV-Z]{26}$/),knowledgeId:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/).optional(),adoptedTarget:adoptionTargetSchema.optional(),deduped:z.boolean()}).strict()])}).strict().refine(r=>{if(r.operation==='capture'||r.operation==='correct')return 'inputId'in r.result;if(r.operation==='project-approve'||r.operation==='project-reject')return 'decisionId'in r.result;if(r.operation==='knowledge-retire')return 'retirementId'in r.result;if(r.operation==='project-status')return 'changeId'in r.result;if(r.operation==='item-resolution')return 'resolutionId'in r.result;if(r.operation==='git-draft-dismiss')return 'dismissed'in r.result;if(r.operation==='project-create')return 'creationId'in r.result;if(r.operation==='conflict-resolve')return 'conflictResolutionId'in r.result;return 'approvalId'in r.result&&(r.operation==='knowledge-approve'?'knowledgeId'in r.result:!('knowledgeId'in r.result));});
 const pendingSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),raw:z.string()}).strict();
 const intakeReasonSchema=z.discriminatedUnion('code',[
  z.object({code:z.literal('stale-correction-target'),latest_input_id:inputIdSchema}).strict(),
  z.object({code:z.literal('missing-correction-target')}).strict(),
+ z.object({code:z.literal('project-exists')}).strict(),
+ z.object({code:z.literal('project-overlap'),project_id:projectIdSchema}).strict(),
+ z.object({code:z.literal('conflict-target-changed')}).strict(),
+ z.object({code:z.literal('conflict-missing')}).strict(),
 ]);
 export const intakeErrorSchema=z.object({schema_version:z.literal(1),path:z.string(),file_hash:z.string(),status:z.enum(['error','conflict']),code:z.string(),updated_at:z.string().datetime({offset:true}),reason:intakeReasonSchema.optional()}).strict();
 export function intakeErrorMessage(record:z.infer<typeof intakeErrorSchema>):string{
  if(record.reason?.code==='stale-correction-target')return `訂正対象が古くなっています。同期して最新ID ${record.reason.latest_input_id} を対象に新しい訂正を送ってください。`;
  if(record.reason?.code==='missing-correction-target')return '訂正対象がありません。同期して対象IDを確認し、新しい訂正を送ってください。';
+ if(record.reason?.code==='project-exists')return '同じIDのプロジェクトが既にあります。作成し直す場合は新しい依頼を送ってください。';
+ if(record.reason?.code==='project-overlap')return `名前か別名が既存のプロジェクト（${record.reason.project_id}）と重なるため作成しませんでした。名前を変えて新しい依頼を送るか、既存のプロジェクトを使ってください。`;
+ if(record.reason?.code==='conflict-target-changed')return '確認した後にNOW（または生成物）が変更されています。同期してから差分を確認し直し、新しい依頼を送ってください。';
+ if(record.reason?.code==='conflict-missing')return '片付ける競合がありません。既に生成版へ戻っている可能性があります。';
  return record.code;
 }
 const ackPath=(id:string)=>`90_system/intake/${id}.json`,pendingPath=(id:string)=>`90_system/intake/pending/${id}.json`;
@@ -100,6 +110,8 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    else if(packet.operation==='project-status')result=await setProjectStatus(config,{projectId:packet.project_id,status:packet.status,expectedHash:packet.project_hash,source:packet.source,sourceEventId:id});
    else if(packet.operation==='item-resolution')result=await setItemResolution(config,{projectId:packet.project_id,itemKey:packet.item_key,action:packet.action,source:packet.source,sourceEventId:id});
    else if(packet.operation==='git-draft-dismiss')result=await dismissGitDraft(config,{draftId:packet.draft_id,expectedHash:packet.draft_hash,source:packet.source,sourceEventId:id});
+   else if(packet.operation==='project-create')result=await createProject(config,{projectId:packet.project_id,title:packet.title,aliases:packet.aliases,keywords:packet.keywords,firstMemo:packet.text,occurredAt:packet.occurred_at,source:packet.source,sourceEventId:id});
+   else if(packet.operation==='conflict-resolve')result=await resolveConflict(config,{target:packet.target,expectedHash:packet.target_hash,source:packet.source,sourceEventId:id});
    else if(packet.operation==='knowledge-reject')result=await reject(config,packet.candidate_id,packet.candidate_hash);
    else if('confirmation_token'in packet)result=await decideProject(config,{candidateId:packet.candidate_id,expectedHash:packet.candidate_hash,confirmationToken:packet.confirmation_token,confirmed:packet.confirmed,action:packet.operation==='project-approve'?'approve':'reject',source:packet.source,sourceEventId:id});
    else throw new Error('受付操作が不正です');
@@ -109,7 +121,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
     const existing=intakeReceiptSchema.parse(JSON.parse((await vault.read(ackPath(id)))!));if(existing.request_hash!==requestHash)throw new Error('conflict');return false;
    });
    if(accepted)outcome.accepted++;else outcome.deduped++;
-  }catch(error){const conflict=error instanceof Error&&(error.message==='conflict'||error.message==='event-conflict');await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,error instanceof CorrectionTargetError?error.reason:undefined);}
+  }catch(error){const conflict=error instanceof Error&&(error.message==='conflict'||error.message==='event-conflict');await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError?error.reason:undefined);}
  }
  return outcome;
 }

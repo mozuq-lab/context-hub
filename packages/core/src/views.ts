@@ -43,13 +43,22 @@ export function isGeneratedIntact(content: string): boolean {
     return expected === `sha256:${hash(markdown(meta, parsed.text))}`;
   } catch { return false; }
 }
+/**
+ * 人が書き換えた生成物の代わりに、新版を退避する。同じ対象の退避が既にあれば最新の1件を書き直し、
+ * 再生成のたびに退避が増え続けないようにする（退避は派生物で、正本は入力と処理記録）。
+ */
+async function stashConflictLocked(vault: Vault, stem: string, content: string): Promise<string> {
+  const escaped = stem.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&');
+  const pattern = new RegExp('^90_system/conflicts/' + escaped + '\\.[0-9A-HJKMNP-TV-Z]{26}\\.md$');
+  const latest = (await vault.files('90_system/conflicts')).filter(p => pattern.test(p)).sort().at(-1);
+  if (latest) { await vault.write(latest, content); return latest; }
+  const path = `90_system/conflicts/${stem}.${ulid()}.md`;
+  if (!await vault.create(path, content)) throw new Error('退避ファイルが競合しました');
+  return path;
+}
 export async function writeGeneratedLocked(vault: Vault, relative: string, content: string, frozen = false): Promise<{ path: string; conflict?: string }> {
   const existing = await vault.read(relative);
-  if (existing !== undefined && (frozen || !isGeneratedIntact(existing))) {
-    const conflict = `90_system/conflicts/${relative.replaceAll('/', '.')}.${ulid()}.md`;
-    if (!await vault.create(conflict, content)) throw new Error('退避ファイルが競合しました');
-    return { path: relative, conflict };
-  }
+  if (existing !== undefined && (frozen || !isGeneratedIntact(existing))) return { path: relative, conflict: await stashConflictLocked(vault, relative.replaceAll('/', '.'), content) };
   await vault.write(relative, content); return { path: relative };
 }
 
@@ -66,6 +75,8 @@ export function autoRegion(text: string): { before: string; auto: string; after:
 function plain(text: string): string { return text.replace(/[\r\n]+/g, ' ').replaceAll('<!--', '&lt;!--'); }
 export function dateLabel(iso: string, timezone: string): string { return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso)); }
 
+/** 最後に書いたNOWの自動領域。手で変えた行を求める基準。 */
+export const nowBaselinePath = (projectId: string) => `90_system/now-generated/${projectId}.json`;
 export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectId: string, inputs: Input[], receipts: Receipt[], generatedAt = new Date().toISOString()): Promise<{ path: string; conflict?: string }> {
   if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(projectId)) throw new Error('プロジェクトIDが不正です');
   const chains=await readCorrectionChains(config), hashes=new Map(chains.map(c=>[c.root.id,c.evidenceHash]));
@@ -124,12 +135,11 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const content = markdown(meta, `${before}${autoStart}${auto}${autoEnd}${after}`);
   // 項目一覧はNOWの手動編集と無関係に、常に最新の整理結果から書き直す。
   await vault.write(nowItemsPath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_at: generatedAt, items: [...items.values()] }, null, 2) + '\n');
-  if (conflict) {
-    const conflictPath = `90_system/conflicts/NOW.${projectId}.${ulid()}.md`;
-    if (!await vault.create(conflictPath, content)) throw new Error('NOWの退避ファイルが競合しました');
-    return { path: relative, conflict: conflictPath };
-  }
-  await vault.write(relative, content); return { path: relative };
+  if (conflict) return { path: relative, conflict: await stashConflictLocked(vault, `NOW.${projectId}`, content) };
+  await vault.write(relative, content);
+  // 手で書き換えられたときに「どこを変えたか」を示せるよう、書いた自動領域を基準として残す（NOW.mdのgenerated_hashと対応）。
+  await vault.write(nowBaselinePath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_hash: meta.generated_hash, auto }) + '\n');
+  return { path: relative };
 }
 
 export async function rebuildNow(config: HubConfig, projectId: string): Promise<{ path: string; conflict?: string }> {
