@@ -2,14 +2,14 @@ import { nowText } from './markdown-text.js';
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { readInputs } from './capture.js';
-import { readProjects, mergedSources } from './projects.js';
+import { readProjects, mergedSources, mergeTargets } from './projects.js';
 import { groundExtractedStatuses, organizeResultSchema } from './llm.js';
 import { groundExtractedHistory } from './llm.js';
 import { correctionNotice, effectiveFromInputs } from './effective-inputs.js';
 import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
-import { activeResolutions, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
+import { activeResolutions, closedMergeWindows, withinMergeWindow, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import { appliedReread, readExclusionOverlays } from './item-rereads.js';
@@ -175,9 +175,12 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
   // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。
   // 統合元で整理・見送りしたときの項目キーは統合元のIDで作られているため、同じ項目のこのプロジェクトでのキーへ対応付ける。
+  // 統合を取り消した後は、統合していた間に統合先で見送った組も、このプロジェクトの見送りとして読む（完了報告・日付の読み替えと同じ期間）。
+  const windows = await closedMergeWindows(vault, mergeTargets(projects)), owners = [projectId, ...sources];
+  const formerInto = [...windows.values()].flat().filter(w => owners.includes(w.from));
   const alias = new Map<string, string>();
-  for (const item of items.values()) for (const source of sources) alias.set(itemKey(source, item.section, item.input_id, item.text), item.key);
-  const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId || sources.includes(d.project_id)).map(d => dismissalKey(projectId, alias.get(d.item_key) ?? d.item_key, d.input_id)));
+  for (const item of items.values()) for (const other of [...sources, ...new Set(formerInto.map(w => w.into))]) alias.set(itemKey(other, item.section, item.input_id, item.text), item.key);
+  const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId || sources.includes(d.project_id) || formerInto.some(w => w.into === d.project_id && withinMergeWindow(windows, w.into, w.from, d.created_at))).map(d => dismissalKey(projectId, alias.get(d.item_key) ?? d.item_key, d.input_id)));
   const reopenedAt = new Map<string, number>();
   for (const r of resolutionRecords) if (r.project_id === projectId && r.action === 'reopen') reopenedAt.set(r.item_key, Math.max(reopenedAt.get(r.item_key) ?? 0, Date.parse(r.created_at)));
   const hinted: { item: NowItem; input: Input; quote: string }[] = [];

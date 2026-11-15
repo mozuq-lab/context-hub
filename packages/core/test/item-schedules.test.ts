@@ -149,3 +149,20 @@ test('受付ファイルの日付指定を反映し、同じ受付IDは重複さ
   expect(await home(vault)).toContain('[期日・見直す日の記録が不正です](90_system/item-schedules/SCH-01JZ0000000000000000000000.json)');
   expect((await doctor(config)).issues).toContain('期日・見直す日の記録が不正です: 90_system/item-schedules/SCH-01JZ0000000000000000000000.json');
 });
+
+test('引き継いだ日付の項目に自分の日付を付けてから外すと、引き継ぎ元の古い日付を復活させない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'alpha', title: 'アルファ' });
+  const ws = async (t: string, text: string) => { await capture(config, { source: 'file', kind: 'work-summary', tool: 'codex', project: 'alpha', occurredAt: t, receivedAt: t, text }); await organize(config, new MockLlm()); };
+  await ws('2026-10-01T00:00:00Z', '## 現在地\n- [確認済み] A\n## 次の一手\n- [確認済み] Xをする');
+  const k1 = (await readNowItems(vault, 'alpha'))!.items.find(i => i.section === 'next')!;
+  await setItemSchedule(config, { projectId: 'alpha', itemKey: k1.key, due: '2026-11-20', reviewAfter: null, source: 'cli' });
+  await ws('2026-10-05T00:00:00Z', '## 現在地\n- [確認済み] B\n## 次の一手\n- [確認済み] Xをする');
+  const k2 = (await readNowItems(vault, 'alpha'))!.items.find(i => i.section === 'next')!;
+  expect(k2.key).not.toBe(k1.key); expect(k2.schedule).toMatchObject({ due: '2026-11-20' });
+  await setItemSchedule(config, { projectId: 'alpha', itemKey: k2.key, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+  expect((await readNowItems(vault, 'alpha'))!.items.find(i => i.key === k2.key)!.schedule).toMatchObject({ due: '2026-12-01' });
+  await setItemSchedule(config, { projectId: 'alpha', itemKey: k2.key, due: null, reviewAfter: null, source: 'cli' });
+  expect((await readNowItems(vault, 'alpha'))!.items.find(i => i.key === k2.key)!.schedule).toBeNull();
+  expect(await vault.read('10_projects/alpha/NOW.md')).not.toContain('2026-11-20');
+});

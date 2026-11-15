@@ -68,11 +68,13 @@ export function activeSchedules(records: ItemSchedule[], projectId?: string): Ma
  */
 export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: { key: string; section: string; text: string; resolution: unknown }[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
   const active = activeSchedules(records, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, ItemSchedule>();
+  // 項目自身のキーで記録があれば（日付を外した記録を含む）、それが本人の最新の判断なので引き継ぎより優先する。
+  const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
   const loose = [...active.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
   const same = (r: ItemSchedule, i: { section: string; text: string }) => r.section === i.section && r.text === i.text;
   for (const item of items) {
     if (item.resolution) continue;
-    const direct = active.get(item.key), carried = loose.filter(r => same(r, item)).at(-1);
+    const direct = active.get(item.key), carried = own.has(item.key) ? undefined : loose.filter(r => same(r, item)).at(-1);
     if (direct ?? carried) byKey.set(item.key, (direct ?? carried)!);
   }
   const orphaned = loose.filter(r => !items.some(i => !i.resolution && same(r, i)));
