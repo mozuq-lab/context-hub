@@ -20,7 +20,7 @@ node scripts/prepare-policy-setup.mjs --config /absolute/path/config.json --out 
 {"policy":{"projectRoots":[{"path":"/absolute/path/worktree","projectId":"example-project"}]}}
 ```
 
-最深の実パス境界で選びます。別worktreeは別登録、同根の複数IDはエラー、未登録は共通方針だけです。名前やgit remoteから推定しません。明示IDで読むときは`ctx policies --project example-project`、作業フォルダーで読むときは`ctx policies --cwd /absolute/path/worktree`です。どちらも読取専用でモデルを呼びません。
+最深の実パス境界で選びます。別worktreeは別登録、同根の複数IDはエラー、未登録は共通方針だけです。登録したフォルダーが見つからない（外付けドライブを外した、リポジトリを消したなど）対応は、その対応だけを外して件数を警告に添え、ほかの作業フォルダーの依頼は止めません。どの対応かは`ctx doctor`で確認できます。名前やgit remoteから推定しません。明示IDで読むときは`ctx policies --project example-project`、作業フォルダーで読むときは`ctx policies --cwd /absolute/path/worktree`です。どちらも読取専用でモデルを呼びません。
 
 ## 実行方式の違い
 

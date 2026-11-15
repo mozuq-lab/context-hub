@@ -1,5 +1,5 @@
 import {realpath,lstat} from 'node:fs/promises';
-import {relative,isAbsolute,dirname,join} from 'node:path';
+import {relative,isAbsolute,dirname,join,resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {Vault,hash} from './storage.js';
 import {inspectProjects,mergeTargets,projectIdSchema} from './projects.js';
@@ -56,14 +56,41 @@ export async function policyProjectFor(config:HubConfig,projectId:string|undefin
  if(projectId===undefined)return undefined;
  try{return mergeTargets((await inspectProjects(config)).projects).get(projectId)??projectId;}catch{return projectId;}
 }
-export async function resolvePolicyProject(config:HubConfig,cwd:string):Promise<string|undefined>{
- if(!isAbsolute(cwd))throw new Error('作業フォルダーは絶対パスで指定してください');const actual=await realpath(cwd),roots=new Map<string,string>();
- for(const item of config.policy.projectRoots){const root=await realpath(item.path),old=roots.get(root);if(old!==undefined&&old!==item.projectId)throw new Error('作業フォルダーのプロジェクト対応が重複しています');roots.set(root,item.projectId);}
- const match=[...roots].filter(([root])=>{const rel=relative(root,actual);return rel===''||(!isAbsolute(rel)&&rel!=='..'&&!rel.startsWith('../'));}).sort((a,b)=>b[0].length-a[0].length)[0];
- if(!match)return;const[root,projectId]=match;
+/** 作業フォルダーに対応するプロジェクトと、見つからず対応付けから外した設定の件数。 */
+export interface PolicyTarget{projectId?:string;missingRoots:number}
+const inside=(root:string,path:string)=>{const rel=relative(root,path);return rel===''||(!isAbsolute(rel)&&rel!=='..'&&!rel.startsWith('../'));};
+/**
+ * 設定の作業フォルダー対応のうち、フォルダーが存在しないもの（外付けドライブ・消したリポジトリなど）は対応付けから外して数える。
+ * 作業フォルダーそのものは解決できているので、存在しない対応の内側にあることはない。存在はするが確かめられない対応
+ * （権限など）は、作業フォルダーがその内側にありうるときだけ失敗にする。
+ */
+export async function resolvePolicyTarget(config:HubConfig,cwd:string):Promise<PolicyTarget>{
+ if(!isAbsolute(cwd))throw new Error('作業フォルダーは絶対パスで指定してください');const actual=await realpath(cwd),roots=new Map<string,string>();let missingRoots=0;
+ for(const item of config.policy.projectRoots){
+  let root:string;
+  try{root=await realpath(item.path);}
+  catch(error){
+   const code=(error as NodeJS.ErrnoException).code;
+   if(code==='ENOENT'||code==='ENOTDIR'){missingRoots++;continue;}
+   if(inside(resolve(item.path),actual)||inside(resolve(item.path),cwd))throw error;
+   missingRoots++;continue;
+  }
+  const old=roots.get(root);if(old!==undefined&&old!==item.projectId)throw new Error('作業フォルダーのプロジェクト対応が重複しています');roots.set(root,item.projectId);
+ }
+ const match=[...roots].filter(([root])=>inside(root,actual)).sort((a,b)=>b[0].length-a[0].length)[0];
+ if(!match)return{missingRoots};const[root,projectId]=match;
  // 明示したルートより内側に別repo/worktreeがあれば、親projectの対応を継承しない。
  for(let cursor=actual;cursor!==root;cursor=dirname(cursor)){
-  try{await lstat(join(cursor,'.git'));return;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+  try{await lstat(join(cursor,'.git'));return{missingRoots};}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
  }
- return policyProjectFor(config,projectId);
+ return{projectId:await policyProjectFor(config,projectId),missingRoots};
+}
+export async function resolvePolicyProject(config:HubConfig,cwd:string):Promise<string|undefined>{return(await resolvePolicyTarget(config,cwd)).projectId;}
+/** 方針の読取に添える、見つからない作業フォルダー対応の警告。パスは出さない（AIのセッションへ渡るため）。 */
+export const missingRootsWarning=(count:number)=>`設定の作業フォルダー対応のうち${count}件は、見つからない作業フォルダーのため対応付けから外しています（ctx doctorで確認できます）。`;
+/** doctor用。存在しない、または確かめられない作業フォルダー対応。 */
+export async function policyRootProblems(config:HubConfig):Promise<string[]>{
+ const problems:string[]=[];
+ for(const item of config.policy.projectRoots){try{await realpath(item.path);}catch{problems.push(`作業フォルダーの対応付けが見つかりません: ${item.path}（${item.projectId}。方針の対応付けから外しています）`);}}
+ return problems;
 }
