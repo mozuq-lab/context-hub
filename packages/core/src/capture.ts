@@ -1,4 +1,6 @@
 import { ulid } from 'ulid';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { logOperation } from './logger.js';
 import { z } from 'zod';
 import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
@@ -34,6 +36,35 @@ const isInputPath = (path: string) => path.endsWith('.md') && !path.includes('.s
 export async function readInputs(config: HubConfig): Promise<Input[]> {
   return (await readInputRecords(config)).map(r => r.input);
 }
+const eventMarkerPath = /^90_system\/receipts\/events\/[0-9a-f]{64}\/[0-9a-f]{64}$/;
+/**
+ * イベント記録が指す入力IDの集合。Writerロック内で使う。
+ * イベント記録は作るだけで書き換えないため、読んだ内容を状態ディレクトリ（Vaultの外・同期しない）に覚え、一覧にある新しい記録だけを読む。
+ * 一覧から消えた記録は忘れる。覚えを読めない・書けないときは、すべて読み直すだけで結果は変わらない。
+ */
+async function markedInputIds(config: HubConfig, vault: Vault): Promise<Set<string>> {
+  const file = join(config.statePath, 'event-markers.json'), owner = resolve(config.vaultPath);
+  const paths = (await vault.files('90_system/receipts/events')).filter(p => eventMarkerPath.test(p));
+  let cached: Record<string, unknown> = {};
+  try {
+    const saved = JSON.parse(await readFile(file, 'utf8')) as { schema_version?: unknown; vault?: unknown; entries?: unknown };
+    if (saved.schema_version === 1 && saved.vault === owner && saved.entries && typeof saved.entries === 'object') cached = saved.entries as Record<string, unknown>;
+  } catch { /* 覚えがなければすべて読む。 */ }
+  const entries: Record<string, string> = {}; let changed = Object.keys(cached).length !== paths.length;
+  for (const path of paths) {
+    const known = cached[path];
+    if (typeof known === 'string' && inputIdSchema.safeParse(known).success) { entries[path] = known; continue; }
+    changed = true;
+    const id = (await vault.read(path))?.trim();
+    if (id !== undefined && inputIdSchema.safeParse(id).success) entries[path] = id;
+  }
+  if (changed) {
+    const temp = `${file}.${process.pid}.tmp`;
+    try { await writeFile(temp, JSON.stringify({ schema_version: 1, vault: owner, entries }), { mode: 0o600 }); await rename(temp, file); }
+    catch { await rm(temp, { force: true }).catch(() => {}); /* 覚えられなくても、次回に読み直すだけ。 */ }
+  }
+  return new Set(Object.values(entries));
+}
 export function eventMarker(source: string, eventId: string): string { return `90_system/receipts/events/${hash(source)}/${hash(eventId)}`; }
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
 export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
@@ -52,10 +83,13 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
       if (!found || found.source !== meta.source || found.source_event_id !== meta.source_event_id) throw new Error('イベント記録と原文が一致しません。doctorで確認してください');
       return { inputId: found.id, deduped: true, path: found.path, receivedAt: found.received_at };
     }
-    // イベント記録がなく、すべての原文にイベント記録がある（件数が一致する）なら、このイベントの原文はまだない。
-    // 件数が違うとき（原文の保存後・記録の作成前に停止した場合など）だけ全原文を調べ、再送で記録を回復する。
-    const markers = (await vault.files('90_system/receipts/events')).filter(p => !p.includes('.sync-conflict-'));
-    const inputs = markers.length === inbox.length ? [] : await readInputs(config);
+    // イベント記録がないとき、このイベントの原文がありうるのは、イベント記録が指していない原文（原文の保存後・記録の作成前に停止した場合など）だけ。
+    // イベント記録（小さな1行）が指す入力IDの集合と、原文のファイル名の入力IDの集合を比べ、指されていない原文だけを読んで再送で記録を回復する。
+    // 件数だけで比べると、無関係なファイルや原文のないイベント記録（途中の状態からの復元など）で数が合い、見落とす。
+    const marked = await markedInputIds(config, vault);
+    const unmarked = inbox.filter(p => !marked.has(p.slice(p.lastIndexOf('_') + 1, -'.md'.length)));
+    const inputs: Input[] = [];
+    for (const path of unmarked) inputs.push(parseInput(path, (await vault.read(path))!));
     const matching = inputs.filter(x => x.source === meta.source && x.source_event_id === meta.source_event_id);
     if (matching.length > 1) throw new Error('イベントが重複しています。doctorで確認してください');
     if (matching.length) {

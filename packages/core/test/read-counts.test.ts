@@ -45,6 +45,15 @@ test('記録を1件足すときと同じイベントの再送では、既にあ�
  await capture(config,{source:'cli',sourceEventId:'new',occurredAt:'2026-10-02T00:00:00Z',text:'新しいメモ'});expect(reads.count).toBe(0);
  expect((await capture(config,{source:'cli',sourceEventId:'ev-3',occurredAt:'2026-10-01T00:00:00Z',text:'再送'})).deduped).toBe(true);expect(reads.count).toBe(1);
 });
+test('記録を1件足すとき、イベント記録も前回から増えた分だけを読む',async()=>{
+ const{config}=await workflowSetup(roots);
+ for(let i=0;i<N;i++)await capture(config,{source:'cli',sourceEventId:`ev-${i}`,occurredAt:'2026-10-01T00:00:00Z',text:`メモ${i}`});
+ const markers={count:0},read=Vault.prototype.read;
+ vi.spyOn(Vault.prototype,'read').mockImplementation(async function(this:Vault,path:string){if(path.startsWith('90_system/receipts/events/'))markers.count++;return read.call(this,path);});
+ await capture(config,{source:'cli',sourceEventId:'new',occurredAt:'2026-10-02T00:00:00Z',text:'新しいメモ'});
+ // 新しいイベントの記録の有無を確かめる1回と、前回の保存で増えた記録の1件だけ。
+ expect(markers.count).toBeLessThanOrEqual(2);
+});
 test('訂正1件の保存とNOWの作り直しで、原文を何度も読み直さない',async()=>{
  const{config}=await workflowSetup(roots);await addProject(config,{id:'garden',title:'菜園'});
  const first=await capture(config,{source:'cli',project:'garden',occurredAt:'2026-10-01T00:00:00Z',text:'最初のメモ'});

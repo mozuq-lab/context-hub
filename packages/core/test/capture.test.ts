@@ -87,3 +87,19 @@ describe('原文の耐久保存', () => {
     await expect(vault.write('20_ideas/evil.md', 'bad')).rejects.toThrow();
   });
 });
+describe('イベント記録のない原文の回復', () => {
+  // 原文の保存後・イベント記録の作成前に停止した状態に、イベント記録の場所の無関係なファイルや原文のないイベント記録が重なっても、
+  // 再送で同じイベントの原文を二重に保存しない。
+  test.each(['ds-store', 'orphan-marker'])('原文の保存後・記録の作成前の停止を、%sがあっても再送で回復する', async variant => {
+    const { config, vault } = await setup(), { markdown, hash } = await import('../src/storage.js'), { ulid } = await import('ulid');
+    for (let i = 0; i < 3; i++) await capture(config, { ...base, sourceEventId: `ev-${i}`, text: `メモ${i}` });
+    const at = '2026-10-02T00:00:00.000Z', id = `IN-${ulid()}`;
+    await vault.create(`00_inbox/2026-10-02_${id}.md`, markdown({ schema_version: 1, id, kind: 'memo', source: base.source, source_event_id: 'ev-crash', occurred_at: at, received_at: at, origin: 'user-note' }, '停止前に保存したメモ'));
+    const events = join(config.vaultPath, '90_system/receipts/events'), [dir] = await readdir(events);
+    if (variant === 'ds-store') await writeFile(join(events, dir!, '.DS_Store'), 'x');
+    else { const d = join(events, hash('other')); await mkdir(d, { recursive: true }); await writeFile(join(d, hash('lost')), `IN-${ulid()}\n`); }
+    const retried = await capture(config, { ...base, sourceEventId: 'ev-crash', occurredAt: at, text: '停止前に保存したメモ' });
+    expect(retried).toMatchObject({ inputId: id, deduped: true });
+    expect((await readInputs(config)).filter(i => i.source_event_id === 'ev-crash')).toHaveLength(1);
+  });
+});
