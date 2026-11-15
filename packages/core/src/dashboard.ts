@@ -72,7 +72,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     for(const s of loose)orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     const later=(key:string)=>{const s=scheduled.get(key);return s?`（${scheduleLabel(s)}）`:'';};
-    if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${later(i.key)}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
+    if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${later(i.key)}${i.hints?.length?'（片付いたかも・要確認）':''}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
    }catch{nextUnread.push(project.title);nextProblems.push(`- [NOW項目の記録が不正です](90_system/now-items/${project.id}.json)`);}
   }
   // 進行中は最近動いた順、停滞は長く止まっている順に並べる。

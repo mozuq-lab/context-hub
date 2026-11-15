@@ -36,7 +36,11 @@ export interface OrganizeResult {
   extracted: { current: ExtractedItem[]; next: ExtractedItem[]; open: ExtractedItem[] };
   knowledge_candidate: { kind: 'knowledge' | 'decision' | 'preference'; claim: string; rationale: string } | null;
   new_project_hint: string | null;
+  /** 本人が指定したプロジェクトの既存の次の一手・未解決のうち、このメモで片付いた可能性があるもの（AI推定・未確認）。 */
+  resolution_hints?: ResolutionHint[];
 }
+/** 片付いたかもしれない項目のキーと、根拠としてメモから引用した原文。完了・解決の確定ではない。 */
+export interface ResolutionHint { item_key: string; quote: string }
 export interface ProjectProposal { title:string; aliases:string[]; keywords:string[]; rationale:string }
 export interface Receipt {
   root_input_id?: string; evidence_ids?: string[]; evidence_hash?: string; project_registry_hash?: string;
