@@ -4,7 +4,11 @@ import { readReceipts } from './views.js';
 import { hash, Vault } from './storage.js';
 import { applyAssociations } from './associations.js';
 import type { HubConfig, Input, Receipt } from './types.js';
-export interface EffectiveInput { chain: CorrectionChain; receipt?: Receipt; pendingCorrection: boolean }
+export interface EffectiveInput {
+  chain: CorrectionChain; receipt?: Receipt; pendingCorrection: boolean;
+  /** いまの定義一覧での関連付けがまだなく、前回の定義一覧での関連付けで表示しているときの、関連付け前の帰属候補（再関連付けの要否の判定に使う）。 */
+  previousAssociation?: { baseCandidates: { id: string; confidence: number }[] };
+}
 export function effectiveFromChains(chains: CorrectionChain[], receipts: Receipt[]): EffectiveInput[] {
   const byId = new Map(receipts.map(r => [r.input_id,r]));
   return chains.map(chain => {

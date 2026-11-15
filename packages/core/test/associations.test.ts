@@ -74,3 +74,20 @@ test.each(['元ID','最新訂正ID'])('%s指定でも訂正済みの有効解釈
  const result=await organize(config,new MockLlm(),{id:targetKind==='元ID'?original.inputId:corrected.inputId,limit:1});expect(result.reassociated).toBe(1);expect(result.inputIds).toEqual([original.inputId]);
  const[path]=await vault.files('90_system/associations');expect(JSON.parse((await vault.read(path))!).input_id).toBe(original.inputId);expect(await context(config,'garden')).toContain(corrected.inputId);
 });
+test('無関係なプロジェクトの定義を変えても、次の関連付けまでは前回の関連付けで表示する',async()=>{
+ const{config,vault}=await setup();const{rebuildNow}=await import('../src/views.js'),{setProjectDefinition}=await import('../src/project-definition.js'),{hash,parseMarkdown}=await import('../src/storage.js'),{find}=await import('../src/retrieve.js');
+ await addProject(config,{id:'alpha',title:'アルファ'});
+ const memo=await capture(config,{source:'cli',occurredAt:'2026-10-01T00:00:00Z',text:'ベータの件はどうだろう？'});
+ await organize(config,new MockLlm());await addProject(config,{id:'beta',title:'ベータ'});
+ await organize(config,new MockLlm());await rebuildNow(config,'beta');
+ const ids=async()=>parseMarkdown((await vault.read('10_projects/beta/NOW.md'))!).meta.input_ids;
+ expect(await ids()).toEqual([memo.inputId]);
+ await setProjectDefinition(config,{projectId:'alpha',expectedHash:hash((await vault.read('10_projects/alpha/project.md'))!),title:'アルファ',aliases:['A'],keywords:[],source:'cli'});
+ await rebuildNow(config,'beta');
+ expect(await ids()).toEqual([memo.inputId]);
+ expect(await find(config,'',{project:'beta'})).toContain(memo.inputId);
+ // 新しい定義での関連付けは、従来どおり次の整理で行う（前回の記録を使っていても対象から外さない）。
+ const llm=new MockLlm();const spy=vi.spyOn(llm,'complete');await organize(config,llm);
+ expect(spy.mock.calls.some(([prompt])=>prompt.includes('"operation":"association"'))).toBe(true);
+ await rebuildNow(config,'beta');expect(await ids()).toEqual([memo.inputId]);
+});
