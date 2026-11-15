@@ -16,7 +16,7 @@ import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
 import { referencesStopped,referencesPath,unassignedReferenceSection } from './references.js';
 import type { HubConfig, Input } from './types.js';
-import { describeFindings, findSecrets, secretSettings } from './secrets.js';
+import { describeFindings, findSecrets, secretSettings, writePrivacyPatternsLocked } from './secrets.js';
 import { rebuildIdeaIndexLocked, ideaSection } from './idea-links.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readExclusionOverlays, rereadResolutionIds } from './item-rereads.js';
@@ -49,6 +49,8 @@ export async function rebuildDashboard(config:HubConfig,options:{now?:Date}={}):
 /** Writerロックを持つ呼び出し元から使う。競合の片付けで、HOMEを作り直すときにも使う。 */
 export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,options:{now?:Date}={}):Promise<{path:string;conflict?:string}>{
  const clock=options.now??new Date();
+ // アプリが「選んで深掘り」で同じ追加規則を当てられるよう、設定の伏せ字の規則を同期するファイルへ書く（内容が変わったときだけ）。
+ await writePrivacyPatternsLocked(config,vault);
  {
   // 不正なプロジェクト定義があると一覧・方針・候補を組み立てられない。どのファイルのどの項目かをHOMEに示して止める。
   const definitionIssues=(await inspectProjects(config)).issues;

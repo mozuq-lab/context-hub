@@ -1,4 +1,5 @@
 import type { HubConfig, LlmClient, LlmCompletion, LlmOptions } from './types.js';
+import type { Vault } from './storage.js';
 
 /**
  * メモに紛れたAPIキー・トークン・パスワード・秘密鍵らしい文字列を、決まった規則で見つけて伏せる。
@@ -194,4 +195,22 @@ export async function completeRedacted(config: Pick<HubConfig, 'privacy'>, llm: 
   const completion = await llm.complete(redactPrompt(prompt, settings).text, opts);
   if (!completion || typeof completion !== 'object' || typeof completion.text !== 'string') return completion;
   return { ...completion, text: redactCompletion(completion.text, settings) };
+}
+
+/** 設定の追加規則をアプリへ渡すファイル。形式はFlutterクライアントと共有する取り決め（変えない）。 */
+export const privacyPatternsPath = '90_system/privacy/patterns.json';
+/** 有効な設定から、アプリと共有する追加規則のファイルの本文を作る。生成日時を入れず、同じ設定なら同じ本文にする。 */
+export function privacyPatternsDocument(config: Pick<HubConfig, 'privacy'>): string {
+  const privacy = config.privacy ?? { redactSecrets: true, patterns: [] };
+  return JSON.stringify({ schema_version: 1, redact_secrets: privacy.redactSecrets, patterns: privacy.patterns.map(p => ({ label: p.label, pattern: p.pattern })) }, null, 2) + '\n';
+}
+/**
+ * Writerロック内で使う。追加規則のファイルを、内容が変わったときだけ書く（同期を無駄に走らせない）。
+ * アプリはこのファイルがあれば組み込み規則に加えて適用し、Claude APIへ送る内容を伏せる。
+ */
+export async function writePrivacyPatternsLocked(config: Pick<HubConfig, 'privacy'>, vault: Vault): Promise<boolean> {
+  const text = privacyPatternsDocument(config);
+  if (await vault.read(privacyPatternsPath) === text) return false;
+  await vault.write(privacyPatternsPath, text);
+  return true;
 }

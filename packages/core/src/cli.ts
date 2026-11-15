@@ -26,6 +26,7 @@ import { addProject, readProjects } from './projects.js';
 import { find, findKinds, recent, pending, resume, context, bundle, bundleMaxIds, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
 import { userFacingError } from './error-message.js';
+import { writePrivacyPatternsLocked } from './secrets.js';
 import { verifyBackup,readBackupChecks,backupStatus } from './backup-check.js';
 import { rebuildIdeaIndexLocked,setIdeaLink } from './idea-links.js';
 import { listConflicts,resolveConflict } from './conflicts.js';
@@ -54,7 +55,7 @@ async function inputText(text:string|undefined, file:string|undefined,max:number
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)); }
   catch { throw new Error('文字コードがUTF-8ではありません。変換してから取り込んでください'); }
 }
-program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(()=>rebuildPoliciesLocked(c,vault));output({vaultPath:c.vaultPath,initialized:true});});
+program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(async()=>{await rebuildPoliciesLocked(c,vault);await writePrivacyPatternsLocked(c,vault);});output({vaultPath:c.vaultPath,initialized:true});});
 program.command('add [text]').description('原文を保存').option('--file <path>','Markdown/テキストファイル')
   .option('--event-id <id>','再送判定用ID').option('--source <name>','出典名').option('--occurred-at <iso>','タイムゾーン付き発生日時')
   .addOption(new Option('--kind <kind>','入力の種別').choices(['memo','work-summary']).default('memo'))
