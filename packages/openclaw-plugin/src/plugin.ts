@@ -1,4 +1,4 @@
-import {readPolicies,resolvePolicyProject,policyProjectFor,policyContext,policyUnavailable,secretSettings,projectIdSchema} from '@context-hub/core';
+import {readPolicies,resolvePolicyProject,policyProjectFor,policyContext,policyUnavailable,secretSettings,redactText,projectIdSchema} from '@context-hub/core';
 import { Type } from 'typebox';
 import type { HubDependencies, PluginApi, ToolResult } from './api.js';
 
@@ -142,7 +142,8 @@ export function registerHub(api: PluginApi, deps: HubDependencies): void {
             else if (name === 'ctx_pending' && command === '') text = await deps.pending(hubConfig);
             else if (name === 'ctx_help' && command === '') text = help;
             else return output('引数が不正です。/ctx_help を参照してください。', false);
-            return output(clipped(text, hubConfig.retrieve.discordMaxChars));
+            // 返す本文はDiscordとエージェントのモデルへ渡るため、contextと同じく秘密情報らしい文字列を伏せる（CLIのfindは本人の端末なので伏せない）。
+            return output(clipped(redactText(text, secretSettings(hubConfig)).text, hubConfig.retrieve.discordMaxChars));
           } catch { return output('取得できませんでした。設定と保存先を確認してください。', false); }
         }
       };

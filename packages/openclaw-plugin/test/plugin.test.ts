@@ -148,6 +148,15 @@ describe('モデルを介さない問い合わせツール', () => {
     const f = fixture();
     expect(f.factories.get('ctx_find')!({ ...toolContext, ...patch })).toBeNull();
   });
+  it.each(['ctx_find', 'ctx_recent', 'ctx_pending', 'ctx_resume'])('返す本文の秘密情報らしい文字列を伏せる (%s)', async (name) => {
+    const leak = async () => 'メモ: password=hunter2pass と sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123';
+    const f = fixture({ find: leak, recent: leak, pending: leak, resume: leak });
+    const result = await f.factories.get(name)!(toolContext)!.execute('cmd_fixture', { command: name === 'ctx_find' ? '同期' : name === 'ctx_resume' ? 'context-hub' : '' });
+    expect(result.details.ok).toBe(true);
+    expect(result.content[0].text).not.toContain('hunter2pass');
+    expect(result.content[0].text).not.toContain('sk-ant-api03');
+    expect(result.content[0].text).toContain('[伏せ字:');
+  });
   it('返信をDiscord制限内に収め、CLIを案内する', async () => {
     const f = fixture({ find: async () => 'あ'.repeat(4000) });
     const tool = f.factories.get('ctx_find')!(toolContext)!;
