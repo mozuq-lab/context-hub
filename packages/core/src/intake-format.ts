@@ -8,6 +8,7 @@ import { scheduleDateSchema } from './item-schedules.js';
 import { parseMarkdown } from './storage.js';
 import { newProjectIdSchema, projectCreateFieldsSchema } from './project-creations.js';
 import { resolvableTargetSchema } from './conflicts.js';
+import { ideaIdSchema, ideaLinkActionSchema } from './idea-links.js';
 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
@@ -33,7 +34,9 @@ const projectDefinition=z.object({...base,operation:z.literal('project-definitio
 // 本文は任意の最初のメモ。空なら作成だけを行う。
 const projectCreate=z.object({...base,operation:z.literal('project-create'),project_id:newProjectIdSchema,title:z.string(),aliases:z.array(z.string()),keywords:z.array(z.string()),confirmed:z.literal(true),text:z.string()}).strict().superRefine((value,ctx)=>{const result=projectCreateFieldsSchema.safeParse({title:value.title,aliases:value.aliases,keywords:value.keywords});if(!result.success)ctx.addIssue({code:z.ZodIssueCode.custom,message:'プロジェクトの名前・別名・キーワードが不正です'});});
 const conflictResolve=z.object({...base,operation:z.literal('conflict-resolve'),target:resolvableTargetSchema,target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve]);
+// 2件のアイデアを束ねる（link）か、別の話とする（separate）。ハッシュは索引で確認した内容のもので、束ねるときだけ一致を確かめる。
+const ideaLink=z.object({...base,operation:z.literal('idea-link'),idea_ids:z.tuple([ideaIdSchema,ideaIdSchema]).refine(([a,b])=>a!==b,'異なる2件のアイデアを指定してください'),idea_hashes:z.tuple([z.string().regex(/^[a-f0-9]{64}$/),z.string().regex(/^[a-f0-9]{64}$/)]),action:ideaLinkActionSchema,confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

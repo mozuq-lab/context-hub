@@ -1,4 +1,5 @@
 import {readPolicies,formatPolicies} from './policies.js';
+import{completeRedacted}from'./secrets.js';
 import { z } from 'zod';
 import { Vault, hash } from './storage.js';
 import { PromptTooLargeError } from './infer.js';
@@ -73,7 +74,7 @@ export async function runAssociation(config:HubConfig,llm:LlmClient,plan:Associa
  try{
   let timer:ReturnType<typeof setTimeout>|undefined;
   try{
-   const completion=await Promise.race([llm.complete(plan.prompt,{timeoutSec:config.organize.timeoutSec,maxOutputChars:config.organize.llm.maxOutputChars,model:config.organize.llm.model}),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('timeout')),config.organize.timeoutSec*1000);})]);
+   const completion=await Promise.race([completeRedacted(config,llm,plan.prompt,{timeoutSec:config.organize.timeoutSec,maxOutputChars:config.organize.llm.maxOutputChars,model:config.organize.llm.model}),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('timeout')),config.organize.timeoutSec*1000);})]);
    if(completion.text.length>config.organize.llm.maxOutputChars)throw new Error('invalid-output');
    const result=z.object({project_candidates:candidatesSchema}).strict().parse(JSON.parse(completion.text));
    if(result.project_candidates.some(c=>!projects.some(p=>p.id===c.id))||new Set(result.project_candidates.map(c=>c.id)).size!==result.project_candidates.length)throw new Error('invalid-output');

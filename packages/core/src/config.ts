@@ -18,6 +18,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
     retrieve: { contextMaxChars: 6000, discordMaxChars: 1900, staleDays: 14, digestDays: 7 },
     logging: { dir: join(expandPath(statePath), 'logs'), retentionDays: 14 },
     git: { enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 },
+    privacy: { redactSecrets: true, patterns: [] },
   };
 }
 const positive = z.number().int().min(1).max(1_000_000);
@@ -34,6 +35,8 @@ const configSchema = z.object({
   // 既定では無効。本人が明示したローカルリポジトリだけを読み取り専用で参照する。
   git: z.object({ enabled: z.boolean(), repos: z.array(z.object({ projectId: projectIdSchema, path: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です'), name: z.string().min(1).max(100).regex(/^[^\r\n]+$/).optional() }).strict()).max(100),
     maxCommits: positive.max(200), lookbackDays: positive.max(366) }).strict().refine(g => new Set(g.repos.map(r => expandPath(r.path))).size === g.repos.length, '同じリポジトリを重ねて設定できません').default({ enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 }),
+  // 既定で有効。追加の規則は読み込み時に正規表現として組み立てられることを確かめる。
+  privacy: z.object({ redactSecrets: z.boolean(), patterns: z.array(z.object({ label: z.string().min(1).max(40).regex(/^[^\]\r\n]+$/), pattern: z.string().min(1).max(500).refine(v => { try { new RegExp(v, 'gu'); return true; } catch { return false; } }, '正規表現が不正です') }).strict()).max(50) }).strict().default({ redactSecrets: true, patterns: [] }),
 }).strict();
 export function validateConfig(value: unknown): HubConfig {
   const c = configSchema.parse(value);
@@ -46,8 +49,8 @@ export function validateConfig(value: unknown): HubConfig {
   return c;
 }
 /** 設定ファイルへ上書きする値。入れ子は部分指定でよい。 */
-export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git'>> & {
-  capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
+export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'privacy'>> & {
+  capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; privacy?: Partial<HubConfig['privacy']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
   organize?: Partial<Omit<HubConfig['organize'], 'llm'>> & { llm?: Partial<HubConfig['organize']['llm']> };
 };
 export async function loadConfig(path?: string, overrides: ConfigOverrides = {}): Promise<HubConfig> {
@@ -67,6 +70,7 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
     retrieve: { ...defaults.retrieve, ...raw.retrieve, ...overrides.retrieve },
     logging: { ...defaults.logging, ...raw.logging, ...overrides.logging },
     git: { ...defaults.git, ...raw.git, ...overrides.git },
+    privacy: { ...defaults.privacy, ...raw.privacy, ...overrides.privacy },
   };
   try { return validateConfig(c); } catch { throw new Error('設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }
 }

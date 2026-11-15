@@ -16,7 +16,10 @@ import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
 import { historyStopped } from './history.js';
 import type { HubConfig, Input } from './types.js';
-export async function doctor(config: HubConfig): Promise<{issues:string[];inputs:number}> {
+import { readIdeaLinks } from './idea-links.js';
+import { describeFindings, findSecrets, secretSettings } from './secrets.js';
+/** secretsは整合性の問題ではないため、issuesに入れず終了コードも変えない。値は含めない。 */
+export async function doctor(config: HubConfig): Promise<{issues:string[];inputs:number;secrets:{input_id:string;path:string;found:string}[]}> {
   const vault=new Vault(config), issues:string[]=[], inputs:Input[]=[];
   for (const dir of VAULT_DIRS) {
     try { if (!(await lstat(await vault.path(dir))).isDirectory()) issues.push(`構造不正: ${dir}`); }
@@ -92,6 +95,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
   try{for(const path of await knowledgePaths(vault)){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
   try{await readPolicies(config);}catch{issues.push(definitionsBroken?afterDefinitions('方針の同期・集約を確認できません'):'方針manifest・正本・停止記録の同期または集約が未完了です');}
+  try{await readIdeaLinks(vault);}catch(error){issues.push(error instanceof Error?error.message:'アイデアの束ねの記録が不正です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}
   try { for(const path of await vault.files('90_system/conflicts'))issues.push(`生成物の競合: ${path}`); } catch {issues.push('競合フォルダ走査失敗');}
   try { for (const scope of LOCK_SCOPES) { const lock = await lockPath(config, scope); for(const path of [lock, `${lock}.reap`]) {
@@ -100,5 +104,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
     try{const owner=JSON.parse(await readFile(join(path,'owner.json'),'utf8'));if(Number.isSafeInteger(owner.pid)&&owner.pid>0){process.kill(owner.pid,0);alive=true;}}catch{}
     issues.push(`${alive?(scope==='organize'?'整理実行中':'Writer実行中'):'ロック残骸（停止状態を確認）'}: ${path}`);
   }}} catch {issues.push('ロック場所を確認できません');}
-  return{issues,inputs:inputs.length};
+  const settings=secretSettings(config);
+  const secrets=inputs.map(i=>({input:i,findings:findSecrets(i.text,settings)})).filter(x=>x.findings.length).map(x=>({input_id:x.input.id,path:x.input.path,found:describeFindings(x.findings)}));
+  return{issues,inputs:inputs.length,secrets};
 }
