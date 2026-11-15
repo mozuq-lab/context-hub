@@ -24,8 +24,8 @@ export async function readInputRecords(config: HubConfig): Promise<{ input: Inpu
     const vault = new Vault(config), result: { input: Input; rawHash: string }[] = [];
     for (const path of await vault.files('00_inbox')) {
       if (!isInputPath(path)) continue;
-      const raw = (await vault.read(path))!;
-      result.push({ input: parseInput(path, raw), rawHash: hash(raw) });
+      // 原文1件ごとの解釈も区間内で使い回す。新しい原文を足した後の読み直しでも、既にある原文は読み直さない。
+      result.push(await readOncePerLock(config, `input:${path}`, [path], async () => { const raw = (await vault.read(path))!; return { input: parseInput(path, raw), rawHash: hash(raw) }; }));
     }
     return result.sort((a,b) => Date.parse(a.input.occurred_at)-Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id));
   });

@@ -51,5 +51,6 @@ test('訂正1件の保存とNOWの作り直しで、原文を何度も読み直�
  for(let i=1;i<N;i++)await capture(config,{source:'cli',project:'garden',occurredAt:`2026-10-01T${String(i).padStart(2,'0')}:00:00Z`,text:`メモ${i}`});
  await organize(config,new MockLlm(),{limit:N});
  const reads=countInboxReads();await correctInput(config,first.inputId,{source:'cli',occurredAt:'2026-10-02T00:00:00Z',text:'訂正したメモ'});
- expect(reads.count).toBeLessThanOrEqual(3*(N+1));
+ // 原文1件につき1回程度（訂正の保存前の読み取りと、保存後は足した訂正だけを読む）。
+ expect(reads.count).toBeLessThan(2*(N+1));
 });

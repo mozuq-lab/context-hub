@@ -30,7 +30,7 @@ async function loadReceipts(config: HubConfig): Promise<Receipt[]> {
   for (const file of await vault.files('90_system/receipts')) {
     if (!/^90_system\/receipts\/IN-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(file)) continue;
     try {
-      const receipt = receiptSchema.parse(JSON.parse((await vault.read(file))!));
+      const receipt = await readOncePerLock(config, `receipt:${file}`, [file], async () => receiptSchema.parse(JSON.parse((await vault.read(file))!)));
       if (file !== `90_system/receipts/${receipt.input_id}.json`) throw new Error();
       receipts.push(receipt);
     } catch { throw new Error(`処理記録が不正です: ${file}`); }
