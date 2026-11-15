@@ -23,7 +23,7 @@ import { validateAdoptionTarget } from '../src/knowledge-scope.js';
 import { setProjectStatus, candidateProjects } from '../src/project-status.js';
 import { setProjectDefinition } from '../src/project-definition.js';
 import { mergeProjects, unmergeProject, readProjectMerges, withMergeState, mergedTerms, ProjectMergeError } from '../src/project-merges.js';
-import type { HubConfig, Project } from '../src/types.js';
+import type { HubConfig, LlmClient, Project } from '../src/types.js';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
 
@@ -135,6 +135,39 @@ test('統合すると、統合元の入力・AI推定の関連・完了報告・
   expect(fromHistory).toContain('統合先の[NOW](../hub/NOW.md)を参照してください');
   expect(await buildReferences(config, 'hub')).toContain('<https://example.com/spec>');
   expect((await doctor(config)).issues).toEqual([]);
+});
+
+test('統合先で「別のプロジェクトの話」として外すとき、本人が統合元を指定したメモは外さず、AIが統合元へ推定したメモは外す', async () => {
+  const { config, vault, old } = await fixture();
+  // プロジェクトの指定はなく、名前からAIが統合元（tool）へ結び付ける問い。
+  const question = 'まとめツールの配布はストア経由でよいだろうか？';
+  const guessed = await capture(config, { source: 'cli', ...at('2026-09-26T01:00:00Z'), text: question });
+  await organize(config, new MockLlm());
+  expect(await find(config, 'ストア', { project: 'tool' })).toContain(`- [${guessed.inputId}]`);
+  await merge(config, vault);
+  const items = (await readNowItems(vault, 'hub'))!.items;
+  const now = async () => (await vault.read('10_projects/hub/NOW.md'))!;
+  const prompts: string[] = [], inner = new MockLlm();
+  const llm: LlmClient = { complete: async (prompt, options) => { prompts.push(prompt); return inner.complete(prompt, options); } };
+  // 本人が統合元を指定した作業要約: 統合先でも本人の指定として扱い、項目だけを外す。読み直しもしない。
+  const owned = items.find(i => i.input_id === old.inputId && i.text === '配布方法が決まっていない')!;
+  await setItemResolution(config, { projectId: 'hub', itemKey: owned.key, action: 'exclude', reason: 'wrong-project', source: 'cli' });
+  expect(await now()).toContain('名前が決まっていない');
+  expect(await now()).not.toContain('このメモはこのプロジェクトから外しています');
+  expect(await organize(config, llm)).toMatchObject({ processed: 0 });
+  expect(prompts).toHaveLength(0);
+  // AIが統合元へ結び付けたメモ: 統合先で外すと、メモごと統合先から外れる。戻すと元に戻る。
+  const inferred = items.find(i => i.input_id === guessed.inputId)!;
+  expect(await find(config, 'ストア', { project: 'hub' })).toContain(`- [${guessed.inputId}]`);
+  await setItemResolution(config, { projectId: 'hub', itemKey: inferred.key, action: 'exclude', reason: 'wrong-project', source: 'cli' });
+  expect(await find(config, 'ストア', { project: 'hub' })).not.toContain(`- [${guessed.inputId}]`);
+  expect(await now()).toContain('このメモはこのプロジェクトから外しています');
+  // 読み直しでも、統合元・統合先のどちらへも結び付け直さない。
+  await organize(config, llm);
+  expect(prompts.length).toBeGreaterThan(0);
+  expect(await find(config, 'ストア', { project: 'hub' })).not.toContain(`- [${guessed.inputId}]`);
+  await setItemResolution(config, { projectId: 'hub', itemKey: inferred.key, action: 'reopen', source: 'cli' });
+  expect(await find(config, 'ストア', { project: 'hub' })).toContain(`- [${guessed.inputId}]`);
 });
 
 test('統合後に統合元を指定して届いたメモも、統合先の入力として整理する', async () => {

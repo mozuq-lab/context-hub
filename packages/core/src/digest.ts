@@ -6,7 +6,7 @@ import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js'
 import { buildReviewIndex } from './candidate-review.js';
 import { lifecycleOf, projectStatusLabels } from './project-status.js';
 import { lastEvidenceAt, daysSince } from './dashboard.js';
-import { activeResolutions, itemKey, readItemResolutions } from './item-resolutions.js';
+import { activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions } from './item-resolutions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
 
 const DAY = 86_400_000;
@@ -72,8 +72,8 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const mine = units.filter(u => u.projects.includes(project.id) && u.unit.receipt?.result);
     const fresh = recent.filter(u => u.projects.includes(project.id));
     // 期間内の本人の完了・解決報告。最後の記録が解決のままのものだけを数える。
-    const resolvedNow = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), project.id), closed = [...resolvedNow.values()].filter(r => inWindow(r.created_at));
-    if (!fresh.length && !closed.length) { quiet.push(`- ${head}`); continue; }
+    const resolvedNow = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), project.id), inPeriod = [...resolvedNow.values()].filter(r => inWindow(r.created_at)), closed = inPeriod.filter(r => r.action === 'resolve'), excludedNow = inPeriod.filter(r => r.action === 'exclude');
+    if (!fresh.length && !closed.length && !excludedNow.length) { quiet.push(`- ${head}`); continue; }
     // NOWと同じ基準で、発生日時の順に最新の作業要約を選ぶ。期間開始時点は、その時点までに届いていた入力だけで決める。
     const byOccurred = (a: Unit, b: Unit) => Date.parse(a.input.occurred_at) - Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id);
     const summaries = mine.filter(u => u.input.kind === 'work-summary').sort(byOccurred);
@@ -90,6 +90,11 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     if (closed.length) {
       out.push(`- 期間内に完了・解決と報告した項目: ${closed.length}件`);
       for (const r of closed.slice(-5).reverse()) out.push(`  - ${r.section === 'next' ? '完了' : '解決'}: ${clip(r.text)}（${label(r.created_at)} ${r.id}）`);
+    }
+    // AIの読み違いなどとして外した項目は、完了・解決と分けて数える。
+    if (excludedNow.length) {
+      out.push(`- 期間内に誤りとして外した項目: ${excludedNow.length}件`);
+      for (const r of excludedNow.slice(-5).reverse()) out.push(`  - ${r.reason ? exclusionReasonLabels[r.reason] : '誤り'}: ${clip(r.text)}（${label(r.created_at)} ${r.id}）`);
     }
     if (fresh.length) out.push('- 主な入力:');
     const lastReceived = (u: Unit) => Math.max(...evidenceOf(u).filter(i => inWindow(i.received_at)).map(i => Date.parse(i.received_at)));

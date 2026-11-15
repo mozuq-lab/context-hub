@@ -8,10 +8,11 @@ import { correctionNotice, effectiveFromInputs } from './effective-inputs.js';
 import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
-import { activeResolutions, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
+import { activeResolutions, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
-import type { HubConfig, Input, Receipt } from './types.js';
+import { appliedReread, readExclusionOverlays } from './item-rereads.js';
+import type { HubConfig, Input, Project, Receipt } from './types.js';
 
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
 export const receiptSchema = z.object({
@@ -83,12 +84,30 @@ export const nowBaselinePath = (projectId: string) => `90_system/now-generated/$
  * NOWを根拠から作り直す。overwriteAutoは本人が「生成版に戻す」を確認した場合だけ使い、
  * 手で書き換えた自動領域を上書きする（自動領域の外の手動領域は保持する）。
  */
+/** 入力と処理記録から、訂正・再関連付け・本人の「誤りとして外す」記録を反映した有効な解釈を組み立てる。 */
+async function effectiveUnits(config: HubConfig, inputs: Input[], receipts: Receipt[], projects?: Project[]) {
+  const chains=await readCorrectionChains(config), hashes=new Map(chains.map(c=>[c.root.id,c.evidenceHash]));
+  return applyAssociations(config,effectiveFromInputs(inputs,receipts).map(e=>({...e,chain:{...e.chain,evidenceHash:hashes.get(e.chain.root.id)??''}})),projects);
+}
+/**
+ * ある入力に関わるNOWをまとめて作り直す。誤りとして外す・それを戻す操作では、帰属の取り消しや読み直しの結果が
+ * 効いたり外れたりして、操作したプロジェクト以外のNOWも変わるため。今その入力を載せているNOWと、今の帰属先を対象にする。
+ */
+export async function rebuildNowsForInputLocked(vault: Vault, config: HubConfig, projectIds: string[], inputId: string, alsoProject: string, inputs: Input[], receipts: Receipt[]): Promise<void> {
+  const targets = new Set([alsoProject]);
+  for (const id of projectIds) {
+    const raw = await vault.read(`10_projects/${id}/NOW.md`);
+    if (raw) try { const { meta } = parseMarkdown(raw); if (Array.isArray(meta.input_ids) && meta.input_ids.includes(inputId)) targets.add(id); } catch { /* 手で壊したNOWは、作り直しのときに競合として退避する。 */ }
+  }
+  for (const unit of await effectiveUnits(config, inputs, receipts)) if (unit.chain.root.id === inputId && unit.receipt) for (const id of associatedProjects(unit.chain.root, unit.receipt, config)) targets.add(id);
+  const generatedAt = new Date().toISOString();
+  for (const id of projectIds) if (targets.has(id)) await rebuildNowLocked(vault, config, id, inputs, receipts, generatedAt);
+}
 export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectId: string, inputs: Input[], receipts: Receipt[], generatedAt = new Date().toISOString(), options: { overwriteAuto?: boolean } = {}): Promise<{ path: string; conflict?: string }> {
   if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(projectId)) throw new Error('プロジェクトIDが不正です');
-  const chains=await readCorrectionChains(config), hashes=new Map(chains.map(c=>[c.root.id,c.evidenceHash]));
   // 統合元のプロジェクトへの帰属は、applyAssociationsがこのプロジェクト（統合先）のものとして読み替える。
   const projects = await readProjects(config), sources = mergedSources(projects, projectId);
-  const units = await applyAssociations(config,effectiveFromInputs(inputs,receipts).map(e=>({...e,chain:{...e.chain,evidenceHash:hashes.get(e.chain.root.id)??''}})),projects);
+  const units = await effectiveUnits(config, inputs, receipts, projects);
   const evidence = units.flatMap((unit) => {
     const {chain,receipt}=unit, input=chain.root;
     const index=[chain.root,...chain.revisions].findIndex(i=>i.id===receipt?.input_id);
@@ -99,15 +118,18 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${dateLabel(input.occurred_at, config.timezone)} ${config.timezone} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${evidence.find(e=>e.input.id===input.id)?.notice ? ' '+evidence.find(e=>e.input.id===input.id)!.notice.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
-  const resolutionRecords = await readItemResolutions(vault), resolved = activeResolutions(resolutionRecords, projectId), items = new Map<string, NowItem>(), done: string[] = [];
+  // AIの読み違いなどの「誤り」として外した項目も欄から外すが、完了・解決とは分けて理由と一緒に示す。
+  const resolutionRecords = await readItemResolutions(vault), resolved = activeResolutions(resolutionRecords, projectId), items = new Map<string, NowItem>(), done: string[] = [], excluded: string[] = [];
   // 本人が付けた期日・見直す日は行の末尾に示す（出典より後ろに置き、項目との照合に使う行頭は変えない）。
   // 引き継ぎは項目がそろってから決まるため、行には項目キーの印を付けておき、最後に日付へ置き換える。
   const mark = '\u0000';
   const entry = (section: ItemSection, text: string, input: Input, label = ''): string[] => {
     const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key);
     if (!items.has(key)) {
-      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null, schedule: null });
-      if (resolution) done.push(`- ${section === 'next' ? '完了' : '解決'}: ${label}${plain(text)} ${ref(input)} — 本人報告 ${dateLabel(resolution.created_at, config.timezone)} ${resolution.id}`);
+      const wrong = resolution?.action === 'exclude' && resolution.reason ? { action: 'exclude' as const, reason: resolution.reason, ...(resolution.note ? { note: resolution.note } : {}) } : undefined;
+      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source, ...wrong } : null, schedule: null });
+      if (wrong) excluded.push(`- ${label || (section === 'next' ? '次の一手: ' : '未解決: ')}${plain(text)} ${ref(input)} — 理由: ${exclusionReasonLabels[wrong.reason]}${wrong.note ? `（${plain(wrong.note)}）` : ''} / 本人報告 ${dateLabel(resolution!.created_at, config.timezone)} ${resolution!.id}`);
+      else if (resolution) done.push(`- ${section === 'next' ? '完了' : '解決'}: ${label}${plain(text)} ${ref(input)} — 本人報告 ${dateLabel(resolution.created_at, config.timezone)} ${resolution.id}`);
     }
     return resolution ? [] : [`${row(text, input, label)}${mark}${key}`];
   };
@@ -130,6 +152,20 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     for (const old of summaries.slice(0, -1)) for (const item of old.result.extracted.current) {
       if (item.status === 'confirmed' && !latestTexts.has(item.text)) open.push(...entry('open', item.text, old.input, '過去の報告との差異（矛盾・時点差は未確認）: '));
     }
+  }
+  // 外した後にNOWの根拠から消えた項目も、戻せるように一覧へ残す。「別のプロジェクトの話」としてメモごとこのプロジェクトから外れた場合、
+  // 読み直しで項目の本文が変わった場合、読み直した項目をさらに外して次の読み直しを待っている場合、訂正の整理で項目が変わった場合が当たる。
+  // 新しい作業要約に置き換わって自然に外れた次の一手は載せない（完了・解決の報告と同じ）。
+  const overlays = await readExclusionOverlays(vault);
+  for (const r of resolved.values()) {
+    if (r.action !== 'exclude' || !r.reason || items.has(r.item_key)) continue;
+    const unit = units.find(u => u.chain.root.id === r.input_id), input = unit?.chain.root;
+    if (!unit || !input) continue;
+    const detached = input.project !== projectId && overlays.wrongProjects.get(input.id)?.has(projectId) === true;
+    if (!detached && r.section === 'next' && latest && latest.input.id !== input.id) continue;
+    const reread = appliedReread(overlays, unit)?.resolution_ids.includes(r.id);
+    items.set(r.item_key, { key: r.item_key, section: r.section, label: '', text: r.text, input_id: r.input_id, resolution: { id: r.id, at: r.created_at, source: r.source, action: 'exclude', reason: r.reason, ...(r.note ? { note: r.note } : {}) }, schedule: null });
+    excluded.push(`- ${r.section === 'next' ? '次の一手: ' : '未解決: '}${plain(r.text)} ${ref(input)} — 理由: ${exclusionReasonLabels[r.reason]}${r.note ? `（${plain(r.note)}）` : ''} / 本人報告 ${dateLabel(r.created_at, config.timezone)} ${r.id}${detached ? ' / このメモはこのプロジェクトから外しています' : reread ? ' / メモを読み直しました' : ' / いまの整理結果にはない項目です'}`);
   }
   const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
   for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after }; }
@@ -162,7 +198,9 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   hinted.sort((a, b) => Date.parse(b.input.occurred_at) - Date.parse(a.input.occurred_at) || a.input.id.localeCompare(b.input.id));
   const hintRows = hinted.map(({ item, input, quote }) => `- ${item.label || (item.section === 'next' ? '次の一手: ' : '未解決: ')}${plain(item.text)} ← 「${plain(quote)}」 ${ref(input)}`);
   const fallback = '- 不明（根拠となる入力がありません）';
-  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? '- 残っている次の一手はありません（完了報告済み）' : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? '- 残っている未解決はありません（解決報告済み）' : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}`;
+  // 欄が空になった理由。誤りとして外した項目だけで空になったときは、完了・解決と書かない。
+  const closedNote = (section: ItemSection, reported: string) => [...items.values()].some(i => i.section === section && i.resolution && i.resolution.action !== 'exclude') ? reported : '誤りとして外した項目のみ';
+  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? `- 残っている次の一手はありません（${closedNote('next', '完了報告済み')}）` : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? `- 残っている未解決はありません（${closedNote('open', '解決報告済み')}）` : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}${excluded.length ? `\n# 誤りとして外した項目（本人報告）\nAIの読み違いなどとして、本人が外した項目です。完了・解決ではありません。理由と一言は、次からの整理でAIへ渡します。戻すときはアプリか\`ctx item reopen\`を使ってください。\n${excluded.join('\n')}\n` : ''}`;
   const relative = `10_projects/${projectId}/NOW.md`; const existing = await vault.read(relative);
   let before = '（手動領域: この領域は再生成しても保持されます）\n\n'; let after = '\n'; let oldMeta: Record<string, unknown> = {}; let conflict = false;
   if (existing !== undefined) {

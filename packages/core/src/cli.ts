@@ -16,7 +16,7 @@ import { setProjectStatus,projectStatuses,lifecycleOf } from './project-status.j
 import { setProjectDefinition,editDefinition,normalizeDefinition,definitionLimitMessage } from './project-definition.js';
 import { mergeProjects,unmergeProject,readProjectMerges } from './project-merges.js';
 import { readProjectCatalog } from './knowledge-scope.js';
-import { setItemResolution,readNowItems,readItemResolutions } from './item-resolutions.js';
+import { setItemResolution,readNowItems,readItemResolutions,exclusionReasons,exclusionReasonLabels } from './item-resolutions.js';
 import { setItemSchedule,readItemSchedules,activeSchedules } from './item-schedules.js';
 import { rebuildHistories } from './history.js';
 import { dismissResolutionHint } from './resolution-hints.js';
@@ -25,6 +25,7 @@ import { Vault, unlockVault, LOCK_SCOPES, hash } from './storage.js';
 import { addProject, readProjects } from './projects.js';
 import { find, findKinds, recent, pending, resume, context, bundle, bundleMaxIds, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
+import { verifyBackup,readBackupChecks,backupStatus } from './backup-check.js';
 import { rebuildIdeaIndexLocked,setIdeaLink } from './idea-links.js';
 import { listConflicts,resolveConflict } from './conflicts.js';
 import { organize } from './organize.js';
@@ -95,11 +96,14 @@ project.command('unmerge <from>').description('統合を取り消し、統合元
    const result=await unmergeProject(c,{fromId:id,intoId:into,fromHash:opts.hash,intoHash:opts.intoHash,source:'cli',sourceEventId:await mergeEventId(c,'unmerge',id,into,opts.hash,opts.intoHash)});await rebuildDashboard(c);output(result);});
 project.command('candidates').action(async()=>output(await listProjectCandidates(await config())));
 for(const action of ['approve','reject'] as const)project.command(`${action} <id>`).requiredOption('--hash <sha256>','確認した候補のハッシュ').requiredOption('--token <token>','候補の確認トークン').requiredOption('--confirm','候補詳細を読んだ人の明示確認').action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`})));
-const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決または未解決へ戻す');
-item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution?.id??null,due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{})})));});
-for(const action of ['resolve','reopen'] as const)item.command(`${action} <project> <key>`).description(action==='resolve'?'項目を完了・解決にする':'解決済みの項目を未解決へ戻す').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,_opts)=>{const c=await config(),vault=new Vault(c);
+const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決にする、誤りとして外す、または未解決へ戻す');
+item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{})})));});
+for(const action of ['resolve','reopen'] as const)item.command(`${action} <project> <key>`).description(action==='resolve'?'項目を完了・解決にする':'解決済み、または誤りとして外した項目を未解決へ戻す').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,_opts)=>{const c=await config(),vault=new Vault(c);
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ操作なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.action===action&&last.source_event_id?last.source_event_id:`cli:${key}:${action}:${last?.id??'none'}`;const result=await setItemResolution(c,{projectId:id,itemKey:key,action,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
+item.command('exclude <project> <key>').description(`AIの読み違いなどの誤りとして項目を外す（完了・解決とは数えない）。理由: ${exclusionReasons.map(r=>`${r}=${exclusionReasonLabels[r]}`).join('、')}。読み違いと、AIが推定した帰属への「別のプロジェクトの話」は、次のcycleで元のメモを読み直す`).addOption(new Option('--reason <reason>','外す理由').choices([...exclusionReasons]).makeOptionMandatory()).option('--note <text>','一言（200文字以内・1行。次からの整理でAIへ渡す）').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,opts)=>{const c=await config(),vault=new Vault(c);
+// 完了報告と同じく、直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
+const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.action==='exclude'&&last.reason===opts.reason&&last.note===opts.note&&last.source_event_id?last.source_event_id:`cli:${key}:exclude:${last?.id??'none'}`;const result=await setItemResolution(c,{projectId:id,itemKey:key,action:'exclude',reason:opts.reason,note:opts.note,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
 item.command('dismiss-hint <project> <key> <input-id>').description('「片付いたかも」が違うとき、そのメモからの候補を見送る（項目は未解決のまま）').requiredOption('--confirm','候補と引用を確認した本人による見送り').action(async(id,key,inputId,_opts)=>{const c=await config();const result=await dismissResolutionHint(c,{projectId:id,itemKey:key,inputId,source:'cli',sourceEventId:`cli:${key}:${inputId}:dismiss-hint`});await rebuildDashboard(c);output(result);});
 item.command('schedule <project> <key>').description('項目に期日・次に見直す日を付ける（noneで外す。指定しなかった方は今の日付を保つ）').option('--due <date>','期日（YYYY-MM-DD、またはnone）').option('--review <date>','次に見直す日（YYYY-MM-DD、またはnone）。この日まではHOMEの一覧でたたむ').option('--clear','期日と見直す日を両方外す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
 if(opts.clear&&(opts.due!==undefined||opts.review!==undefined))throw new Error('--clearと--due・--reviewは同時に指定できません');
@@ -149,6 +153,9 @@ program.command('approve <id>').requiredOption('--hash <sha256>','候補一覧�
 program.command('reject <id>').requiredOption('--hash <sha256>','候補一覧で確認した内容ハッシュ').action(async(id,opts)=>output(await reject(await config(),id,opts.hash)));
 program.command('propose <claim>').addOption(new Option('--kind <kind>','候補の種別').choices(['knowledge','decision','preference']).default('knowledge')).option('--rationale <text>','根拠','人による候補作成').option('--supersedes <id>','置き換えるKNW-ID')
   .action(async(claim,opts)=>output(await propose(await config(),{claim,kind:opts.kind,rationale:opts.rationale,supersedes:opts.supersedes})));
+const backup=program.command('backup').description('バックアップから復元できるかを確かめる（元のVaultは読むだけで、書き換えない）');
+backup.command('verify').description('最新（または指定）のアーカイブをVault外の一時フォルダーへ展開して確かめ、結果を記録してHOMEを更新').option('--archive <path>','確かめるアーカイブ（省略時は設定のbackup.dirでいちばん新しいもの）').option('--work-dir <path>','展開先の親フォルダー（省略時はOSの一時フォルダー。Vaultと同期フォルダーの外にする）').option('--keep','確認後も展開先を残す（中身を自分で確かめるとき）').action(async opts=>{const c=await config();const result=await verifyBackup(c,{archive:opts.archive,workDir:opts.workDir,keep:opts.keep});await rebuildDashboard(c);output(result);if(result.check.status!=='ok')process.exitCode=1;});
+backup.command('status').description('最後の確認結果と、確かめた復元点').action(async()=>{const c=await config(),checks=await readBackupChecks(new Vault(c)),status=backupStatus(c,checks.records);output({restore_point:status.restorePoint?{archive:status.restorePoint.archive,created_at:status.restorePoint.archive_created_at,age_days:status.restorePointAgeDays,checked_at:status.restorePoint.checked_at}:null,latest:status.latest??null,warnings:status.warnings,problems:checks.problems});});
 program.command('doctor').description('Vaultと処理記録を検査').option('--unlock','全Writer・整理の停止後、死亡PIDのロック残骸のみ回収').action(async opts=>{const c=await config();if(opts.unlock)for(const scope of LOCK_SCOPES){try{await unlockVault(c,scope);}catch(error){/* 稼働中・判断不能なロックは回収せず、下のdoctorの検査結果で報告する。 */process.stderr.write(`警告: ${scope==='organize'?'整理':'Writer'}ロックを回収しませんでした: ${error instanceof Error&&/^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(error.message)&&!error.message.includes('\n')?error.message:'理由を確認できません'}\n`);process.exitCode=1;}}const result=await doctor(c);output(result);if(result.issues.length)process.exitCode=1;});
 try { await program.parseAsync(); }
 catch (error) {

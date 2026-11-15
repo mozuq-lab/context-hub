@@ -12,6 +12,9 @@ import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMess
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
 import { readItemSchedules } from './item-schedules.js';
+import { readItemResolutions } from './item-resolutions.js';
+import { readRereads } from './item-rereads.js';
+import { backupStatus, readBackupChecks } from './backup-check.js';
 import { readProjectStatusChanges } from './project-status.js';
 import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
@@ -20,8 +23,11 @@ import { referencesStopped } from './references.js';
 import type { HubConfig, Input } from './types.js';
 import { readIdeaLinks } from './idea-links.js';
 import { describeFindings, findSecrets, secretSettings } from './secrets.js';
-/** secretsは整合性の問題ではないため、issuesに入れず終了コードも変えない。値は含めない。 */
-export async function doctor(config: HubConfig): Promise<{issues:string[];inputs:number;secrets:{input_id:string;path:string;found:string}[]}> {
+/**
+ * secretsは整合性の問題ではないため、issuesに入れず終了コードも変えない。値は含めない。
+ * backupはバックアップから復元できるかの確認状況で、これもVaultの整合性ではないためissuesに入れない（確認したことがあるか、バックアップ先を設定したときだけ返す）。
+ */
+export async function doctor(config: HubConfig): Promise<{issues:string[];inputs:number;secrets:{input_id:string;path:string;found:string}[];backup?:{restore_point:string|null;restore_point_age_days:number|null;warnings:string[]}}> {
   const vault=new Vault(config), issues:string[]=[], inputs:Input[]=[];
   for (const dir of VAULT_DIRS) {
     try { if (!(await lstat(await vault.path(dir))).isDirectory()) issues.push(`構造不正: ${dir}`); }
@@ -43,6 +49,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   try { for (const project of await readProjects(config)) if (await historyStopped(vault, project.id)) issues.push(`経緯の更新が止まっています（手で変更されています）: 10_projects/${project.id}/HISTORY.md`); } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const project of await readProjects(config)) if (await referencesStopped(vault, project.id)) issues.push(`資料の更新が止まっています（手で変更されています）: 10_projects/${project.id}/REFERENCES.md`); } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
+  try { await readItemResolutions(vault); } catch (error) { issues.push(error instanceof Error && error.message.startsWith('解決記録') ? error.message : '完了・解決・誤りとして外した記録を走査できません'); }
+  try { for (const path of (await readRereads(vault)).problems) issues.push(`読み直しの記録が不正です（元の解釈で表示し、次の実行で読み直します）: ${path}`); } catch { issues.push('読み直しの記録を走査できません'); }
   try { await readEffectiveInputs(config); } catch { issues.push(definitionsBroken?afterDefinitions('訂正履歴・有効解釈と根拠を確認できません'):'訂正履歴・有効解釈と根拠が不正です'); }
   try { await listProjectCandidates(config);if(await recoverProjectApprovalsLocked(config,vault,Number.MAX_SAFE_INTEGER,true))issues.push('プロジェクト承認の回復待ちがあります'); } catch { issues.push(definitionsBroken?afterDefinitions('プロジェクト候補・確認・承認記録を確認できません'):'プロジェクト候補・確認・承認記録が不正です'); }
   try {
@@ -110,5 +118,11 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   }}} catch {issues.push('ロック場所を確認できません');}
   const settings=secretSettings(config);
   const secrets=inputs.map(i=>({input:i,findings:findSecrets(i.text,settings)})).filter(x=>x.findings.length).map(x=>({input_id:x.input.id,path:x.input.path,found:describeFindings(x.findings)}));
-  return{issues,inputs:inputs.length,secrets};
+  let backup:{restore_point:string|null;restore_point_age_days:number|null;warnings:string[]}|undefined;
+  try{
+    const checks=await readBackupChecks(vault),status=backupStatus(config,checks.records);
+    for(const path of checks.problems)issues.push(`バックアップの確認結果の記録が不正です: ${path}`);
+    if(checks.records.length||status.warnings.length)backup={restore_point:status.restorePoint?.archive??null,restore_point_age_days:status.restorePointAgeDays??null,warnings:status.warnings};
+  }catch{issues.push('バックアップの確認結果を走査できません');}
+  return{issues,inputs:inputs.length,secrets,...(backup?{backup}:{})};
 }

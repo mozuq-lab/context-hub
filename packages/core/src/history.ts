@@ -5,7 +5,7 @@ import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact, re
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { groundExtractedHistory, groundExtractedStatuses } from './llm.js';
 import { lifecycleOf, projectStatusLabels, readProjectStatusChanges, type ProjectStatusChange } from './project-status.js';
-import { readItemResolutions, readNowItems, type ItemResolution } from './item-resolutions.js';
+import { exclusionReasonLabels, readItemResolutions, readNowItems, type ItemResolution } from './item-resolutions.js';
 import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
 import { readProjectMerges, type ProjectMerge } from './project-merges.js';
@@ -98,7 +98,7 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
     previous = current;
   }
   for (const r of sources.resolutions.filter(r => r.project_id === id))
-    events.push({ at: r.created_at, order: 2, line: `- ${day(r.created_at)} ${r.action === 'resolve' ? (r.section === 'next' ? '完了' : '解決') : '未解決に戻した'}: ${clip(r.text)}（本人報告 ${r.id}）` });
+    events.push({ at: r.created_at, order: 2, line: `- ${day(r.created_at)} ${r.action === 'resolve' ? (r.section === 'next' ? '完了' : '解決') : r.action === 'exclude' ? `誤りとして外した（${r.reason ? exclusionReasonLabels[r.reason] : '理由なし'}）` : '未解決に戻した'}: ${clip(r.text)}（本人報告 ${r.id}）` });
   for (const s of sources.statuses.filter(s => s.project_id === id)) {
     const from = (projectStatusLabels as Record<string, string>)[s.from] ?? (s.from ? s.from : '進行中');
     events.push({ at: s.changed_at, order: 3, line: `- ${day(s.changed_at)} 状態: ${plain(from)} → ${projectStatusLabels[s.to]}（${s.id}）` });
