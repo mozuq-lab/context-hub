@@ -1,3 +1,4 @@
+import { nowText } from './markdown-text.js';
 import { readCorrectionChains, type CorrectionChain } from './corrections.js';
 import { readReceipts } from './views.js';
 import { hash, Vault } from './storage.js';
@@ -39,5 +40,5 @@ export async function readEffectiveInputs(config: HubConfig): Promise<EffectiveI
 }
 export function correctionNotice(effective: EffectiveInput): string {
   const {chain,pendingCorrection} = effective;
-  return chain.revisions.length ? `${pendingCorrection ? '訂正未反映（旧解釈を表示・最新とは限りません）' : '訂正反映済み'}: ${[chain.root,...chain.revisions].map(i=>`[${i.id}](${i.path})（出典:${i.source.replace(/[\r\n]/g,' ')} / ${i.occurred_at}）`).join(' → ')}` : '';
+  return chain.revisions.length ? `${pendingCorrection ? '訂正未反映（旧解釈を表示・最新とは限りません）' : '訂正反映済み'}: ${[chain.root,...chain.revisions].map(i=>`[${i.id}](${i.path})（出典:${nowText(i.source)} / ${i.occurred_at}）`).join(' → ')}` : '';
 }

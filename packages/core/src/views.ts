@@ -1,3 +1,4 @@
+import { nowText } from './markdown-text.js';
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { readInputs } from './capture.js';
@@ -75,7 +76,7 @@ export function autoRegion(text: string): { before: string; auto: string; after:
   if (start < 0 || end <= start || text.indexOf(autoStart, start + autoStart.length) >= 0 || text.indexOf(autoEnd, end + autoEnd.length) >= 0) return undefined;
   return { before: text.slice(0, start), auto: text.slice(start + autoStart.length, end), after: text.slice(end + autoEnd.length) };
 }
-function plain(text: string): string { return text.replace(/[\r\n]+/g, ' ').replaceAll('<!--', '&lt;!--'); }
+const plain = nowText;
 export function dateLabel(iso: string, timezone: string): string { return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso)); }
 
 /** 最後に書いたNOWの自動領域。手で変えた行を求める基準。 */

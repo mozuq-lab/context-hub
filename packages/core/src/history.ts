@@ -1,3 +1,4 @@
+import { listText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { readProjects } from './projects.js';
@@ -18,7 +19,7 @@ import type { HubConfig, Input, Project, Receipt } from './types.js';
  * プロジェクトの経緯（10_projects/<id>/HISTORY.md）。モデルを使わず、根拠と処理記録だけから月ごとの出来事を組み立てる。
  * NOWは「今」、REVIEWは直近の期間だけを示すため、休止から戻るときや完了にするときに流れを通して読む場所として使う。
  */
-const plain = (s: string) => s.replace(/[\r\n|]/g, ' ').replaceAll('[', '\\[').replaceAll(']', '\\]').replaceAll('<!--', '&lt;!--');
+const plain = listText;
 const clip = (s: string, n = 120) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
 /** 月ごとに載せる入力の上限。超えた分は件数だけ示す。 */
 const INPUTS_PER_MONTH = 8;

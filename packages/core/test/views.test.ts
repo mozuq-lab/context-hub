@@ -77,3 +77,17 @@ describe('出典から再生成するNOW', () => {
     expect(now).toContain('集約設計を書いた'); const next = now.split('# 次の一手')[1]!.split('## 提案')[0]!; expect(next).not.toContain('いつか自動化する'); expect(now.split('## 提案')[1]).toContain('いつか自動化する');
   });
 });
+
+test('訂正の出典にHTMLコメントの印があっても、NOWの自動領域を壊さず作り直せる', async () => {
+  const config = await setup(); const vault = new Vault(config);
+  const { correctInput } = await import('../src/corrections.js');
+  const saved = await capture(config, { source: 'cli', project: 'context-hub', occurredAt: '2026-10-01T00:00:00Z', text: 'これはどうだろう？' });
+  await organize(config, new MockLlm());
+  await correctInput(config, saved.inputId, { source: 'app <!-- ctx:auto:end -->', text: 'これはどうなるだろう？', occurredAt: '2026-10-01T00:00:00Z' });
+  await organize(config, new MockLlm());
+  expect(await rebuildNow(config, 'context-hub')).not.toHaveProperty('conflict');
+  expect(await rebuildNow(config, 'context-hub')).not.toHaveProperty('conflict');
+  const now = (await vault.read('10_projects/context-hub/NOW.md'))!;
+  expect(now.split('<!-- ctx:auto:end -->')).toHaveLength(2);
+  expect(now).toContain('出典:app &lt;!-- ctx:auto:end -->');
+});

@@ -1,3 +1,4 @@
+import { inlineText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { mergeTargets, readProjects } from './projects.js';
@@ -12,7 +13,7 @@ import type { HubConfig, Input, Project } from './types.js';
  * NOWは「今」、経緯は流れを示すため、あとで読み返す記事・仕様・リポジトリなどを探す場所として使う。
  */
 // AIの要約と名前は1行の文字として載せる。リンク・HTML・コメントとして解釈される文字は無害にする。
-const plain = (s: string) => s.replace(/[\r\n|]/g, ' ').replaceAll('[', '\\[').replaceAll(']', '\\]').replaceAll('<', '&lt;');
+const plain = (s: string) => inlineText(s, { table: true, brackets: true, angle: true });
 const clip = (s: string, n = 160) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
 export const referencesPath = (projectId: string) => `10_projects/${projectId}/REFERENCES.md`;
 /** 1件の資料から載せるURLの上限。超えた分は件数だけ示す。 */
