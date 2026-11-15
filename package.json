@@ -20,6 +20,7 @@
     "test": "vitest run",
     "demo": "npm run build && node scripts/demo.mjs",
     "ctx": "node packages/core/dist/cli.js",
+    "deploy": "node scripts/deploy.mjs",
     "pretest": "npm run build",
     "sample": "npm run build && node scripts/create-sample.mjs"
   },
