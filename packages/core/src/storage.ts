@@ -1,4 +1,5 @@
-import { constants } from 'node:fs';
+import { constants, openSync, readFileSync, closeSync, unlinkSync, rmdirSync } from 'node:fs';
+import { constants as osConstants } from 'node:os';
 import { mkdir, lstat, realpath, readdir, open, rename, link, unlink, rmdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -101,6 +102,31 @@ export async function unlockVault(config: HubConfig, scope: LockScope = 'writer'
     }
     throw new Error('所有者が稼働中のためロックを解除できません');
   } finally { await rmdir(reaper); }
+}
+
+/** この処理が保持しているロック（パス→所有者の印）。シグナルで終了するときに解放する。 */
+const heldLocks = new Map<string, string>();
+/**
+ * 保持中のロックを同期的に解放する。所有者の記録がこの処理の印と一致するものだけを消す（他の処理のロックや判断できない残骸は触らない）。
+ * 死んだ処理のロック残骸の回収は、従来どおりdoctor --unlockの明示操作に限る。
+ */
+export function releaseHeldLocksSync(): void {
+  for (const [lock, token] of heldLocks) {
+    try {
+      const fd = openSync(join(lock, 'owner.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
+      let owner: Partial<LockOwner>;
+      try { owner = JSON.parse(readFileSync(fd, 'utf8')); } finally { closeSync(fd); }
+      if (owner.token === token && owner.pid === process.pid) { unlinkSync(join(lock, 'owner.json')); rmdirSync(lock); }
+    } catch { /* 解放できないロックはdoctorで示す。 */ }
+  }
+  heldLocks.clear();
+}
+/**
+ * CLI用。SIGINT・SIGTERM・SIGHUPで終了するとき、保持中のロックを解放してから終了する。
+ * 書き込みは一時ファイルからの置き換えで、途中で止まった操作は記録から回復する設計のため、解放してから終了しても整合性は保たれる。
+ */
+export function releaseLocksOnSignal(): void {
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.once(signal, () => { releaseHeldLocksSync(); process.exit(128 + osConstants.signals[signal]); });
 }
 
 export class Vault {
@@ -217,8 +243,10 @@ export class Vault {
         await pause(20);
       }
     }
+    heldLocks.set(lock, token);
     try { return await fn(); }
     finally {
+      heldLocks.delete(lock);
       const { owner } = await readLockOwner(lock);
       if (owner.token === token) { await unlink(join(lock, 'owner.json')); await rmdir(lock); }
     }

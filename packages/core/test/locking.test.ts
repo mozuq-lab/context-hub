@@ -122,3 +122,18 @@ describe('Vault単位の単一Writer', () => {
     expect(await readFile(join(lock, 'owner.json'), 'utf8')).toBe(owner);
   }, 12_000);
 });
+
+test.each(['SIGTERM', 'SIGINT'] as const)('CLIが%sで終了するときは保持中のロックを解放し、後続のWriterが待たずに書ける', async signal => {
+  const { config } = await setup();
+  const dist = new URL('../dist/storage.js', import.meta.url).href;
+  // CLIと同じく、シグナルを受けたら保持中のロックを解放して終了する。
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import {Vault,releaseLocksOnSignal} from ${JSON.stringify(dist)};releaseLocksOnSignal();const v=new Vault(${JSON.stringify(config)});await v.withLock(()=>v.withLock(()=>new Promise(r=>{console.log('locked');setTimeout(r,60000);}),'writer'),'organize');`], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await once(child.stdout!, 'data');
+  child.kill(signal);
+  const [code, received] = await once(child, 'exit') as [number | null, string | null];
+  expect(received === signal || code === 128 + (signal === 'SIGTERM' ? 15 : 2)).toBe(true);
+  for (const scope of ['writer', 'organize'] as const) await expect(readFile(join(await lockPath(config, scope), 'owner.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  const started = performance.now();
+  await new Vault(config).withLock(async () => {});
+  expect(performance.now() - started).toBeLessThan(2000);
+}, 20_000);
