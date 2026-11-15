@@ -4,6 +4,7 @@ import {z} from 'zod';
 import {Vault,hash,parseMarkdown} from './storage.js';
 import {isGeneratedIntact,receiptSchema} from './views.js';
 import {readCorrectionChains} from './corrections.js';
+import {itemMergeTargets} from './item-resolutions.js';
 import type {HubConfig} from './types.js';
 import type {ReviewCandidate} from './candidate-review.js';
 
@@ -79,8 +80,13 @@ export async function readKnowledgeCandidate(config:HubConfig,id:string):Promise
     if(receiptRaw===undefined){issue('unavailable','整理記録が未同期です。');return item;}
     const receipt=receiptSchema.parse(JSON.parse(receiptRaw));
     if(!decision){
-     const catalog=await readProjectCatalog(vault),explicit=catalog.find(p=>p.id===chain.root.project);
-     const suggestions=explicit?[{projectId:explicit.id,title:explicit.title,source:'explicit' as const}]:(receipt.result?.project_candidates??[]).flatMap(c=>{const p=catalog.find(p=>p.id===c.id);return p?[{projectId:p.id,title:p.title,source:'inferred' as const,confidence:c.confidence}]:[];});
+     // 統合済みのプロジェクトは、統合先を採用先の候補にする。統合の有無で候補が変わるため、統合元の定義も確認対象に含める。
+     const catalog=await readProjectCatalog(vault),targets=await itemMergeTargets(vault);
+     const redirect=async(id:string)=>{const target=targets.get(id);if(target===undefined)return id;const source=catalog.find(p=>p.id===id);if(source)await depend(source.path);return target;};
+     const explicitId=chain.root.project===undefined?undefined:await redirect(chain.root.project),owner=catalog.find(p=>p.id===explicitId);
+     const inferred:{projectId:string;title:string;source:'inferred';confidence:number}[]=[];
+     if(!owner)for(const c of receipt.result?.project_candidates??[]){const p=catalog.find(x=>x.id===c.id);if(!p)continue;const id=await redirect(p.id),target=catalog.find(x=>x.id===id);if(!target)continue;const same=inferred.find(s=>s.projectId===target.id);if(same)same.confidence=Math.max(same.confidence,c.confidence);else inferred.push({projectId:target.id,title:target.title,source:'inferred',confidence:c.confidence});}
+     const suggestions=owner?[{projectId:owner.id,title:owner.title,source:'explicit' as const}]:inferred;
      item.projectSuggestions=suggestions;
      for(const suggestion of suggestions)await depend(catalog.find(p=>p.id===suggestion.projectId)!.path);
      if(suggestions.length===1){const p=catalog.find(p=>p.id===suggestions[0]!.projectId)!;item.suggestedTarget={scope:'project',projectId:p.id,projectHash:p.hash};}

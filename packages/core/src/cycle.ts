@@ -3,13 +3,14 @@ import { organize,type OrganizeOptions,type OrganizeRunResult } from './organize
 import { rebuildDashboard } from './dashboard.js';
 import { rebuildDigest } from './digest.js';
 import { rebuildHistories,type HistoryWrite } from './history.js';
+import { rebuildReferences,type ReferencesWrite } from './references.js';
 import { collectGitDrafts,type CollectOutcome } from './git-drafts.js';
 import { nowItemsPath } from './item-resolutions.js';
 import { readProjects,inspectProjects } from './projects.js';
 import { rebuildNow } from './views.js';
 import { Vault } from './storage.js';
 import type { HubConfig,LlmClient } from './types.js';
-export interface CycleResult { intake:IntakeRunResult; organize:OrganizeRunResult; dashboard?:{path:string;conflict?:string}; digest?:{path:string;conflict?:string}; history?:HistoryWrite[]|{error:string}; git?:CollectOutcome; dryRun:boolean }
+export interface CycleResult { intake:IntakeRunResult; organize:OrganizeRunResult; dashboard?:{path:string;conflict?:string}; digest?:{path:string;conflict?:string}; history?:HistoryWrite[]|{error:string}; references?:ReferencesWrite[]|{error:string}; git?:CollectOutcome; dryRun:boolean }
 export async function runCycle(config:HubConfig,llm:LlmClient,options:OrganizeOptions={}):Promise<CycleResult>{
  const intake=await ingest(config,{dryRun:options.dryRun});
  // 不正なプロジェクト定義があるときはモデルを呼ばず、HOMEに不正な箇所を示してから止める。
@@ -28,6 +29,9 @@ export async function runCycle(config:HubConfig,llm:LlmClient,options:OrganizeOp
  // 経緯は派生の読み物なので、作れなくてもHOMEの生成とcycleは止めない（失敗はcycleの結果とdoctorで示す）。
  let history:HistoryWrite[]|{error:string};
  try{history=(await rebuildHistories(config)).filter(h=>h.written||h.stopped);}catch(error){history={error:error instanceof Error?error.message:String(error)};}
+ // 資料棚も派生の読み物。資料のあるプロジェクトだけに作り、作れなくてもcycleは止めない。
+ let references:ReferencesWrite[]|{error:string};
+ try{references=(await rebuildReferences(config)).filter(r=>r.written||r.stopped);}catch(error){references={error:error instanceof Error?error.message:String(error)};}
  const dashboard=await rebuildDashboard(config);
- return{intake,organize:organized,dashboard,digest,history,...(git?{git}:{}),dryRun:false};
+ return{intake,organize:organized,dashboard,digest,history,references,...(git?{git}:{}),dryRun:false};
 }

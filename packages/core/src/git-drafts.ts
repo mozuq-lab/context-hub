@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { basename } from 'node:path';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { capture, readInputs } from './capture.js';
-import { projectIdSchema, readProjects } from './projects.js';
+import { mergeTargets, projectIdSchema, readProjects } from './projects.js';
 import { lifecycleOf } from './project-status.js';
 import type { HubConfig, Input } from './types.js';
 
@@ -113,6 +113,8 @@ export async function collectGitDrafts(config: HubConfig, options: { now?: Date;
   for (const entry of config.git.repos) {
     const repo = entry.name ?? basename(entry.path), project = projects.find(p => p.id === entry.projectId);
     if (!project) { outcome.errors.push({ projectId: entry.projectId, repo, error: '設定したプロジェクトが見つかりません' }); continue; }
+    const mergedInto = mergeTargets(projects).get(project.id);
+    if (mergedInto) { outcome.skipped.push({ projectId: entry.projectId, repo, reason: `統合済みのプロジェクトです。設定のプロジェクトを統合先（${mergedInto}）に変えてください` }); continue; }
     if (lifecycleOf(project) !== 'active') { outcome.skipped.push({ projectId: entry.projectId, repo, reason: '休止・完了のプロジェクトです' }); continue; }
     const mine = mineOf(await readGitDrafts(config), entry.path, entry.projectId);
     if (mine.some(d => d.status === 'pending')) { outcome.skipped.push({ projectId: entry.projectId, repo, reason: '未確認の下書きがあります' }); continue; }

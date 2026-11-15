@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { workflowSetup, packet } from './workflow-fixtures.js';
 import { addProject } from '../src/projects.js';
 import { setProjectStatus } from '../src/project-status.js';
+import { mergeProjects } from '../src/project-merges.js';
 import { capture, readInputs } from '../src/capture.js';
 import { hash } from '../src/storage.js';
 import { ingest } from '../src/intake.js';
@@ -34,6 +35,18 @@ test('無効のとき、またはリポジトリ未設定のときはgitを実�
   const log = () => { throw new Error('呼ばれない'); };
   expect(await collectGitDrafts(config, { now, log })).toEqual({ created: [], skipped: [], errors: [] });
   expect(await collectGitDrafts({ ...config, git: { ...config.git, enabled: true } }, { now, log })).toEqual({ created: [], skipped: [], errors: [] });
+});
+
+test('統合済みのプロジェクトに結び付けたリポジトリは下書きを作らず、統合先への設定変更を促す', async () => {
+  const { config: base, vault } = await workflowSetup(roots);
+  const r = await repo([['画面を追加', '2026-11-01T01:00:00Z']]);
+  const config = { ...base, git: { enabled: true, repos: [{ projectId: 'tool', path: r.dir, name: 'tool-app' }], maxCommits: 30, lookbackDays: 14 } };
+  await addProject(config, { id: 'hub', title: '集約ツール' });
+  await addProject(config, { id: 'tool', title: 'まとめツール' });
+  const h = async (id: string) => hash((await vault.read(`10_projects/${id}/project.md`))!);
+  await mergeProjects(config, { fromId: 'tool', intoId: 'hub', fromHash: await h('tool'), intoHash: await h('hub'), source: 'cli' });
+  expect(await collectGitDrafts(config, { now })).toEqual({ created: [], errors: [], skipped: [{ projectId: 'tool', repo: 'tool-app', reason: '統合済みのプロジェクトです。設定のプロジェクトを統合先（hub）に変えてください' }] });
+  expect(await readGitDrafts(config)).toEqual([]);
 });
 
 test('最後の根拠以降のコミットから下書きを作り、未確認の間は重ねて作らない', async () => {

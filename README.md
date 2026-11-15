@@ -13,7 +13,9 @@ AIとの作業要約や日々の思いつきをMarkdownに集め、数日後で�
 - 同じ話かもしれない[似ているアイデア](docs/operations.md#似ているアイデアを束ねる)をAIを使わずに見つけ、本人の判断で束ねる。
 - 直近7日の[ふりかえり](docs/project-lifecycle.md#ふりかえりreviewmd)で、動いたプロジェクト・現在地の変化・持ち越しの未解決を確認する。
 - プロジェクトごとの[経緯（HISTORY.md）](docs/project-lifecycle.md#経緯historymd)で、月ごとの入力・現在地の移り変わり・完了報告・状態の切り替えを通して読む。
+- プロジェクトごとの[資料（REFERENCES.md）](docs/project-lifecycle.md#資料referencesmd)で、参考資料に分類されたメモと本文のURLを新しい順に見返す（URLの中身は取得しない）。
 - 止まっているプロジェクトをHOMEで見つけ、本人の操作で[休止・完了](docs/project-lifecycle.md)に切り替える。
+- 同じものを指して別々にできた2つのプロジェクトを、本人の確認で[1つにまとめる](docs/project-lifecycle.md#プロジェクトの統合)（原文と記録は動かさず、取り消せる）。
 - プロジェクトの名前・別名・キーワードを、本人の確認で[安全に書き換える](docs/project-lifecycle.md#名前別名キーワードの手入れ)。手で壊した定義は、ファイルと項目をHOMEと`doctor`で示す。
 - 進行中のプロジェクトの次の一手を、HOMEで[まとめて確認](docs/work-records.md#homeの次の一手)する。
 - NOWの次の一手・未解決を、本人の報告で[完了・解決](docs/work-records.md)にする。
@@ -89,7 +91,7 @@ flowchart LR
 - [AI作業要約の形式](docs/prompts/handoff-summary.md)
 - [選択肢を選んで記録・壁打ちする（選んで深掘り）](docs/prompts/guided-capture.md)
 - [候補の確認待ちを使う](docs/candidate-review.md)
-- [プロジェクトの状態・ふりかえり・経緯](docs/project-lifecycle.md)
+- [プロジェクトの状態・統合・ふりかえり・経緯・資料](docs/project-lifecycle.md)
 - [開発と検証](docs/development.md)
 - [Mac・Androidアプリ（別リポジトリ）](https://github.com/mozuq-lab/context-hub-flutter-client)
 

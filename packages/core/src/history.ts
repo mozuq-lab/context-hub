@@ -8,6 +8,8 @@ import { lifecycleOf, projectStatusLabels, readProjectStatusChanges, type Projec
 import { exclusionReasonLabels, readItemResolutions, readNowItems, type ItemResolution } from './item-resolutions.js';
 import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
+import { readProjectMerges, type ProjectMerge } from './project-merges.js';
+import { mergeTargets } from './projects.js';
 import { knowledgePaths } from './knowledge-scope.js';
 import { retirementPath, retirementSchema } from './knowledge-retirement.js';
 import type { HubConfig, Input, Project, Receipt } from './types.js';
@@ -28,7 +30,7 @@ interface Event { at: string; order: number; line: string }
 interface HistorySources {
   config: HubConfig; projects: Project[]; units: EffectiveInput[]; receipts: Receipt[]; resolutions: ItemResolution[]; statuses: ProjectStatusChange[];
   /** 読めなかった記録の種類。経緯からは省き、本文にその旨を書く（cycleとHOMEを止めない）。 */ problems: string[];
-  creations: Awaited<ReturnType<typeof readProjectCreations>>; definitions: Awaited<ReturnType<typeof readProjectDefinitionChanges>>; knowledge: { projectId: string; id: string; kind: string; claim: string; approvedAt: string; retiredAt?: string }[];
+  creations: Awaited<ReturnType<typeof readProjectCreations>>; definitions: Awaited<ReturnType<typeof readProjectDefinitionChanges>>; merges: ProjectMerge[]; knowledge: { projectId: string; id: string; kind: string; claim: string; approvedAt: string; retiredAt?: string }[];
 }
 
 async function readSources(config: HubConfig, vault: Vault): Promise<HistorySources> {
@@ -52,7 +54,7 @@ async function readSources(config: HubConfig, vault: Vault): Promise<HistorySour
   return {
     config, projects: await readProjects(config), units: await readEffectiveInputs(config), receipts: await readReceipts(config),
     resolutions: await tolerant('完了・解決の報告', () => readItemResolutions(vault)), statuses: await tolerant('状態の切り替え', () => readProjectStatusChanges(vault)),
-    creations: await tolerant('プロジェクトの作成', () => readProjectCreations(vault)), definitions: await tolerant('定義の変更', () => readProjectDefinitionChanges(vault)), knowledge, problems,
+    creations: await tolerant('プロジェクトの作成', () => readProjectCreations(vault)), definitions: await tolerant('定義の変更', () => readProjectDefinitionChanges(vault)), merges: await tolerant('プロジェクトの統合', () => readProjectMerges(vault)), knowledge, problems,
   };
 }
 
@@ -107,6 +109,14 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
     const changed = [d.before.title !== d.after.title ? `名前 ${clip(d.before.title, 60)} → ${clip(d.after.title, 60)}` : '', JSON.stringify(d.before.aliases ?? []) !== JSON.stringify(d.after.aliases) ? '別名' : '', JSON.stringify(d.before.keywords ?? []) !== JSON.stringify(d.after.keywords) ? 'キーワード' : ''].filter(Boolean);
     events.push({ at: d.changed_at, order: 3, line: `- ${day(d.changed_at)} 定義を変更: ${changed.join('・') || '書式のみ'}（${d.id}）` });
   }
+  // 統合と取り消し。統合元と統合先の両方の経緯に載せる。
+  const titleOf = (projectId: string) => `${clip(sources.projects.find(p => p.id === projectId)?.title ?? projectId, 60)}（${projectId}）`;
+  for (const m of sources.merges.filter(m => m.from_id === id || m.into_id === id)) {
+    const text = m.from_id === id
+      ? (m.action === 'merge' ? `${titleOf(m.into_id)}へ統合した。入力・完了報告・日付は統合先のものとして読み替える` : `${titleOf(m.into_id)}への統合を取り消した`)
+      : (m.action === 'merge' ? `${titleOf(m.from_id)}を統合した。統合元の入力・完了報告・日付をこのプロジェクトのものとして読み替える` : `${titleOf(m.from_id)}の統合を取り消した`);
+    events.push({ at: m.changed_at, order: 3, line: `- ${day(m.changed_at)} ${text}（${m.id}）` });
+  }
   for (const k of sources.knowledge.filter(k => k.projectId === id)) {
     events.push({ at: k.approvedAt, order: 4, line: `- ${day(k.approvedAt)} ${kindLabels[k.kind] ?? '知識'}を採用: ${clip(k.claim)}（[${k.id}](knowledge/${k.id}.md)）` });
     if (k.retiredAt) events.push({ at: k.retiredAt, order: 4, line: `- ${day(k.retiredAt)} ${kindLabels[k.kind] ?? '知識'}の適用を停止: ${clip(k.claim)}（${k.id}）` });
@@ -124,11 +134,11 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
   // 月ごとにまとめる。入力の一覧は月の先頭に置き、ほかの出来事は日時の順に並べる。
   const months = new Map<string, Event[]>();
   for (const e of events) { const key = e.order === -1 ? e.at.slice(0, 7) : month(e.at); const list = months.get(key); if (list) list.push(e); else months.set(key, [e]); }
-  const lifecycle = lifecycleOf(project), firstAt = mine[0]?.chain.root.occurred_at, lastAt = mine.at(-1)?.chain.root.occurred_at;
+  const lifecycle = lifecycleOf(project), mergedInto = mergeTargets(sources.projects).get(id), firstAt = mine[0]?.chain.root.occurred_at, lastAt = mine.at(-1)?.chain.root.occurred_at;
   const resolvedCount = sources.resolutions.filter(r => r.project_id === id && r.action === 'resolve').length;
   const lines = [
     `# ${plain(project.title)}の経緯`, '',
-    `状態: ${projectStatusLabels[lifecycle]}${project.status === lifecycle ? '' : `（${plain(project.status)}）`}`,
+    `状態: ${mergedInto ? `統合済み（統合先: ${titleOf(mergedInto)}）` : `${projectStatusLabels[lifecycle]}${project.status === lifecycle ? '' : `（${plain(project.status)}）`}`}`,
     `期間: ${firstAt ? `${day(firstAt)} 〜 ${day(lastAt!)}（最初と最後の根拠の日付、${tz}）` : '根拠となる入力はまだありません'}`,
     `入力 ${mine.length}件 / 完了・解決の報告 ${resolvedCount}件 / 状態の切り替え ${sources.statuses.filter(s => s.project_id === id).length}件 / 採用した知識・方針 ${sources.knowledge.filter(k => k.projectId === id).length}件`, '',
     '根拠と処理記録から決定的に組み立てた一覧です。要約と抽出はAI生成・未検証です。判断の前にリンク先の原文と出典を確認してください。今の状態は[NOW](NOW.md)を参照してください。', '',
@@ -141,8 +151,9 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
     for (const e of months.get(key)!.sort((a, b) => (a.order === -1 ? -1 : 0) - (b.order === -1 ? -1 : 0) || Date.parse(a.at) - Date.parse(b.at) || a.order - b.order || a.line.localeCompare(b.line))) lines.push(e.line);
     lines.push('');
   }
-  // 休止・完了では、切り替えた時点で残っていたものを末尾にまとめる。
-  if (lifecycle !== 'active') {
+  // 休止・完了では、切り替えた時点で残っていたものを末尾にまとめる。統合済みでは、残っているものは統合先のNOWにある。
+  if (mergedInto) lines.push('## いま残っているもの（統合済み）', `- 次の一手と未解決は、統合先の[NOW](../${mergedInto}/NOW.md)を参照してください。`, '');
+  else if (lifecycle !== 'active') {
     let items: Awaited<ReturnType<typeof readNowItems>>;
     try { items = await readNowItems(vault, id); } catch { items = undefined; }
     const lastSummary = mine.filter(u => u.chain.root.kind === 'work-summary' && u.receipt?.result).at(-1);
