@@ -154,3 +154,32 @@ test('設定で検出規則を追加でき、不正な正規表現は設定の�
   expect(validateConfig(base).privacy).toEqual({ redactSecrets: true, patterns: [] });
   expect(() => validateConfig({ ...base, privacy: { redactSecrets: true, patterns: [{ label: 'x', pattern: '(' }] } })).toThrow();
 });
+
+test('鍵の名前の後に長い空白が続いても、検出は文字数に比例する時間で終わる', () => {
+  const settings = secretSettings({ privacy: { redactSecrets: true, patterns: [] } });
+  // 以前は鍵と区切りの間の空白で二乗の後戻りが起き、5万字で数秒かかった。
+  const started = performance.now();
+  for (const text of ['password' + ' '.repeat(50_000) + 'x', 'token' + '\t'.repeat(50_000) + '"x', 'パスワードは' + ' '.repeat(50_000)]) findSecrets(text, settings);
+  expect(performance.now() - started).toBeLessThan(1000);
+});
+
+test('設定の追加規則を、アプリと共有する90_system/privacy/patterns.jsonへ内容が変わったときだけ書く', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  const path = '90_system/privacy/patterns.json';
+  // 追加規則がなくても空の配列で書く。
+  await rebuildDashboard(config);
+  expect(JSON.parse((await vault.read(path))!)).toEqual({ schema_version: 1, redact_secrets: true, patterns: [] });
+  const withRules = validateConfig({ ...config, privacy: { redactSecrets: true, patterns: [{ label: '社員番号', pattern: 'EMP-\\d{6}' }, { label: '案件コード', pattern: 'PRJ-[A-Z]{3}' }] } });
+  await rebuildDashboard(withRules);
+  const raw = (await vault.read(path))!;
+  expect(JSON.parse(raw)).toEqual({ schema_version: 1, redact_secrets: true, patterns: [{ label: '社員番号', pattern: 'EMP-\\d{6}' }, { label: '案件コード', pattern: 'PRJ-[A-Z]{3}' }] });
+  // 同じ設定では書き直さない（生成日時を入れず、同期を走らせない）。
+  const { stat } = await import('node:fs/promises');
+  const before = (await stat(await vault.path(path))).mtimeMs;
+  await new Promise(r => setTimeout(r, 20));
+  await rebuildDashboard(withRules);
+  expect((await stat(await vault.path(path))).mtimeMs).toBe(before);
+  expect(await vault.read(path)).toBe(raw);
+  await rebuildDashboard(validateConfig({ ...config, privacy: { redactSecrets: false, patterns: [] } }));
+  expect(JSON.parse((await vault.read(path))!)).toEqual({ schema_version: 1, redact_secrets: false, patterns: [] });
+});

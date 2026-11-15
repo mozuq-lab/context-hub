@@ -21,10 +21,12 @@ import { setItemSchedule,readItemSchedules,activeSchedules } from './item-schedu
 import { rebuildHistories } from './history.js';
 import { dismissResolutionHint } from './resolution-hints.js';
 import { collectGitDrafts,readGitDrafts,useGitDraft,dismissGitDraft } from './git-drafts.js';
-import { Vault, unlockVault, LOCK_SCOPES, hash } from './storage.js';
+import { Vault, unlockVault, LOCK_SCOPES, hash, releaseLocksOnSignal } from './storage.js';
 import { addProject, readProjects } from './projects.js';
 import { find, findKinds, recent, pending, resume, context, bundle, bundleMaxIds, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
+import { userFacingError } from './error-message.js';
+import { writePrivacyPatternsLocked } from './secrets.js';
 import { verifyBackup,readBackupChecks,backupStatus } from './backup-check.js';
 import { rebuildIdeaIndexLocked,setIdeaLink } from './idea-links.js';
 import { listConflicts,resolveConflict } from './conflicts.js';
@@ -53,7 +55,7 @@ async function inputText(text:string|undefined, file:string|undefined,max:number
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)); }
   catch { throw new Error('文字コードがUTF-8ではありません。変換してから取り込んでください'); }
 }
-program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(()=>rebuildPoliciesLocked(c,vault));output({vaultPath:c.vaultPath,initialized:true});});
+program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(async()=>{await rebuildPoliciesLocked(c,vault);await writePrivacyPatternsLocked(c,vault);});output({vaultPath:c.vaultPath,initialized:true});});
 program.command('add [text]').description('原文を保存').option('--file <path>','Markdown/テキストファイル')
   .option('--event-id <id>','再送判定用ID').option('--source <name>','出典名').option('--occurred-at <iso>','タイムゾーン付き発生日時')
   .addOption(new Option('--kind <kind>','入力の種別').choices(['memo','work-summary']).default('memo'))
@@ -156,11 +158,11 @@ program.command('propose <claim>').addOption(new Option('--kind <kind>','候補�
 const backup=program.command('backup').description('バックアップから復元できるかを確かめる（元のVaultは読むだけで、書き換えない）');
 backup.command('verify').description('最新（または指定）のアーカイブをVault外の一時フォルダーへ展開して確かめ、結果を記録してHOMEを更新').option('--archive <path>','確かめるアーカイブ（省略時は設定のbackup.dirでいちばん新しいもの）').option('--work-dir <path>','展開先の親フォルダー（省略時はOSの一時フォルダー。Vaultと同期フォルダーの外にする）').option('--keep','確認後も展開先を残す（中身を自分で確かめるとき）').action(async opts=>{const c=await config();const result=await verifyBackup(c,{archive:opts.archive,workDir:opts.workDir,keep:opts.keep});await rebuildDashboard(c);output(result);if(result.check.status!=='ok')process.exitCode=1;});
 backup.command('status').description('最後の確認結果と、確かめた復元点').action(async()=>{const c=await config(),checks=await readBackupChecks(new Vault(c)),status=backupStatus(c,checks.records);output({restore_point:status.restorePoint?{archive:status.restorePoint.archive,created_at:status.restorePoint.archive_created_at,age_days:status.restorePointAgeDays,checked_at:status.restorePoint.checked_at}:null,latest:status.latest??null,warnings:status.warnings,problems:checks.problems});});
-program.command('doctor').description('Vaultと処理記録を検査').option('--unlock','全Writer・整理の停止後、死亡PIDのロック残骸のみ回収').action(async opts=>{const c=await config();if(opts.unlock)for(const scope of LOCK_SCOPES){try{await unlockVault(c,scope);}catch(error){/* 稼働中・判断不能なロックは回収せず、下のdoctorの検査結果で報告する。 */process.stderr.write(`警告: ${scope==='organize'?'整理':'Writer'}ロックを回収しませんでした: ${error instanceof Error&&/^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(error.message)&&!error.message.includes('\n')?error.message:'理由を確認できません'}\n`);process.exitCode=1;}}const result=await doctor(c);output(result);if(result.issues.length)process.exitCode=1;});
+program.command('doctor').description('Vaultと処理記録を検査').option('--unlock','全Writer・整理の停止後、死亡PIDのロック残骸のみ回収').action(async opts=>{const c=await config();if(opts.unlock)for(const scope of LOCK_SCOPES){try{await unlockVault(c,scope);}catch(error){/* 稼働中・判断不能なロックは回収せず、下のdoctorの検査結果で報告する。 */process.stderr.write(`警告: ${scope==='organize'?'整理':'Writer'}ロックを回収しませんでした: ${userFacingError(error)}\n`);process.exitCode=1;}}const result=await doctor(c);output(result);if(result.issues.length)process.exitCode=1;});
+// Ctrl+Cやサービス停止で終了しても、ロックの残骸で後続のWriterを止めない。
+releaseLocksOnSignal();
 try { await program.parseAsync(); }
 catch (error) {
   // パス・本文・外部プロセスのstderrを例外から転記しない。
-  const message=error instanceof Error?error.message:'';
-  const safe=/^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(message)&&!message.includes('\n')?message:'処理に失敗しました。設定・引数とctx doctorを確認してください';
-  process.stderr.write(`エラー: ${safe}\n`);process.exitCode=1;
+  process.stderr.write(`エラー: ${userFacingError(error)}\n`);process.exitCode=1;
 }

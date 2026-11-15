@@ -1,14 +1,14 @@
+import { nowText } from './markdown-text.js';
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { readInputs } from './capture.js';
-import { readProjects, mergedSources } from './projects.js';
-import { groundExtractedStatuses, organizeResultSchema } from './llm.js';
-import { groundExtractedHistory } from './llm.js';
-import { correctionNotice, effectiveFromInputs } from './effective-inputs.js';
+import { readProjects, mergedSources, mergeTargets } from './projects.js';
+import { organizeResultSchema } from './llm.js';
+import { correctionNotice, effectiveFromInputs, groundedResult } from './effective-inputs.js';
 import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
-import { Vault, hash, markdown, parseMarkdown } from './storage.js';
-import { activeResolutions, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
+import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
+import { activeResolutions, closedMergeWindows, withinMergeWindow, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import { appliedReread, readExclusionOverlays } from './item-rereads.js';
@@ -23,11 +23,14 @@ export const receiptSchema = z.object({
 }).strict().refine((receipt) => receipt.status === 'organized' ? receipt.result !== null && receipt.error === null : receipt.result === null && receipt.error !== null);
 
 export async function readReceipts(config: HubConfig): Promise<Receipt[]> {
+  return readOncePerLock(config, 'receipts', ['90_system/receipts'], () => loadReceipts(config));
+}
+async function loadReceipts(config: HubConfig): Promise<Receipt[]> {
   const vault = new Vault(config); const receipts: Receipt[] = [];
   for (const file of await vault.files('90_system/receipts')) {
     if (!/^90_system\/receipts\/IN-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(file)) continue;
     try {
-      const receipt = receiptSchema.parse(JSON.parse((await vault.read(file))!));
+      const receipt = await readOncePerLock(config, `receipt:${file}`, [file], async () => receiptSchema.parse(JSON.parse((await vault.read(file))!)));
       if (file !== `90_system/receipts/${receipt.input_id}.json`) throw new Error();
       receipts.push(receipt);
     } catch { throw new Error(`処理記録が不正です: ${file}`); }
@@ -75,7 +78,7 @@ export function autoRegion(text: string): { before: string; auto: string; after:
   if (start < 0 || end <= start || text.indexOf(autoStart, start + autoStart.length) >= 0 || text.indexOf(autoEnd, end + autoEnd.length) >= 0) return undefined;
   return { before: text.slice(0, start), auto: text.slice(start + autoStart.length, end), after: text.slice(end + autoEnd.length) };
 }
-function plain(text: string): string { return text.replace(/[\r\n]+/g, ' ').replaceAll('<!--', '&lt;!--'); }
+const plain = nowText;
 export function dateLabel(iso: string, timezone: string): string { return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso)); }
 
 /** 最後に書いたNOWの自動領域。手で変えた行を求める基準。 */
@@ -110,12 +113,11 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const units = await effectiveUnits(config, inputs, receipts, projects);
   const evidence = units.flatMap((unit) => {
     const {chain,receipt}=unit, input=chain.root;
-    const index=[chain.root,...chain.revisions].findIndex(i=>i.id===receipt?.input_id);
-    const bound={...chain,revisions:chain.revisions.slice(0,Math.max(0,index)),latest:receipt?.input_id===input.id?input:chain.revisions[index-1]??input};
-    return receipt?.result && associatedProjects(input,receipt,config).includes(projectId) ? [{input,result:chain.revisions.length?groundExtractedHistory(bound,receipt.result):groundExtractedStatuses(input,receipt.result),notice:correctionNotice(unit)}] : [];
+    return receipt?.result && associatedProjects(input,receipt,config).includes(projectId) ? [{input,result:groundedResult(chain,receipt.input_id,receipt.result),notice:correctionNotice(unit)}] : [];
   }).sort((left, right) => Date.parse(left.input.occurred_at) - Date.parse(right.input.occurred_at) || left.input.id.localeCompare(right.input.id));
   const summaries = evidence.filter(({ input }) => input.kind === 'work-summary'); const latest = summaries.at(-1);
-  const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${dateLabel(input.occurred_at, config.timezone)} ${config.timezone} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${evidence.find(e=>e.input.id===input.id)?.notice ? ' '+evidence.find(e=>e.input.id===input.id)!.notice.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
+  const notices = new Map(evidence.map(e => [e.input.id, e.notice])), unitsById = new Map(units.map(u => [u.chain.root.id, u])), occurredAt = new Map(inputs.map(i => [i.id, i.occurred_at]));
+  const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${dateLabel(input.occurred_at, config.timezone)} ${config.timezone} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${notices.get(input.id) ? ' '+notices.get(input.id)!.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
   // AIの読み違いなどの「誤り」として外した項目も欄から外すが、完了・解決とは分けて理由と一緒に示す。
@@ -159,7 +161,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const overlays = await readExclusionOverlays(vault);
   for (const r of resolved.values()) {
     if (r.action !== 'exclude' || !r.reason || items.has(r.item_key)) continue;
-    const unit = units.find(u => u.chain.root.id === r.input_id), input = unit?.chain.root;
+    const unit = unitsById.get(r.input_id), input = unit?.chain.root;
     if (!unit || !input) continue;
     const detached = input.project !== projectId && overlays.wrongProjects.get(input.id)?.has(projectId) === true;
     if (!detached && r.section === 'next' && latest && latest.input.id !== input.id) continue;
@@ -174,9 +176,12 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
   // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。
   // 統合元で整理・見送りしたときの項目キーは統合元のIDで作られているため、同じ項目のこのプロジェクトでのキーへ対応付ける。
+  // 統合を取り消した後は、統合していた間に統合先で見送った組も、このプロジェクトの見送りとして読む（完了報告・日付の読み替えと同じ期間）。
+  const windows = await closedMergeWindows(vault, mergeTargets(projects)), owners = [projectId, ...sources];
+  const formerInto = [...windows.values()].flat().filter(w => owners.includes(w.from));
   const alias = new Map<string, string>();
-  for (const item of items.values()) for (const source of sources) alias.set(itemKey(source, item.section, item.input_id, item.text), item.key);
-  const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId || sources.includes(d.project_id)).map(d => dismissalKey(projectId, alias.get(d.item_key) ?? d.item_key, d.input_id)));
+  for (const item of items.values()) for (const other of [...sources, ...new Set(formerInto.map(w => w.into))]) alias.set(itemKey(other, item.section, item.input_id, item.text), item.key);
+  const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId || sources.includes(d.project_id) || formerInto.some(w => w.into === d.project_id && withinMergeWindow(windows, w.into, w.from, d.created_at))).map(d => dismissalKey(projectId, alias.get(d.item_key) ?? d.item_key, d.input_id)));
   const reopenedAt = new Map<string, number>();
   for (const r of resolutionRecords) if (r.project_id === projectId && r.action === 'reopen') reopenedAt.set(r.item_key, Math.max(reopenedAt.get(r.item_key) ?? 0, Date.parse(r.created_at)));
   const hinted: { item: NowItem; input: Input; quote: string }[] = [];
@@ -187,7 +192,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
       const item = items.get(hint.item_key) ?? items.get(alias.get(hint.item_key) ?? '');
       if (!item || item.resolution || item.input_id === chain.root.id || dismissed.has(dismissalKey(projectId, item.key, chain.root.id))) continue;
       // このメモより後の根拠で改めて挙がった項目は、このメモでは片付いていない。
-      if (Date.parse(chain.root.occurred_at) < Date.parse(inputs.find(i => i.id === item.input_id)?.occurred_at ?? chain.root.occurred_at)) continue;
+      if (Date.parse(chain.root.occurred_at) < Date.parse(occurredAt.get(item.input_id) ?? chain.root.occurred_at)) continue;
       if (Date.parse(receipt.organized_at) <= (reopenedAt.get(item.key) ?? Number.NEGATIVE_INFINITY)) continue;
       if ((item.hints ??= []).some(h => h.input_id === chain.root.id) || item.hints.length >= 20) continue;
       item.hints.push({ input_id: chain.root.id, quote: hint.quote, at: receipt.organized_at });
@@ -201,6 +206,9 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   // 欄が空になった理由。誤りとして外した項目だけで空になったときは、完了・解決と書かない。
   const closedNote = (section: ItemSection, reported: string) => [...items.values()].some(i => i.section === section && i.resolution && i.resolution.action !== 'exclude') ? reported : '誤りとして外した項目のみ';
   const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? `- 残っている次の一手はありません（${closedNote('next', '完了報告済み')}）` : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? `- 残っている未解決はありません（${closedNote('open', '解決報告済み')}）` : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}${excluded.length ? `\n# 誤りとして外した項目（本人報告）\nAIの読み違いなどとして、本人が外した項目です。完了・解決ではありません。理由と一言は、次からの整理でAIへ渡します。戻すときはアプリか\`ctx item reopen\`を使ってください。\n${excluded.join('\n')}\n` : ''}`;
+  // 項目一覧はNOWの手動編集と無関係に、常に最新の整理結果から書き直す。
+  await vault.write(nowItemsPath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_at: generatedAt, items: [...items.values()] }, null, 2) + '\n');
+  // NOWは書く直前に読み、手編集の有無を判定する（読んでから書くまでの間に同期で届いた手編集を上書きしにくくする）。
   const relative = `10_projects/${projectId}/NOW.md`; const existing = await vault.read(relative);
   let before = '（手動領域: この領域は再生成しても保持されます）\n\n'; let after = '\n'; let oldMeta: Record<string, unknown> = {}; let conflict = false;
   if (existing !== undefined) {
@@ -213,13 +221,17 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   }
   const meta = { ...oldMeta, schema_version: 1, project: projectId, generated_by: { model: 'deterministic-writer', prompt_version: 1 }, generated_at: generatedAt, last_evidence_at: evidence.at(-1)?.input.occurred_at ?? null, input_ids: evidence.map(({ input }) => input.id), verified: false, generated_hash: `sha256:${hash(auto)}` };
   const content = markdown(meta, `${before}${autoStart}${auto}${autoEnd}${after}`);
-  // 項目一覧はNOWの手動編集と無関係に、常に最新の整理結果から書き直す。
-  await vault.write(nowItemsPath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_at: generatedAt, items: [...items.values()] }, null, 2) + '\n');
   if (conflict) return { path: relative, conflict: await stashConflictLocked(vault, `NOW.${projectId}`, content) };
   await vault.write(relative, content);
   // 手で書き換えられたときに「どこを変えたか」を示せるよう、書いた自動領域を基準として残す（NOW.mdのgenerated_hashと対応）。
   await vault.write(nowBaselinePath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_hash: meta.generated_hash, auto }) + '\n');
   return { path: relative };
+}
+
+/** NOW.mdの最終根拠日時。未生成・解析不能なら未定（HOME・ふりかえり・作業記録の下書きで共通）。 */
+export async function lastEvidenceAt(vault: Vault, projectId: string): Promise<string | undefined> {
+  const raw = await vault.read(`10_projects/${projectId}/NOW.md`); if (raw === undefined) return undefined;
+  try { const value = parseMarkdown(raw).meta.last_evidence_at; return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined; } catch { return undefined; }
 }
 
 export async function rebuildNow(config: HubConfig, projectId: string): Promise<{ path: string; conflict?: string }> {

@@ -29,15 +29,41 @@ export function projectRegistryHash(projects:Project[]):string{
  return hash(JSON.stringify(projects.map(p=>({id:p.id,title:p.title,aliases:[...p.aliases].sort(),keywords:[...p.keywords].sort(),status:registryStatus(p)})).sort((a,b)=>a.id.localeCompare(b.id))));
 }
 const pathFor=(effective:EffectiveInput,registry:string)=>`90_system/associations/${effective.chain.root.id}/${effective.chain.evidenceHash}.${registry}.json`;
-export async function readAssociation(vault:Vault,effective:EffectiveInput,projects:Project[]):Promise<AssociationResult|undefined>{
- const registry=projectRegistryHash(projects),raw=await vault.read(pathFor(effective,registry));if(raw===undefined)return undefined;
+export async function readAssociation(vault:Vault,effective:EffectiveInput,projects:Project[],registryHash?:string):Promise<AssociationResult|undefined>{
+ const registry=registryHash??projectRegistryHash(projects),raw=await vault.read(pathFor(effective,registry));if(raw===undefined)return undefined;
  const record=associationSchema.parse(JSON.parse(raw));
  if(record.input_id!==effective.chain.root.id||record.evidence_hash!==effective.chain.evidenceHash||record.registry_hash!==registry||record.project_candidates.some(c=>!projects.some(p=>p.id===c.id))||new Set(record.project_candidates.map(c=>c.id)).size!==record.project_candidates.length)throw new Error('再関連付けの根拠またはプロジェクトが不正です');
  return record;
 }
+/** 入力ごとの関連付けの記録のパス（根拠のhash・登録簿のhash）。一覧だけで、本文は読まない。 */
+async function associationIndex(vault:Vault):Promise<Map<string,{evidence:string;registry:string;path:string}[]>>{
+ const index=new Map<string,{evidence:string;registry:string;path:string}[]>();
+ for(const path of await vault.files('90_system/associations')){
+  const m=/^90_system\/associations\/(IN-[0-9A-HJKMNP-TV-Z]{26})\/([a-f0-9]{64})\.([a-f0-9]{64})\.json$/.exec(path);if(!m)continue;
+  const list=index.get(m[1]!)??[];list.push({evidence:m[2]!,registry:m[3]!,path});index.set(m[1]!,list);
+ }
+ return index;
+}
+/**
+ * いまの登録簿での関連付けがまだないときに使う、同じ根拠に対する前回の関連付け（最も新しいもの）。
+ * 無関係なプロジェクトに別名を足しただけで登録簿のhashが変わり、次の関連付けまでメモがNOW・経緯・資料から消えないようにする。
+ * 候補はいまある定義だけに絞る。AIの推定であることは変わらず、新しい登録簿での関連付けは従来どおり次の整理で行う。
+ */
+async function previousAssociation(vault:Vault,effective:EffectiveInput,projects:Project[],registry:string,entries:{evidence:string;registry:string;path:string}[]|undefined):Promise<AssociationResult|undefined>{
+ let best:AssociationResult|undefined;
+ for(const entry of entries??[]){
+  if(entry.evidence!==effective.chain.evidenceHash||entry.registry===registry)continue;
+  let record:AssociationResult;
+  try{record=associationSchema.parse(JSON.parse((await vault.read(entry.path))!));}catch{continue;/* 壊れた記録はdoctorが示す。 */}
+  if(record.status!=='associated'||record.input_id!==effective.chain.root.id||record.evidence_hash!==effective.chain.evidenceHash||record.registry_hash!==entry.registry)continue;
+  if(!best||Date.parse(record.associated_at)>Date.parse(best.associated_at))best=record;
+ }
+ return best&&{...best,project_candidates:best.project_candidates.filter(c=>projects.some(p=>p.id===c.id))};
+}
 export async function associationEligible(config:HubConfig,vault:Vault,effective:EffectiveInput,projects:Project[],retryFailed=false):Promise<boolean>{
  const {chain,receipt,pendingCorrection}=effective;
- if(!candidateProjects(projects).length||chain.root.project||!receipt?.result||receipt.input_id!==chain.latest.id||pendingCorrection||receipt.result.project_candidates.some(c=>c.confidence>=config.organize.projectThreshold)||receipt.project_registry_hash===projectRegistryHash(projects))return false;
+ // 前回の定義一覧での関連付けで表示している間も、関連付け前の帰属候補で判定する（いまの定義での関連付けを止めない）。
+ if(!candidateProjects(projects).length||chain.root.project||!receipt?.result||receipt.input_id!==chain.latest.id||pendingCorrection||(effective.previousAssociation?.baseCandidates??receipt.result.project_candidates).some(c=>c.confidence>=config.organize.projectThreshold)||receipt.project_registry_hash===projectRegistryHash(projects))return false;
  const existing=await readAssociation(vault,effective,projects);
  if(existing&&!(existing.status==='failed'&&retryFailed&&existing.attempts<config.organize.maxAttempts))return false;
  // 本人が「別のプロジェクトの話」として外している間は、再関連付けをしない。外した状態で求めた関連を残すと、
@@ -55,7 +81,8 @@ export async function applyAssociations(config:HubConfig,effective:EffectiveInpu
  // 外す記録が壊れていても、検索・HOME・経緯は元の解釈で続ける（壊れた記録はNOWの作り直しとdoctorが示す）。
  let overlays:ExclusionOverlays;try{overlays=await readExclusionOverlays(vault);}catch{overlays={exclusions:[],wrongProjects:new Map(),rereads:new Map(),problems:[]};}
  // 外す記録は統合先のプロジェクトのものとして読むため、帰属候補も統合先へ読み替えてから比べる。
- const targets=mergeTargets(registry);
+ const targets=mergeTargets(registry),registryHash=projectRegistryHash(registry);
+ let index:Awaited<ReturnType<typeof associationIndex>>|undefined;
  for(const item of effective){
   let bound=item;
   // 訂正待ちでは、最後に整理できた根拠に対する関連付けを引き継ぐ。
@@ -66,12 +93,17 @@ export async function applyAssociations(config:HubConfig,effective:EffectiveInpu
    for(const input of subset){const raw=await vault.read(input.path);if(raw===undefined)throw new Error('再関連付けの根拠がありません');parts.push(`${input.id}:${hash(raw)}`);}
    bound={...item,chain:{...item.chain,revisions:subset.slice(1),latest:subset.at(-1)!,evidenceHash:hash(parts.join('\n'))}};
   }
-  const record=item.receipt?await readAssociation(vault,bound,registry):undefined;
+  let record=item.receipt?await readAssociation(vault,bound,registry,registryHash):undefined;
+  // 今の定義一覧での関連付けが失敗したままでも、前回の関連付けで表示を続ける。
+  if((!record||record.status==='failed')&&item.receipt?.result&&!item.chain.root.project&&item.receipt.project_registry_hash!==registryHash)record=await previousAssociation(vault,bound,registry,registryHash,(index??=await associationIndex(vault)).get(item.chain.root.id));
   const reread=appliedReread(overlays,item),wrong=wrongProjectsFor(overlays,item.chain.root);
   let unit=item;
   const withResult=(change:(r:OrganizeResult)=>OrganizeResult)=>{if(unit.receipt?.result)unit={...unit,receipt:{...unit.receipt,result:change(unit.receipt.result)}};};
   if(reread?.result){const overlay=reread.result;withResult(r=>overlayReread(r,overlay));}
-  if(record?.status==='associated'&&!(reread&&Date.parse(reread.reread_at)>=Date.parse(record.associated_at)))withResult(r=>({...r,project_candidates:record.project_candidates}));
+  if(record?.status==='associated'&&!(reread&&Date.parse(reread.reread_at)>=Date.parse(record.associated_at))){
+   if(record.registry_hash!==registryHash&&unit.receipt?.result)unit={...unit,previousAssociation:{baseCandidates:unit.receipt.result.project_candidates}};
+   withResult(r=>({...r,project_candidates:record.project_candidates}));
+  }
   if(wrong.size)withResult(r=>({...r,project_candidates:r.project_candidates.filter(c=>!wrong.has(targets.get(c.id)??c.id))}));
   result.push(unit);
  }

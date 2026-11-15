@@ -1,4 +1,4 @@
-import {readPolicies} from './policies.js';
+import {readPolicies,policyRootProblems} from './policies.js';
 import {knowledgePaths,readKnowledge} from './knowledge-scope.js';
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -27,7 +27,7 @@ import { describeFindings, findSecrets, secretSettings } from './secrets.js';
  * secretsは整合性の問題ではないため、issuesに入れず終了コードも変えない。値は含めない。
  * backupはバックアップから復元できるかの確認状況で、これもVaultの整合性ではないためissuesに入れない（確認したことがあるか、バックアップ先を設定したときだけ返す）。
  */
-export async function doctor(config: HubConfig): Promise<{issues:string[];inputs:number;secrets:{input_id:string;path:string;found:string}[];backup?:{restore_point:string|null;restore_point_age_days:number|null;warnings:string[]}}> {
+export async function doctor(config: HubConfig): Promise<{issues:string[];notices?:string[];inputs:number;secrets:{input_id:string;path:string;found:string}[];backup?:{restore_point:string|null;restore_point_age_days:number|null;warnings:string[]}}> {
   const vault=new Vault(config), issues:string[]=[], inputs:Input[]=[];
   for (const dir of VAULT_DIRS) {
     try { if (!(await lstat(await vault.path(dir))).isDirectory()) issues.push(`構造不正: ${dir}`); }
@@ -105,7 +105,9 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   for(const dir of ['20_ideas','90_system/candidates','30_knowledge','90_system/project-candidates'])try{
     for(const path of await vault.files(dir))if(path.endsWith('.md')&&!isGeneratedIntact((await vault.read(path))!))issues.push(`生成物の手動変更・形式不正: ${path}`);
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
-  try{for(const path of await knowledgePaths(vault)){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
+  try{const paths=await knowledgePaths(vault);for(const path of paths){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id,paths);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
+  // 見つからない作業フォルダーの対応付けは、外付けを外しただけでも起こり、方針の読取も止めないため、異常（issues）ではなく注意に示す。
+  const notices=await policyRootProblems(config);
   try{await readPolicies(config);}catch{issues.push(definitionsBroken?afterDefinitions('方針の同期・集約を確認できません'):'方針manifest・正本・停止記録の同期または集約が未完了です');}
   try{await readIdeaLinks(vault);}catch(error){issues.push(error instanceof Error?error.message:'アイデアの束ねの記録が不正です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}
@@ -124,5 +126,5 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
     for(const path of checks.problems)issues.push(`バックアップの確認結果の記録が不正です: ${path}`);
     if(checks.records.length||status.warnings.length)backup={restore_point:status.restorePoint?.archive??null,restore_point_age_days:status.restorePointAgeDays??null,warnings:status.warnings};
   }catch{issues.push('バックアップの確認結果を走査できません');}
-  return{issues,inputs:inputs.length,secrets,...(backup?{backup}:{})};
+  return{issues,...(notices.length?{notices}:{}),inputs:inputs.length,secrets,...(backup?{backup}:{})};
 }

@@ -165,3 +165,16 @@ test('同じプロジェクト・同じhashの下書きから作った入力だ�
   await capture(config, { source: 'x', kind: 'memo', project: 'hub', occurredAt: '2026-11-01T02:00:00Z', text: '編集した本文', meta: { git_draft: draft!.id, git_draft_hash: draft!.hash } });
   expect((await readGitDrafts(config))[0]!.status).toBe('used');
 });
+
+test('前回の下書きのコミットからの範囲で読むときも、遡りの上限日数より古いコミットは読まない', async () => {
+  const r = await repo([['前回', '2026-01-01T00:00:00Z'], ['ずっと前', '2026-02-01T00:00:00Z'], ['最近', '2026-11-01T00:00:00Z']]);
+  const all = await gitLog(r.dir, { since: '2025-01-01T00:00:00Z', max: 10 });
+  expect((await gitLog(r.dir, { since: '2030-01-01T00:00:00Z', after: all[0]!.sha, floor: '2026-10-20T00:00:00Z', max: 10 })).map(x => x.subject)).toEqual(['最近']);
+  // collectは遡りの上限日数を範囲の読取にも渡す。
+  const calls: Parameters<typeof gitLog>[1][] = [];
+  const { config } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: '集約ツール' });
+  config.git = { enabled: true, repos: [{ projectId: 'hub', path: r.dir }], maxCommits: 30, lookbackDays: 14 };
+  await collectGitDrafts(config, { now, log: async (path, options) => { calls.push(options); return gitLog(path, options); } });
+  expect(calls[0]!.floor).toBe(new Date(now.getTime() - 14 * 86_400_000).toISOString());
+});

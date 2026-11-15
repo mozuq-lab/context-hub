@@ -77,3 +77,32 @@ describe('出典から再生成するNOW', () => {
     expect(now).toContain('集約設計を書いた'); const next = now.split('# 次の一手')[1]!.split('## 提案')[0]!; expect(next).not.toContain('いつか自動化する'); expect(now.split('## 提案')[1]).toContain('いつか自動化する');
   });
 });
+
+test('訂正の出典にHTMLコメントの印があっても、NOWの自動領域を壊さず作り直せる', async () => {
+  const config = await setup(); const vault = new Vault(config);
+  const { correctInput } = await import('../src/corrections.js');
+  const saved = await capture(config, { source: 'cli', project: 'context-hub', occurredAt: '2026-10-01T00:00:00Z', text: 'これはどうだろう？' });
+  await organize(config, new MockLlm());
+  await correctInput(config, saved.inputId, { source: 'app <!-- ctx:auto:end -->', text: 'これはどうなるだろう？', occurredAt: '2026-10-01T00:00:00Z' });
+  await organize(config, new MockLlm());
+  expect(await rebuildNow(config, 'context-hub')).not.toHaveProperty('conflict');
+  expect(await rebuildNow(config, 'context-hub')).not.toHaveProperty('conflict');
+  const now = (await vault.read('10_projects/context-hub/NOW.md'))!;
+  expect(now.split('<!-- ctx:auto:end -->')).toHaveLength(2);
+  expect(now).toContain('出典:app &lt;!-- ctx:auto:end -->');
+});
+test('NOWを作り直している間に同期で届いた自動領域の手編集を、上書きせずに新版を退避する', async () => {
+  const { vi } = await import('vitest'), { writeFile } = await import('node:fs/promises');
+  const config = await setup(); await add(config, '2026-09-14T12:00:00+09:00', '原文'); await organize(config, new MockLlm([summary('実装済み')]));
+  const vault = new Vault(config), nowPath = '10_projects/context-hub/NOW.md', edited = (await vault.read(nowPath))!.replace('実装済み', '別端末で修正');
+  // 項目一覧を書く時点（NOWを読んだ後・書く前）に、別端末の手編集が同期で届く。
+  const write = Vault.prototype.write;
+  const spy = vi.spyOn(Vault.prototype, 'write').mockImplementation(async function (this: Vault, rel: string, text: string) {
+    if (rel === '90_system/now-items/context-hub.json') await writeFile(path.join(config.vaultPath, nowPath), edited);
+    return write.call(this, rel, text);
+  });
+  try {
+    const result = await rebuildNow(config, 'context-hub');
+    expect(await vault.read(nowPath)).toBe(edited); expect(result.conflict).toBeTruthy();
+  } finally { spy.mockRestore(); }
+});

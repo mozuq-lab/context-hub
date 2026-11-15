@@ -456,3 +456,57 @@ test('CLIで長いIDのプロジェクトを統合・取り消し・再統合で
   expect((await readProjects(config)).find(p => p.id === a)).toMatchObject({ status: 'paused' });
   expect(parseMarkdown(await definition(vault, b)).meta.aliases).toEqual([]);
 }, 30000);
+
+test('統合の前や取り消しの後に統合先で付けた記録は、統合元へ移さない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'alpha', title: 'アルファ' }); await addProject(config, { id: 'beta', title: 'ベータ' });
+  // 本人はalphaを指定し、AIは名前からbetaにも結び付ける。項目は両方のNOWに載る。
+  await capture(config, { source: 'cli', project: 'alpha', ...at('2026-10-01T00:00:00Z'), text: 'ベータの件は決まるだろうか？' });
+  await organize(config, new MockLlm());
+  const item = () => readNowItems(vault, 'beta').then(l => l!.items[0]!), alphaItem = () => readNowItems(vault, 'alpha').then(l => l!.items[0]!);
+  // 統合の前にbetaで解決した記録は、取り消した後もbetaのもの。
+  await setItemResolution(config, { projectId: 'beta', itemKey: (await item()).key, action: 'resolve', source: 'cli' });
+  await merge(config, vault, 'alpha', 'beta');
+  await unmergeProject(config, { fromId: 'alpha', intoId: 'beta', ...await hashes(vault, 'alpha', 'beta'), source: 'cli' });
+  expect(await alphaItem()).toMatchObject({ resolution: null });
+  expect(await item()).toMatchObject({ resolution: expect.anything() });
+  // 取り消した後にbetaで付けた日付も、betaに残る。
+  await setItemResolution(config, { projectId: 'beta', itemKey: (await item()).key, action: 'reopen', source: 'cli' });
+  await setItemSchedule(config, { projectId: 'beta', itemKey: (await item()).key, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+  expect(await item()).toMatchObject({ resolution: null, schedule: { due: '2026-12-01' } });
+  expect(await alphaItem()).toMatchObject({ schedule: null });
+});
+
+test('統合している間に統合先で見送った「片付いたかも」は、取り消した後も統合元で再び示さない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: '集約ツール' }); await addProject(config, { id: 'tool', title: 'まとめツール' });
+  await capture(config, { source: 'file', kind: 'work-summary', tool: 'codex', project: 'tool', ...at('2026-10-01T00:00:00Z'), text: '## 現在地\n- [確認済み] 試作が動いた\n## 次の一手\n- [確認済み] 利用者に見せる' });
+  await organize(config, new MockLlm());
+  // 統合の前に、統合元を指定したメモでAIが「片付いたかも」と示す。
+  const memo = await capture(config, { source: 'cli', project: 'tool', ...at('2026-10-02T00:00:00Z'), text: '完了: 利用者に見せる' });
+  await organize(config, new MockLlm());
+  expect((await readNowItems(vault, 'tool'))!.items.find(i => i.section === 'next')!.hints).toHaveLength(1);
+  await merge(config, vault);
+  const next = (await readNowItems(vault, 'hub'))!.items.find(i => i.section === 'next')!;
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === next.key)!.hints).toHaveLength(1);
+  const { dismissResolutionHint } = await import('../src/resolution-hints.js');
+  await dismissResolutionHint(config, { projectId: 'hub', itemKey: next.key, inputId: memo.inputId, source: 'cli' });
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === next.key)!.hints).toBeUndefined();
+  await unmergeProject(config, { fromId: 'tool', intoId: 'hub', ...await hashes(vault, 'tool', 'hub'), source: 'cli' });
+  expect((await readNowItems(vault, 'tool'))!.items.find(i => i.section === 'next')!.hints).toBeUndefined();
+  expect(await vault.read('10_projects/tool/NOW.md')).not.toContain('片付いたかも');
+});
+
+test('取り消し済みの統合で足した語は、別の統合を取り消すときに外さない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: 'ハブ' }); await addProject(config, { id: 'dee', title: 'Foo' }); await addProject(config, { id: 'aaa', title: 'エー', aliases: ['Foo'] });
+  await merge(config, vault, 'dee', 'hub');
+  await unmergeProject(config, { fromId: 'dee', intoId: 'hub', ...await hashes(vault, 'dee', 'hub'), source: 'cli' });
+  // 本人が手で別名Fooを足す。
+  await setProjectDefinition(config, { projectId: 'hub', expectedHash: hash(await definition(vault, 'hub')), title: 'ハブ', aliases: ['Foo'], keywords: [], source: 'cli' });
+  const merged = await merge(config, vault, 'aaa', 'hub');
+  expect(merged.aliases).toEqual(['エー']);
+  const undone = await unmergeProject(config, { fromId: 'aaa', intoId: 'hub', ...await hashes(vault, 'aaa', 'hub'), source: 'cli' });
+  expect(undone.aliases).toEqual(['エー']);
+  expect((await readProjects(config)).find(p => p.id === 'hub')!.aliases).toEqual(['Foo']);
+});

@@ -1,9 +1,9 @@
+import { listText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { readProjects } from './projects.js';
 import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact, readReceipts } from './views.js';
-import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
-import { groundExtractedHistory, groundExtractedStatuses } from './llm.js';
+import { groundedResult, readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { lifecycleOf, projectStatusLabels, readProjectStatusChanges, type ProjectStatusChange } from './project-status.js';
 import { exclusionReasonLabels, readItemResolutions, readNowItems, type ItemResolution } from './item-resolutions.js';
 import { readProjectCreations } from './project-creations.js';
@@ -18,7 +18,7 @@ import type { HubConfig, Input, Project, Receipt } from './types.js';
  * プロジェクトの経緯（10_projects/<id>/HISTORY.md）。モデルを使わず、根拠と処理記録だけから月ごとの出来事を組み立てる。
  * NOWは「今」、REVIEWは直近の期間だけを示すため、休止から戻るときや完了にするときに流れを通して読む場所として使う。
  */
-const plain = (s: string) => s.replace(/[\r\n|]/g, ' ').replaceAll('[', '\\[').replaceAll(']', '\\]').replaceAll('<!--', '&lt;!--');
+const plain = listText;
 const clip = (s: string, n = 120) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
 /** 月ごとに載せる入力の上限。超えた分は件数だけ示す。 */
 const INPUTS_PER_MONTH = 8;
@@ -61,9 +61,7 @@ async function readSources(config: HubConfig, vault: Vault): Promise<HistorySour
 const confirmed = (items: { text: string; status: string }[]) => [...new Set(items.filter(i => i.status === 'confirmed').map(i => i.text))];
 /** NOWと同じく、原文の印と照合した確認済みだけを信じる（古い・手で変えた処理記録のモデルの申告をそのまま使わない）。 */
 function groundedCurrent(u: EffectiveInput): string[] {
-  const { chain, receipt } = u, input = chain.root, index = [chain.root, ...chain.revisions].findIndex(i => i.id === receipt!.input_id);
-  const bound = { ...chain, revisions: chain.revisions.slice(0, Math.max(0, index)), latest: receipt!.input_id === input.id ? input : chain.revisions[index - 1] ?? input };
-  return confirmed((chain.revisions.length ? groundExtractedHistory(bound, receipt!.result!) : groundExtractedStatuses(input, receipt!.result!)).extracted.current);
+  return confirmed(groundedResult(u.chain, u.receipt!.input_id, u.receipt!.result!).extracted.current);
 }
 const kindLabels: Record<string, string> = { knowledge: '知識', decision: '判断・方針', preference: '好み' };
 

@@ -1,16 +1,19 @@
+import { listText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault } from './storage.js';
 import { readProjects, mergeTargets } from './projects.js';
 import { readReceipts, associatedProjects, dateLabel, generatedMarkdown, writeGeneratedLocked } from './views.js';
-import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
+import { groundedResult, readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { buildReviewIndex } from './candidate-review.js';
 import { lifecycleOf, projectStatusLabels } from './project-status.js';
-import { lastEvidenceAt, daysSince } from './dashboard.js';
+import { daysSince } from './dashboard.js';
+import { lastEvidenceAt } from './views.js';
 import { activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions } from './item-resolutions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
 
 const DAY = 86_400_000;
-const plain = (s: string) => s.replace(/[\r\n|]/g, ' ').replaceAll('[', '\\[').replaceAll(']', '\\]');
+// 以前はHTMLコメントの開始を無効にしていなかった。ほかの生成物と同じ無害化にそろえる。
+const plain = listText;
 const clip = (s: string, n = 120) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
 const optionsSchema = z.object({ days: z.number().int().min(1).max(366).optional(), now: z.date().optional() }).strict();
 export interface DigestOptions { days?: number; now?: Date }
@@ -40,7 +43,8 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   const recent = units.filter(u => evidenceOf(u).some(i => inWindow(i.received_at)));
   const organizedById = new Map(receipts.filter(r => r.status === 'organized' && r.result).map(r => [r.input_id, r]));
   /** 期間開始の時点で有効だった解釈。開始までに届いた根拠のうち、最後に整理されたものを使う。 */
-  const resultThen = (u: Unit) => evidenceOf(u).filter(i => before(i.received_at)).map(i => organizedById.get(i.id)?.result).filter(r => r != null).at(-1) ?? undefined;
+  // NOW・経緯と同じく、原文の印と照合した結果を使う（古い・手で変えた処理記録のモデルの申告をそのまま信じない）。
+  const resultThen = (u: Unit) => evidenceOf(u).filter(i => before(i.received_at)).flatMap(i => { const r = organizedById.get(i.id)?.result; return r ? [groundedResult(u.unit.chain, i.id, r)] : []; }).at(-1);
   const state = (u: Unit) => { const latest = receipts.find(r => r.input_id === u.unit.chain.latest.id); return latest?.status === 'organized' ? 'organized' : latest?.status === 'failed' ? 'failed' : 'waiting'; };
   const count = (status: string) => recent.filter(u => state(u) === status).length;
   const ref = (input: Input) => `[${input.id}](${input.path})`;
@@ -80,7 +84,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const latestNow = summaries.at(-1), latestThen = summaries.filter(u => resultThen(u)).at(-1), thenResult = latestThen ? resultThen(latestThen) : undefined;
     const out = [`### ${head}`, `- 新しい入力: ${fresh.length}件（作業要約 ${fresh.filter(u => u.input.kind === 'work-summary').length} / メモ ${fresh.filter(u => u.input.kind === 'memo').length}${fresh.some(corrected) ? ` / うち期間内の訂正 ${fresh.filter(corrected).length}` : ''}）`];
     for (const [title, key] of [['現在地', 'current'], ['次の一手', 'next']] as const) {
-      const then = thenResult ? confirmed(thenResult.extracted[key]) : [], current = latestNow ? confirmed(latestNow.unit.receipt!.result!.extracted[key]) : [];
+      const then = thenResult ? confirmed(thenResult.extracted[key]) : [], current = latestNow ? confirmed(groundedResult(latestNow.unit.chain, latestNow.unit.receipt!.input_id, latestNow.unit.receipt!.result!).extracted[key]) : [];
       const change = diff(then, current);
       if (!change.added.length && !change.removed.length) { out.push(`- ${title}の変化: なし`); continue; }
       out.push(`- ${title}の変化（${latestNow ? ref(latestNow.input) : '根拠なし'}）:`);

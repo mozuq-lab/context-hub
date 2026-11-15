@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { createReadStream } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, statfs } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream';
 import { tmpdir } from 'node:os';
@@ -144,6 +144,29 @@ export interface ExtractOutcome { files: number; bytes: number; /** 展開しな
 export interface ExtractLimits { maxFiles: number; maxBytes: number }
 /** 圧縮を解いた後の上限。バックアップ先の取り違えや壊れたアーカイブで一時フォルダーを埋めないための安全弁。 */
 const defaultLimits: ExtractLimits = { maxFiles: 2_000_000, maxBytes: 64 * 1024 ** 3 };
+const MiB = 1024 ** 2;
+/**
+ * 確認で展開するときの上限。現在のVaultの大きさの4倍（小さいVaultでも256MiB）までとし、64GiBを超えない。
+ * 展開先の空き容量が分かれば、空き容量から256MiBを残した分も超えない。空き容量がVaultの大きさに満たないときは展開しない。
+ */
+export function backupExtractLimits(vaultBytes: number, freeBytes?: number): ExtractLimits {
+  let maxBytes = Math.min(defaultLimits.maxBytes, Math.max(256 * MiB, vaultBytes * 4));
+  if (freeBytes !== undefined && Number.isFinite(freeBytes)) {
+    if (freeBytes - 256 * MiB < vaultBytes) throw new Error('展開先の空き容量が足りません。Vaultと同じくらいの空きがある場所を--work-dirで指定してください');
+    maxBytes = Math.min(maxBytes, freeBytes - 256 * MiB);
+  }
+  return { maxFiles: defaultLimits.maxFiles, maxBytes };
+}
+/** Vaultのファイルの合計バイト数（リンクはたどらない）。 */
+async function treeBytes(root: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) total += await treeBytes(path);
+    else if (entry.isFile()) total += (await lstat(path)).size;
+  }
+  return total;
+}
 const SPECIAL_MAX = 8 * 1024 * 1024;
 /**
  * tar.gzを指定の空フォルダーへ展開する。外部のtarコマンドは使わず、通常ファイルとディレクトリだけを、
@@ -282,7 +305,10 @@ export async function verifyBackup(config: HubConfig, options: BackupVerifyOptio
   try {
     await mkdir(restoredRoot, { mode: 0o700 });
     let extracted: ExtractOutcome | undefined;
-    try { extracted = await extractArchive(archive, restoredRoot); }
+    let free: number | undefined;
+    try { const fs = await statfs(parent); free = Number(fs.bavail) * Number(fs.bsize); } catch { free = undefined; }
+    const limits = backupExtractLimits(await treeBytes(vaultRoot), free);
+    try { extracted = await extractArchive(archive, restoredRoot, limits); }
     catch (error) { if (!(error instanceof BackupArchiveError)) throw error; issue(error.message); }
     if (extracted) {
       for (const r of extracted.rejected) issue(`展開しなかったエントリー — ${r}`);

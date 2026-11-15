@@ -10,6 +10,8 @@ import { dateLabel, generatedMarkdown, isGeneratedIntact } from './views.js';
 import type { HubConfig } from './types.js';
 import {readKnowledgeCandidate,readKnowledgeDecision,knowledgeDecisionSchema} from './knowledge-candidates.js';
 
+/** 採用済み知識（生成物）が手で変更されているため、承認記録からの反映を続けられない。回復処理はこの知識だけを飛ばす。 */
+export class KnowledgeModifiedError extends Error {}
 export interface Proposal { claim: string; kind?: 'knowledge' | 'decision' | 'preference'; rationale?: string; supersedes?: string }
 export interface DecisionResult { candidateId: string; approvalId: string; knowledgeId?: string; adoptedTarget?: AdoptionTarget; deduped: boolean }
 const candidateIdSchema = z.string().regex(/^CAN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -32,7 +34,7 @@ async function decisionAt(vault: Vault, candidateId: string): Promise<Decision |
 async function previousKnowledge(vault: Vault, id: string, replacement?: string): Promise<{ content: string; meta: Record<string, unknown>; text: string; path: string; target?: AdoptionTarget }> {
   knowledgeIdSchema.parse(id); const record=await readKnowledge(vault,id); const content = record?.raw;
   if (!content) throw new Error('置き換え元の知識が見つかりません');
-  if (!isGeneratedIntact(content)) throw new Error('置き換え元の知識に手動変更があります');
+  if (!isGeneratedIntact(content)) throw new KnowledgeModifiedError('置き換え元の知識に手動変更があります');
   const { meta, text } = parseMarkdown(content);
   if (meta.id !== id || meta.verified !== true || !/^APR-[0-9A-HJKMNP-TV-Z]{26}$/.test(String(meta.approval_id))) throw new Error('置き換え元の承認記録が不正です');
   if (meta.superseded_by && meta.superseded_by !== replacement) throw new Error('置き換え元には既に後継があります');
@@ -70,7 +72,7 @@ async function materializeKnowledge(vault: Vault, config: HubConfig, decision: D
   if (existing === undefined) { if (!await vault.create(relative, content)) throw new Error('知識の生成が競合しました'); }
   else {
     const parsed = parseMarkdown(existing);
-    if (!isGeneratedIntact(existing) || parsed.meta.approval_id !== decision.id || parsed.meta.approved_hash !== decision.candidate_hash) throw new Error('承認済み知識に手動変更があります');
+    if (!isGeneratedIntact(existing) || parsed.meta.approval_id !== decision.id || parsed.meta.approved_hash !== decision.candidate_hash) throw new KnowledgeModifiedError('承認済み知識に手動変更があります');
   }
   if (value.supersedes) {
     const previous = await previousKnowledge(vault, value.supersedes, id);
@@ -115,6 +117,13 @@ async function decide(config: HubConfig, id: string, expectedHash: string, actio
 }
 export async function approve(config: HubConfig, id: string, expectedHash: string, target:AdoptionTarget): Promise<DecisionResult> { return decide(config, id, expectedHash, 'approve',target); }
 export async function reject(config: HubConfig, id: string, expectedHash: string): Promise<DecisionResult> { return decide(config, id, expectedHash, 'reject'); }
+/** 反映先またはその置き換え元が手で変更されているか（dry-runでの見積もり用）。 */
+async function knowledgeModified(vault:Vault,decision:Decision):Promise<boolean>{
+ const value=candidateSchema.parse(parseMarkdown(decision.snapshot).meta),existing=await vault.read(knowledgePath(`KNW-${decision.candidate_id.slice(4)}`,decision.target));
+ if(existing!==undefined&&!isGeneratedIntact(existing))return true;
+ if(!value.supersedes)return false;
+ const previous=await readKnowledge(vault,value.supersedes).catch(()=>undefined);return previous!==undefined&&!isGeneratedIntact(previous.raw);
+}
 export async function recoverKnowledgeApprovalsLocked(config:HubConfig,vault:Vault,limit:number,dryRun=false):Promise<number>{
  let recovered=0;
  for(const path of await vault.files('90_system/approvals')){
@@ -122,6 +131,9 @@ export async function recoverKnowledgeApprovalsLocked(config:HubConfig,vault:Vau
   const decision=await readKnowledgeDecision(vault,`CAN-${match[1]}`);if(!decision||decision.action!=='approve')continue;
   const state=await readKnowledgeCandidate(config,decision.candidate_id);if(state.reflected)continue;
   if(recovered>=limit)break;
-  if(!dryRun)await materializeKnowledge(vault,config,decision);recovered++;
+  // 手で変更された知識は承認記録から上書きしない。方針から外してHOME・doctorで示し、整理全体は止めない。
+  if(!dryRun)try{await materializeKnowledge(vault,config,decision);}catch(error){if(error instanceof KnowledgeModifiedError)continue;throw error;}
+  else if(await knowledgeModified(vault,decision))continue;
+  recovered++;
  }return recovered;
 }

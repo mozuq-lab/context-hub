@@ -26,3 +26,27 @@ test('停止記録の確定後に集約が止まっても同じ要求から回�
 test('scopeなしlegacyの承認は自動方針に変換しない',async()=>{const f=await setup(),d=await adopt(f,'従来方針'),k=(await readKnowledge(f.vault,d.knowledgeId!))!,{parseMarkdown,markdown}=await import('../src/storage.js'),p=parseMarkdown(k.raw),a=`90_system/approvals/${d.approvalId}.json`,old=JSON.parse((await f.vault.read(a))!);delete p.meta.scope;delete old.target;await f.vault.write(k.path,(await import('../src/views.js')).generatedMarkdown(p.meta,p.text));await f.vault.write(a,JSON.stringify(old));await f.vault.withLock(()=>rebuildPoliciesLocked(f.config,f.vault));const b=await readPolicies(f.config);expect(b.global).toEqual([]);expect(b.inactiveIds).toContain(k.id);});
 test('停止REQの受理も固定受付IDを維持し本人確認と空本文を必須にする',async()=>{const f=await setup(),d=await adopt(f,'止める'),k=(await readKnowledge(f.vault,d.knowledgeId!))!,{packet}=await import('./workflow-fixtures.js'),{ingest,readIntakeReceipts}=await import('../src/intake.js'),{parseIntake}=await import('../src/intake-format.js');const req=await packet(f.config,{operation:'knowledge-retire',target_id:k.id,target_hash:hash(k.raw),confirmed:true},'');expect(parseIntake(req.path,(await f.vault.read(req.path))!,8000).operation).toBe('knowledge-retire');expect((await ingest(f.config)).accepted).toBe(1);expect((await ingest(f.config)).deduped).toBe(1);expect((await readIntakeReceipts(f.config))[0].result).toMatchObject({knowledgeId:k.id,retirementId:`KRET-${k.id.slice(4)}`});});
 test('未登録の入れ子worktreeとその配下へ親projectの方針を継承しない',async()=>{const{execFile}=await import('node:child_process'),{promisify}=await import('node:util'),{writeFile}=await import('node:fs/promises'),exec=promisify(execFile),f=await setup(),parent=join(f.root,'parent'),child=join(parent,'.worktrees/child');await exec('git',['init',parent]);await writeFile(join(parent,'seed'),'架空の作業');await exec('git',['-C',parent,'add','seed']);await exec('git',['-C',parent,'-c','user.name=test','-c','user.email=test@example.test','commit','-m','テスト初期状態']);await exec('git',['-C',parent,'worktree','add','-b','child',child]);await mkdir(join(child,'sub'));f.config.policy.projectRoots=[{path:parent,projectId:'parent-project'}];expect(await resolvePolicyProject(f.config,child)).toBeUndefined();expect(await resolvePolicyProject(f.config,join(child,'sub'))).toBeUndefined();f.config.policy.projectRoots.push({path:child,projectId:'child-project'});expect(await resolvePolicyProject(f.config,join(child,'sub'))).toBe('child-project');});
+test('採用済みの知識を手で変更しても、整理・HOME・ほかの方針は止めず、その知識だけを方針から外す',async()=>{
+ const f=await setup(),edited=await adopt(f,'会議は30分以内'),kept=await adopt(f,'記録は日本語で書く'),k=(await readKnowledge(f.vault,edited.knowledgeId!))!;
+ await f.vault.write(k.path,k.raw+'\n追記: 例外あり\n');
+ const {capture}=await import('../src/capture.js'),{organize}=await import('../src/organize.js'),{MockLlm}=await import('../src/llm.js'),{rebuildDashboard}=await import('../src/dashboard.js'),{policyHook}=await import('../src/policy-context.js'),{doctor}=await import('../src/doctor.js');
+ await capture(f.config,{text:'無関係な新しいメモ',source:'cli',occurredAt:'2026-11-01T00:00:00Z'});
+ const result=await organize(f.config,new MockLlm());
+ expect(result.processed).toBe(1);expect(result.failed).toBe(0);
+ // 手で変えた知識は承認記録から上書きしない。
+ expect(await f.vault.read(k.path)).toBe(k.raw+'\n追記: 例外あり\n');
+ const b=await readPolicies(f.config);
+ expect(b.global.map(e=>e.id)).toEqual([kept.knowledgeId]);expect(b.inactiveIds).toContain(edited.knowledgeId);
+ expect(b.warnings.join('\n')).toContain(`${edited.knowledgeId} のファイルが手で変更されている`);
+ const hook=await policyHook(f.config,'claude',{hook_event_name:'UserPromptSubmit',cwd:f.root});
+ expect(hook.status).toBe('ok');expect(JSON.stringify(hook.output)).toContain('記録は日本語で書く');expect(JSON.stringify(hook.output)).not.toContain('会議は30分以内');
+ await rebuildDashboard(f.config);
+ expect((await f.vault.read('HOME.md'))!.split('## 失敗と競合')[1]).toContain(edited.knowledgeId);
+ expect((await doctor(f.config)).issues.join('\n')).toContain(k.path);
+ // 手での変更を戻せば、また方針として使う。
+ await f.vault.write(k.path,k.raw);await f.vault.withLock(()=>rebuildPoliciesLocked(f.config,f.vault));
+ expect((await readPolicies(f.config)).global.map(e=>e.id).sort()).toEqual([edited.knowledgeId,kept.knowledgeId].sort());
+ // ファイルを消すと、次の整理で承認記録から作り直す。
+ await rm(await f.vault.path(k.path));await organize(f.config,new MockLlm());
+ expect(await f.vault.read(k.path)).toBe(k.raw);
+});

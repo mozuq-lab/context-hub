@@ -149,3 +149,34 @@ test('受付ファイルの日付指定を反映し、同じ受付IDは重複さ
   expect(await home(vault)).toContain('[期日・見直す日の記録が不正です](90_system/item-schedules/SCH-01JZ0000000000000000000000.json)');
   expect((await doctor(config)).issues).toContain('期日・見直す日の記録が不正です: 90_system/item-schedules/SCH-01JZ0000000000000000000000.json');
 });
+
+test('引き継いだ日付の項目に自分の日付を付けてから外すと、引き継ぎ元の古い日付を復活させない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'alpha', title: 'アルファ' });
+  const ws = async (t: string, text: string) => { await capture(config, { source: 'file', kind: 'work-summary', tool: 'codex', project: 'alpha', occurredAt: t, receivedAt: t, text }); await organize(config, new MockLlm()); };
+  await ws('2026-10-01T00:00:00Z', '## 現在地\n- [確認済み] A\n## 次の一手\n- [確認済み] Xをする');
+  const k1 = (await readNowItems(vault, 'alpha'))!.items.find(i => i.section === 'next')!;
+  await setItemSchedule(config, { projectId: 'alpha', itemKey: k1.key, due: '2026-11-20', reviewAfter: null, source: 'cli' });
+  await ws('2026-10-05T00:00:00Z', '## 現在地\n- [確認済み] B\n## 次の一手\n- [確認済み] Xをする');
+  const k2 = (await readNowItems(vault, 'alpha'))!.items.find(i => i.section === 'next')!;
+  expect(k2.key).not.toBe(k1.key); expect(k2.schedule).toMatchObject({ due: '2026-11-20' });
+  await setItemSchedule(config, { projectId: 'alpha', itemKey: k2.key, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+  expect((await readNowItems(vault, 'alpha'))!.items.find(i => i.key === k2.key)!.schedule).toMatchObject({ due: '2026-12-01' });
+  await setItemSchedule(config, { projectId: 'alpha', itemKey: k2.key, due: null, reviewAfter: null, source: 'cli' });
+  expect((await readNowItems(vault, 'alpha'))!.items.find(i => i.key === k2.key)!.schedule).toBeNull();
+  expect(await vault.read('10_projects/alpha/NOW.md')).not.toContain('2026-11-20');
+});
+test('日付を外した項目が次の作業要約で別の項目に移っても、外す前の古い日付を引き継がない（K1→K2→K3）', async () => {
+  const { effectiveSchedules } = await import('../src/item-schedules.js');
+  const rec = (n: number, key: string, due: string | null) => ({ schema_version: 1 as const, id: `SCH-0000000000000000000000000${n}`, project_id: 'p', item_key: key, section: 'next' as const, text: '見積もりを送る', input_id: `IN-0000000000000000000000000${n}`, due, review_after: null, source: 'cli', created_at: `2026-10-0${n}T00:00:00Z` });
+  const item = (key: string) => ({ key, section: 'next', text: '見積もりを送る', resolution: null });
+  // K1で期日を付け、次の作業要約で移ったK2で期日を外した。
+  const cleared = [rec(1, 'K1', '2026-10-10'), rec(2, 'K2', null)];
+  expect(effectiveSchedules(cleared as never, 'p', [item('K2')], new Set()).byKey.size).toBe(0);
+  // さらに次の作業要約でK3へ移っても、K1の期日は戻らない。
+  const moved = effectiveSchedules(cleared as never, 'p', [item('K3')], new Set());
+  expect(moved.byKey.size).toBe(0); expect(moved.orphaned).toEqual([]);
+  // 外した後に付け直した期日は、引き継ぐ。
+  const again = effectiveSchedules([...cleared, rec(3, 'K2', '2026-10-20')] as never, 'p', [item('K4')], new Set());
+  expect(again.byKey.get('K4')?.due).toBe('2026-10-20');
+});

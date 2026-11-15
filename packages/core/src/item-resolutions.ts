@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
-import { Vault, hash } from './storage.js';
+import { Vault, hash, readOncePerLock } from './storage.js';
 import { readInputs } from './capture.js';
 import { assertNotMerged, inspectProjects, mergeTargets, projectIdSchema, readProjects } from './projects.js';
 import type { HubConfig } from './types.js';
@@ -68,40 +68,63 @@ export function retargetItemRecord<T extends { project_id: string; item_key: str
   const target = targets.get(record.project_id);
   return target ? { ...record, project_id: target, item_key: itemKey(target, record.section, record.input_id, record.text) } : record;
 }
+/** 統合していた期間。startは統合の記録の日時、endは取り消しの記録の日時（記録がなく手で外した統合は無限）。 */
+export interface MergeWindow { from: string; into: string; start: number; end: number }
 /**
- * 統合を取り消したプロジェクト（値）と、その統合先だったプロジェクト（キー）。いまも統合されている組は含めない。
+ * 終わった統合の期間を、統合先のプロジェクトごとに返す。いまも統合されている期間は含めない（統合先への読み替えで扱う）。
  * 統合の記録が読めなくても、項目の記録の読取は止めない（不正な記録はdoctorが示す）。
  */
-async function formerMergeTargets(vault: Vault, targets: Map<string, string>): Promise<Map<string, Set<string>>> {
-  const former = new Map<string, Set<string>>();
+export async function closedMergeWindows(vault: Vault, targets: Map<string, string>): Promise<Map<string, MergeWindow[]>> {
+  const records: { id: string; action: string; from_id: string; into_id: string; changed_at: number; merge_id?: string }[] = [];
   for (const path of await vault.files('90_system/project-merges')) {
     if (!/^90_system\/project-merges\/PMG-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
     try {
-      const record = JSON.parse((await vault.read(path))!) as { action?: unknown; from_id?: unknown; into_id?: unknown };
-      if (record.action !== 'merge' || typeof record.from_id !== 'string' || typeof record.into_id !== 'string' || targets.get(record.from_id) === record.into_id) continue;
-      former.set(record.into_id, (former.get(record.into_id) ?? new Set()).add(record.from_id));
+      const r = JSON.parse((await vault.read(path))!) as Record<string, unknown>, at = typeof r.changed_at === 'string' ? Date.parse(r.changed_at) : NaN;
+      if (typeof r.id !== 'string' || typeof r.action !== 'string' || typeof r.from_id !== 'string' || typeof r.into_id !== 'string' || !Number.isFinite(at)) continue;
+      records.push({ id: r.id, action: r.action, from_id: r.from_id, into_id: r.into_id, changed_at: at, ...(typeof r.merge_id === 'string' ? { merge_id: r.merge_id } : {}) });
     } catch { /* 読めない記録は使わない。 */ }
   }
-  return former;
+  records.sort((a, b) => a.id.localeCompare(b.id));
+  const windows = new Map<string, MergeWindow[]>();
+  for (const m of records) {
+    if (m.action !== 'merge') continue;
+    const undo = records.find(u => u.action === 'unmerge' && u.id > m.id && (u.merge_id === m.id || (u.merge_id === undefined && u.from_id === m.from_id && u.into_id === m.into_id)));
+    // 取り消しの記録がなく、いまも同じ統合先に統合されていれば、続いている統合。
+    if (!undo && targets.get(m.from_id) === m.into_id) continue;
+    const list = windows.get(m.into_id) ?? [];
+    list.push({ from: m.from_id, into: m.into_id, start: m.changed_at, end: undo?.changed_at ?? Number.POSITIVE_INFINITY });
+    windows.set(m.into_id, list);
+  }
+  return windows;
 }
+/** 記録の日時が、その統合先へfromが統合されていた期間に入るか。 */
+export const withinMergeWindow = (windows: Map<string, MergeWindow[]>, into: string, from: string, at: string) => {
+  const t = Date.parse(at);
+  return windows.get(into)?.some(w => w.from === from && t >= w.start && t < w.end) === true;
+};
 /**
  * 項目の記録を、いまの統合の状態に合わせて読み替える。
  * - 統合元のプロジェクトで付けた記録は、統合先の項目の記録として読む。
  * - 統合を取り消した後は、統合していた間に統合先で付けた記録のうち、本人が統合元を指定した入力から出た項目のものを、
- *   統合元の項目の記録として読む（根拠の入力が統合元へ戻るため）。
+ *   統合元の項目の記録として読む（根拠の入力が統合元へ戻るため）。統合の前や取り消しの後に統合先で付けた記録は移さない。
  */
-export async function settleItemRecords<T extends { project_id: string; item_key: string; section: ItemSection; input_id: string; text: string }>(vault: Vault, records: T[]): Promise<T[]> {
+export async function settleItemRecords<T extends { project_id: string; item_key: string; section: ItemSection; input_id: string; text: string; created_at: string }>(vault: Vault, records: T[]): Promise<T[]> {
   const targets = await itemMergeTargets(vault), forward = targets.size ? records.map(r => retargetItemRecord(r, targets)) : records;
-  const former = await formerMergeTargets(vault, targets);
-  if (!forward.some(r => former.has(r.project_id))) return forward;
+  const windows = await closedMergeWindows(vault, targets);
+  if (!forward.some(r => windows.has(r.project_id))) return forward;
   const owners = new Map((await readInputs(vault.config)).map(i => [i.id, i.project]));
   return forward.map(r => {
     const owner = owners.get(r.input_id), home = owner === undefined ? undefined : targets.get(owner) ?? owner;
-    return owner !== undefined && home !== undefined && home !== r.project_id && former.get(r.project_id)?.has(owner) ? { ...r, project_id: home, item_key: itemKey(home, r.section, r.input_id, r.text) } : r;
+    return owner !== undefined && home !== undefined && home !== r.project_id && withinMergeWindow(windows, r.project_id, owner, r.created_at) ? { ...r, project_id: home, item_key: itemKey(home, r.section, r.input_id, r.text) } : r;
   });
 }
 /** rawを指定すると、統合の読み替えをせず記録のままを返す（同じ受付IDの再送の照合に使う）。 */
 export async function readItemResolutions(vault: Vault, options: { raw?: boolean } = {}): Promise<ItemResolution[]> {
+  // NOWの作り直しでは直接・外す記録・統合の読み替えの3か所から読むため、Writerロックの1区間では1回だけ読む。
+  const result = await readOncePerLock(vault.config, 'item-resolutions', [resolutionDir], () => loadItemResolutions(vault));
+  return options.raw ? result : settleItemRecords(vault, result);
+}
+async function loadItemResolutions(vault: Vault): Promise<ItemResolution[]> {
   const result: ItemResolution[] = [];
   for (const path of await vault.files(resolutionDir)) {
     if (!/^90_system\/item-resolutions\/RES-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
@@ -110,8 +133,7 @@ export async function readItemResolutions(vault: Vault, options: { raw?: boolean
     if (path !== `${resolutionDir}/${record.id}.json`) throw new Error(`解決記録とパスが一致しません: ${path}`);
     result.push(record);
   }
-  result.sort((a, b) => a.id.localeCompare(b.id));
-  return options.raw ? result : settleItemRecords(vault, result);
+  return result.sort((a, b) => a.id.localeCompare(b.id));
 }
 /** 項目ごとに最後の記録だけを有効にする。最後が解決・誤りとして外すなら欄から外れたまま、再開なら未解決へ戻す。 */
 export function activeResolutions(records: ItemResolution[], projectId?: string): Map<string, ItemResolution> {

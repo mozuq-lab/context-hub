@@ -1,9 +1,15 @@
+import { nowText } from './markdown-text.js';
 import { readCorrectionChains, type CorrectionChain } from './corrections.js';
 import { readReceipts } from './views.js';
 import { hash, Vault } from './storage.js';
 import { applyAssociations } from './associations.js';
-import type { HubConfig, Input, Receipt } from './types.js';
-export interface EffectiveInput { chain: CorrectionChain; receipt?: Receipt; pendingCorrection: boolean }
+import { groundExtractedHistory, groundExtractedStatuses } from './llm.js';
+import type { HubConfig, Input, OrganizeResult, Receipt } from './types.js';
+export interface EffectiveInput {
+  chain: CorrectionChain; receipt?: Receipt; pendingCorrection: boolean;
+  /** いまの定義一覧での関連付けがまだなく、前回の定義一覧での関連付けで表示しているときの、関連付け前の帰属候補（再関連付けの要否の判定に使う）。 */
+  previousAssociation?: { baseCandidates: { id: string; confidence: number }[] };
+}
 export function effectiveFromChains(chains: CorrectionChain[], receipts: Receipt[]): EffectiveInput[] {
   const byId = new Map(receipts.map(r => [r.input_id,r]));
   return chains.map(chain => {
@@ -39,5 +45,17 @@ export async function readEffectiveInputs(config: HubConfig): Promise<EffectiveI
 }
 export function correctionNotice(effective: EffectiveInput): string {
   const {chain,pendingCorrection} = effective;
-  return chain.revisions.length ? `${pendingCorrection ? '訂正未反映（旧解釈を表示・最新とは限りません）' : '訂正反映済み'}: ${[chain.root,...chain.revisions].map(i=>`[${i.id}](${i.path})（出典:${i.source.replace(/[\r\n]/g,' ')} / ${i.occurred_at}）`).join(' → ')}` : '';
+  return chain.revisions.length ? `${pendingCorrection ? '訂正未反映（旧解釈を表示・最新とは限りません）' : '訂正反映済み'}: ${[chain.root,...chain.revisions].map(i=>`[${i.id}](${i.path})（出典:${nowText(i.source)} / ${i.occurred_at}）`).join(' → ')}` : '';
+}
+
+/**
+ * 整理結果の抽出項目を、その結果を作った根拠（元の入力から整理した入力まで）の原文の印と照合する。
+ * NOW・経緯・ふりかえりで同じ基準を使い、古い・手で変えた処理記録のモデルの申告をそのまま信じない。
+ * organizedInputIdは結果を作った入力（元の入力か訂正）のID。
+ */
+export function groundedResult(chain: CorrectionChain, organizedInputId: string, result: OrganizeResult): OrganizeResult {
+  const input = chain.root, index = [chain.root, ...chain.revisions].findIndex(i => i.id === organizedInputId);
+  if (!chain.revisions.length) return groundExtractedStatuses(input, result);
+  const bound = { ...chain, revisions: chain.revisions.slice(0, Math.max(0, index)), latest: organizedInputId === input.id ? input : chain.revisions[index - 1] ?? input };
+  return groundExtractedHistory(bound, result);
 }

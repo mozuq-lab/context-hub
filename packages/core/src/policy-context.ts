@@ -1,4 +1,4 @@
-import {readPolicies,resolvePolicyProject,formatPolicies,type PolicyBundle} from './policies.js';
+import {readPolicies,resolvePolicyTarget,missingRootsWarning,formatPolicies,type PolicyBundle} from './policies.js';
 import type {HubConfig} from './types.js';
 import {redactText,secretSettings,type SecretSettings} from './secrets.js';
 export const MAX_POLICY_CONTEXT_BYTES=68*1024;
@@ -17,7 +17,7 @@ export async function policyHook(config:HubConfig,engine:'codex'|'claude',input:
  try{
   if(typeof data.cwd!=='string')throw new Error('作業フォルダーがありません');
   if(event==='SessionStart'&&data.source!==undefined&&!['startup','resume','clear','compact','fork'].includes(String(data.source)))return policyFailure(engine,event,'unsupported');
-  const projectId=await resolvePolicyProject(config,data.cwd),bundle=await readPolicies(config,projectId),text=policyContext(bundle,secretSettings(config));
+  const target=await resolvePolicyTarget(config,data.cwd),read=await readPolicies(config,target.projectId),bundle=target.missingRoots?{...read,warnings:[...read.warnings,missingRootsWarning(target.missingRoots)]}:read,text=policyContext(bundle,secretSettings(config));
   return{status:'ok',bundle,output:{hookSpecificOutput:{hookEventName:event,additionalContext:text}}};
  }catch{return policyFailure(engine,event);}
 }

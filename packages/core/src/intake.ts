@@ -3,8 +3,8 @@ import {adoptionTargetSchema} from './knowledge-scope.js';
 import { z } from 'zod';
 import { readdir,lstat } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
-import { Vault,hash } from './storage.js';
-import { capture,readInputs,inputIdSchema } from './capture.js';
+import { Vault,hash,LockTimeoutError } from './storage.js';
+import { capture,parseInput,inputIdSchema } from './capture.js';
 import { correctInput,CorrectionTargetError } from './corrections.js';
 import {approve,reject} from './approvals.js';
 import { decideProject } from './project-proposals.js';
@@ -68,9 +68,19 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   if(status==='conflict')outcome.conflicts.push(path);
   const target=`90_system/intake-errors/${hash(path)}.json`,previous=await vault.read(target);
   const same=previous&&(()=>{try{const p=intakeErrorSchema.parse(JSON.parse(previous));return p.file_hash===fileHash&&p.code===code&&p.status===status&&isDeepStrictEqual(p.reason,reason);}catch{return false;}})();
-  if(same){outcome.deduped++;if(!retried)return;}else outcome.rejected++;
-  if(!options.dryRun)await vault.withLock(()=>vault.write(target,JSON.stringify({schema_version:1,path,file_hash:fileHash,status,code,updated_at:new Date().toISOString(),...(reason?{reason}:{})},null,2)+'\n'));
+  // 理由付きの拒否と競合は同じ内容なら結果も同じため、書き直さない（同期を起こさない）。
+  // 理由のない失敗の再試行だけは、再試行の順番を回すためupdated_atを進める。
+  if(same){outcome.deduped++;if(!retried||reason||status==='conflict')return;}else outcome.rejected++;
+  if(options.dryRun)return;
+  try{await vault.withLock(()=>vault.write(target,JSON.stringify({schema_version:1,path,file_hash:fileHash,status,code,updated_at:new Date().toISOString(),...(reason?{reason}:{})},null,2)+'\n'));}
+  catch(error){if(!(error instanceof LockTimeoutError))throw error;/* Writerの混雑で記録できない回は、次の受付で記録し直す。 */}
  };
+ // 受領記録が今の内容と一致する依頼は受付済み。受領記録は作るだけで消さないため、ロックの外で確かめてよい。
+ const acked=async(id:string,path:string,requestHash:string)=>{
+  const raw=await vault.read(ackPath(id));if(raw===undefined)return false;
+  try{const ack=intakeReceiptSchema.parse(JSON.parse(raw));return ack.request_id===id&&ack.path===path&&ack.request_hash===requestHash;}catch{return false;/* 不正な受領記録は通常の受付で競合として扱う。 */}
+ };
+ const done=new Set<string>();
  for(const path of await intakePaths(vault)){
   if(path.includes('.sync-conflict-')){await problem(path,'sync-conflict','conflict','同期の競合コピーです。通常受付から除外しました');continue;}
   let raw:string|undefined;
@@ -79,6 +89,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    if(!/^Input\/REQ-[A-Za-z0-9]{32}\.md$/.test(path))throw new Error('invalid-path');
    if(Date.now()-info.mtimeMs<2000){outcome.deferred++;continue;}
    const bytes=await vault.readBytes(path,maxBytes);if(!bytes){outcome.deferred++;continue;}raw=decodeIntake(bytes);
+   const id=path.slice('Input/'.length,-'.md'.length);if(await acked(id,path,hash(raw))){done.add(id);outcome.deduped++;continue;}
    const packet=parseIntake(path,raw,config.capture.maxInputChars),again=await vault.readBytes(path,maxBytes);
    if(!again||hash(decodeIntake(again))!==hash(raw)){outcome.deferred++;continue;}
    work.set(packet.request_id,{packet,raw,path,recovery:false});
@@ -86,7 +97,14 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
  }
  for(const path of await vault.files('90_system/intake/pending')){
   if(!/^90_system\/intake\/pending\/REQ-[A-Za-z0-9]{32}\.json$/.test(path))continue;
-  try{const{snapshot,packet}=parseIntakePending(path,(await vault.read(path))!,config.capture.maxInputChars);if(!work.has(packet.request_id)){
+  try{const{snapshot,packet}=parseIntakePending(path,(await vault.read(path))!,config.capture.maxInputChars);
+   // 受付が終わった後に残った停止回復記録（受領の直後に停止した場合など）は、受領記録と一致すれば片付ける。
+   if(await acked(packet.request_id,snapshot.path,snapshot.request_hash)){
+    if(!done.has(packet.request_id)){done.add(packet.request_id);outcome.deduped++;}
+    if(!options.dryRun)try{await vault.withLock(async()=>{if(await acked(packet.request_id,snapshot.path,snapshot.request_hash))await vault.remove(path);});}catch(error){if(!(error instanceof LockTimeoutError))throw error;}
+    continue;
+   }
+   if(!work.has(packet.request_id)){
    const current=await vault.readBytes(snapshot.path,maxBytes);if(current!==undefined){const raw=decodeIntake(current);if(hash(raw)!==snapshot.request_hash){await problem(snapshot.path,hash(raw),'conflict','同じ受付IDの内容が変更されています');continue;}}
    work.set(packet.request_id,{packet,raw:snapshot.raw,path:snapshot.path,recovery:true});
   }}catch{await problem(path,'invalid-pending','error','受付の停止回復記録が不正です。doctorで確認してください');}
@@ -94,7 +112,10 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
  const ordered=[];
  for(const item of work.values()){
   const raw=await vault.read(`90_system/intake-errors/${hash(item.path)}.json`);let failedAt:number|undefined;
-  if(raw)try{const error=intakeErrorSchema.parse(JSON.parse(raw));if(error.file_hash===hash(item.raw)&&error.status==='error')failedAt=Date.parse(error.updated_at);}catch{ /* 不正な記録は通常受付で検証・報告する。 */ }
+  let permanent=false;
+  if(raw)try{const error=intakeErrorSchema.parse(JSON.parse(raw));if(error.file_hash===hash(item.raw)&&error.status==='error'){failedAt=Date.parse(error.updated_at);permanent=error.reason!==undefined;}}catch{ /* 不正な記録は通常受付で検証・報告する。 */ }
+  // 理由付きの拒否（古い訂正対象・既にあるプロジェクトなど）は、同じ内容で再実行しても同じ結果になる。内容が変われば再び受け付ける。
+  if(permanent){outcome.deduped++;continue;}
   ordered.push({...item,failedAt});
  }
  // 未試行を先に受け付け、失敗の再試行は古い試行から順に回す。
@@ -105,7 +126,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   let attempted=false;
   try{
    const claim=async()=>{
-    const existing=await vault.read(ackPath(id));if(existing){const ack=intakeReceiptSchema.parse(JSON.parse(existing));if(ack.request_id!==id||ack.path!==path||ack.operation!==packet.operation||ack.request_hash!==requestHash)throw new Error('conflict');return'done';}
+    const existing=await vault.read(ackPath(id));if(existing){const ack=intakeReceiptSchema.parse(JSON.parse(existing));if(ack.request_id!==id||ack.path!==path||ack.operation!==packet.operation||ack.request_hash!==requestHash)throw new Error('conflict');if(!options.dryRun)await vault.remove(pendingPath(id));return'done';}
     const old=await vault.read(pendingPath(id));if(old){const{snapshot}=parseIntakePending(pendingPath(id),old,config.capture.maxInputChars);if(snapshot.request_hash!==requestHash)throw new Error('conflict');}
     else if(!options.dryRun&&attempts<(options.limit??config.organize.maxItemsPerRun))await vault.create(pendingPath(id),JSON.stringify({schema_version:1,request_id:id,request_hash:requestHash,path,raw})+'\n');return'pending';
    };
@@ -116,7 +137,8 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    let result:z.infer<typeof intakeReceiptSchema>['result'];
    if(packet.operation==='capture'){
     result=await capture(config,{source:packet.source,sourceEventId:id,text:packet.text,kind:packet.kind,occurredAt:packet.occurred_at,project:packet.project,tool:packet.tool,meta:packet.meta});
-    const inputId=result.inputId,saved=(await readInputs(config)).find(i=>i.id===inputId);
+    // 保存された原文1件だけを読み、依頼と一致するかを確かめる。
+    const inputId=result.inputId,stored=await vault.read(result.path),saved=stored===undefined?undefined:parseInput(result.path,stored);if(saved&&saved.id!==inputId)throw new Error('event-conflict');
     if(!saved||saved.text!==packet.text||saved.kind!==packet.kind||saved.occurred_at!==packet.occurred_at||saved.project!==packet.project||saved.tool!==packet.tool||!isDeepStrictEqual(saved.meta,packet.meta))throw new Error('event-conflict');
    }else if(packet.operation==='correct')result=await correctInput(config,packet.target_id,{source:packet.source,sourceEventId:id,text:packet.text,occurredAt:packet.occurred_at});
    else if(packet.operation==='knowledge-retire')result=await retireKnowledge(config,packet.target_id,packet.target_hash);
@@ -136,11 +158,15 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    else throw new Error('受付操作が不正です');
    const accepted=await vault.withLock(async()=>{
     const receipt={schema_version:1,request_id:id,request_hash:requestHash,path,operation:packet.operation,status:'accepted',received_at:new Date().toISOString(),result};
-    if(await vault.create(ackPath(id),JSON.stringify(receipt,null,2)+'\n'))return true;
-    const existing=intakeReceiptSchema.parse(JSON.parse((await vault.read(ackPath(id)))!));if(existing.request_hash!==requestHash)throw new Error('conflict');return false;
+    // 受領記録を作った後は停止回復記録が要らないため、同じロック内で片付ける（間で停止しても次の受付で片付ける）。
+    if(await vault.create(ackPath(id),JSON.stringify(receipt,null,2)+'\n')){await vault.remove(pendingPath(id));return true;}
+    const existing=intakeReceiptSchema.parse(JSON.parse((await vault.read(ackPath(id)))!));if(existing.request_hash!==requestHash)throw new Error('conflict');await vault.remove(pendingPath(id));return false;
    });
    if(accepted)outcome.accepted++;else outcome.deduped++;
-  }catch(error){const conflict=error instanceof Error&&(error.message==='conflict'||error.message==='event-conflict');await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof ProjectMergeError||error instanceof ProjectMergedError?error.reason:undefined);}
+  }catch(error){
+   // Writerの混雑でロックを取れなかった回は、依頼の誤りではないため記録せず保留にする（停止回復記録があれば次回に続ける）。
+   if(error instanceof LockTimeoutError){outcome.deferred++;continue;}
+   const conflict=error instanceof Error&&(error.message==='conflict'||error.message==='event-conflict');await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof ProjectMergeError||error instanceof ProjectMergedError?error.reason:undefined);}
  }
  return outcome;
 }

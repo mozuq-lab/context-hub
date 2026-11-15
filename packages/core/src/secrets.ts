@@ -1,4 +1,5 @@
 import type { HubConfig, LlmClient, LlmCompletion, LlmOptions } from './types.js';
+import type { Vault } from './storage.js';
 
 /**
  * メモに紛れたAPIキー・トークン・パスワード・秘密鍵らしい文字列を、決まった規則で見つけて伏せる。
@@ -25,6 +26,18 @@ const PLACEHOLDER_HEAD = '[伏せ字:';
  * 前に語が付いた環境変数名にも当たり、passwordlessのような語の途中には当たらない。
  */
 const SECRET_KEYS = '(?:(?<![A-Za-z0-9])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|signature|sig)(?![A-Za-z0-9])|パスワード|暗証番号|合言葉)';
+/**
+ * 鍵の名前と区切り（: = ：）の間。空白、続けて（あれば）引用符1つとその後の空白、最後に区切りを認める（password" = のような書き方）。
+ * 「空白*・引用符?・空白*」と書くと引用符がないときに空白の分け方が二乗に増えて後戻りするため、引用符の後の空白を引用符と組にする。
+ */
+const KEY_GAP = `[ \\t]*(?:["'][ \\t]*)?[:=：]`;
+/** 代入の値の1文字。空白・引用符・バッククォート・半角のカンマとセミコロン・読点・句点・閉じ括弧で値が終わる（120,000 や a,user=b を値に含めない）。 */
+const VALUE_CHAR = `[^\\s"'\`,;、。，；）」』]`;
+/**
+ * 「パスワードは …」と英語の pass の値。語の続き（GoogleDriveに置いた、refactoring）と区別するため、
+ * 英数字・記号の6文字以上で、数字か記号を含む値だけを伏せる。
+ */
+const PARTICLE_VALUE = `(?=[A-Za-z]*[0-9!#$%&*+?@^_~-])[A-Za-z0-9!#$%&*+.?@^_~-]{6,}`;
 // 既知の形式を先に並べる。重なった場合は先に見つかった（開始位置が早い、同じなら長い）一致を採る。
 export const builtinSecretRules: readonly SecretRule[] = [
   { id: 'private-key', label: '秘密鍵', pattern: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g },
@@ -41,9 +54,13 @@ export const builtinSecretRules: readonly SecretRule[] = [
   // URLに埋め込んだ利用者名とパスワード（scheme://user:pass@host）。パスワードだけを伏せる。
   { id: 'url-credential', label: 'パスワード', pattern: /(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)(?=@)/g, group: 1 },
   // password="..." のように引用符で囲んだ値。空白を含む値も伏せる。
-  { id: 'assignment-quoted', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}[ \\t]*["']?[ \\t]*[:=：][ \\t]*["'](?!\\[伏せ字)([^"'\\r\\n]{4,})(?=["'])`, 'gi'), group: 1 },
+  { id: 'assignment-quoted', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}${KEY_GAP}[ \\t]*["'](?!\\[伏せ字)([^"'\\r\\n]{4,})(?=["'])`, 'gi'), group: 1 },
   // password=... や パスワード: ... のような代入。値だけを伏せる。既に伏せた値と短すぎる値は除く。
-  { id: 'assignment', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}[ \\t]*["']?[ \\t]*[:=：][ \\t]*["']?(?!\\[伏せ字)([^\\s"'\`,;、。，；）」』]{6,})`, 'gi'), group: 1 },
+  { id: 'assignment', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}${KEY_GAP}[ \\t]*["']?(?!\\[伏せ字)(${VALUE_CHAR}{6,})`, 'gi'), group: 1 },
+  // pass: … / pass=…。「First pass: refactoring」「CI pass: succeeded」のような英語の文と区別するため、値は数字か記号を含むものだけ。
+  { id: 'assignment-pass', label: 'パスワード等', pattern: new RegExp(`(?<![A-Za-z0-9])pass${KEY_GAP}[ \\t]*["']?(?!\\[伏せ字)(${PARTICLE_VALUE})`, 'gi'), group: 1 },
+  // パスワードは hunter2… のように、日本語の鍵の後に「は」で値を続ける書き方。全角空白と「 を挟んでもよい。
+  { id: 'assignment-particle', label: 'パスワード等', pattern: new RegExp(`(?:パスワード|暗証番号|合言葉)は[ \\t　]*「?(?!\\[伏せ字)(${PARTICLE_VALUE})`, 'g'), group: 1 },
 ];
 
 /** 高エントロピーの長い文字列。英大文字・小文字・数字をすべて含む32文字以上で、URLのパスの一部は除く。 */
@@ -183,4 +200,43 @@ export async function completeRedacted(config: Pick<HubConfig, 'privacy'>, llm: 
   const completion = await llm.complete(redactPrompt(prompt, settings).text, opts);
   if (!completion || typeof completion !== 'object' || typeof completion.text !== 'string') return completion;
   return { ...completion, text: redactCompletion(completion.text, settings) };
+}
+
+/**
+ * 設定の追加規則のうち、アプリ（Dart）のRegExpでは解釈できない書き方。あれば理由を返す（規則の中身は返さない）。
+ * アプリは解釈できない規則があると、取りこぼしを避けて「選んで深掘り」の送信を止めるため、本体の設定検証で先に拒否する。
+ * インライン修飾子（(?i:…)・(?-i:…)など）と、同じ名前の名前付きグループを拒否する。先読み・後読み・名前付きグループはDartも解釈できる。
+ */
+export function dartPatternProblem(pattern: string): string | undefined {
+  const names = new Set<string>();
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\') { i++; continue; }
+    if (inClass) { if (c === ']') inClass = false; continue; }
+    if (c === '[') { inClass = true; continue; }
+    if (c !== '(' || pattern[i + 1] !== '?') continue;
+    const rest = pattern.slice(i + 2);
+    if (/^(?:[A-Za-z]+(?:-[A-Za-z]*)?|-[A-Za-z]+):/.test(rest)) return 'アプリ（Dart）で解釈できないインライン修飾子（(?i:…)など）があります';
+    const named = /^<([A-Za-z_$][\w$]*)>/.exec(rest);
+    if (named) { if (names.has(named[1]!)) return 'アプリ（Dart）で解釈できない、同じ名前の名前付きグループが複数あります'; names.add(named[1]!); }
+  }
+  return undefined;
+}
+/** 設定の追加規則をアプリへ渡すファイル。形式はFlutterクライアントと共有する取り決め（変えない）。 */
+export const privacyPatternsPath = '90_system/privacy/patterns.json';
+/** 有効な設定から、アプリと共有する追加規則のファイルの本文を作る。生成日時を入れず、同じ設定なら同じ本文にする。 */
+export function privacyPatternsDocument(config: Pick<HubConfig, 'privacy'>): string {
+  const privacy = config.privacy ?? { redactSecrets: true, patterns: [] };
+  return JSON.stringify({ schema_version: 1, redact_secrets: privacy.redactSecrets, patterns: privacy.patterns.map(p => ({ label: p.label, pattern: p.pattern })) }, null, 2) + '\n';
+}
+/**
+ * Writerロック内で使う。追加規則のファイルを、内容が変わったときだけ書く（同期を無駄に走らせない）。
+ * アプリはこのファイルがあれば組み込み規則に加えて適用し、Claude APIへ送る内容を伏せる。
+ */
+export async function writePrivacyPatternsLocked(config: Pick<HubConfig, 'privacy'>, vault: Vault): Promise<boolean> {
+  const text = privacyPatternsDocument(config);
+  if (await vault.read(privacyPatternsPath) === text) return false;
+  await vault.write(privacyPatternsPath, text);
+  return true;
 }

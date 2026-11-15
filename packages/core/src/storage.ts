@@ -1,11 +1,36 @@
-import { constants } from 'node:fs';
+import { constants, openSync, readFileSync, closeSync, unlinkSync, rmdirSync } from 'node:fs';
+import { constants as osConstants } from 'node:os';
 import { mkdir, lstat, realpath, readdir, open, rename, link, unlink, rmdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { parse, stringify } from 'yaml';
 import type { HubConfig } from './types.js';
 
 export const VAULT_DIRS = ['00_inbox', '10_projects', '20_ideas', '30_knowledge', '90_system/candidates', '90_system/receipts/events', '90_system/approvals', '90_system/conflicts'];
+/**
+ * Writerロックの1区間だけ有効な読み取りの使い回し。00_inboxの全件などを、1区間で何度も読み直さないために使う。
+ * 区間内のVault経由の書き込み・削除で、依存する場所の値を捨てる。区間の外（ロックなし）では使い回さない。
+ * 値は呼び出しごとに複製して返す（呼び出し側が変えても他へ影響しない）。
+ */
+const lockSection = new AsyncLocalStorage<{ vault: string; memo: Map<string, { deps: string[]; value: Promise<unknown> }> }>();
+export async function readOncePerLock<T>(config: HubConfig, key: string, deps: string[], load: () => Promise<T>): Promise<T> {
+  const section = lockSection.getStore();
+  if (!section || section.vault !== resolve(config.vaultPath)) return load();
+  let entry = section.memo.get(key);
+  if (!entry) {
+    const value = load();
+    entry = { deps, value };
+    section.memo.set(key, entry);
+    value.catch(() => { if (section.memo.get(key)?.value === value) section.memo.delete(key); });
+  }
+  return structuredClone(await entry.value) as T;
+}
+function forgetReads(vaultPath: string, rel: string): void {
+  const section = lockSection.getStore();
+  if (!section || section.vault !== resolve(vaultPath)) return;
+  for (const [key, entry] of section.memo) if (entry.deps.some(dep => rel === dep || rel.startsWith(`${dep}/`))) section.memo.delete(key);
+}
 export function hash(text: string): string { return createHash('sha256').update(text).digest('hex'); }
 export function markdown(meta: Record<string, unknown>, text: string): string { return `---\n${stringify(meta)}---\n${text}`; }
 export function parseMarkdown(content: string): { meta: Record<string, unknown>; text: string } {
@@ -103,6 +128,38 @@ export async function unlockVault(config: HubConfig, scope: LockScope = 'writer'
   } finally { await rmdir(reaper); }
 }
 
+/** この処理が保持しているロック（パス→所有者の印）。シグナルで終了するときに解放する。 */
+const heldLocks = new Map<string, string>();
+/**
+ * 保持中のロックを同期的に解放する。所有者の記録がこの処理の印と一致するものだけを消す（他の処理のロックや判断できない残骸は触らない）。
+ * 死んだ処理のロック残骸の回収は、従来どおりdoctor --unlockの明示操作に限る。
+ */
+export function releaseHeldLocksSync(): void {
+  for (const [lock, token] of heldLocks) {
+    try {
+      const fd = openSync(join(lock, 'owner.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
+      let owner: Partial<LockOwner>;
+      try { owner = JSON.parse(readFileSync(fd, 'utf8')); } finally { closeSync(fd); }
+      if (owner.token === token && owner.pid === process.pid) { unlinkSync(join(lock, 'owner.json')); rmdirSync(lock); }
+    } catch { /* 解放できないロックはdoctorで示す。 */ }
+  }
+  heldLocks.clear();
+}
+/**
+ * CLI用。SIGINT・SIGTERM・SIGHUPで終了するとき、保持中のロックを解放してから終了する。
+ * 書き込みは一時ファイルからの置き換えで、途中で止まった操作は記録から回復する設計のため、解放してから終了しても整合性は保たれる。
+ */
+export function releaseLocksOnSignal(): void {
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.once(signal, () => { releaseHeldLocksSync(); process.exit(128 + osConstants.signals[signal]); });
+}
+
+/** ロックを待ち時間内に取れなかったこと。一時的な混雑として、呼び出し側が次回へ回せるように区別する。 */
+export class LockTimeoutError extends Error {
+  constructor(readonly scope: LockScope) {
+    super(scope === 'organize' ? '別の整理処理が実行中か、整理ロックの残骸があります。ctx doctorで確認してください' : '別のWriterまたはロック残骸があります。ctx doctorで確認してください');
+    this.name = 'LockTimeoutError';
+  }
+}
 export class Vault {
   constructor(readonly config: HubConfig) {}
   private async root(): Promise<string> {
@@ -161,6 +218,10 @@ export class Vault {
     } finally { await handle.close(); }
   }
   private async atomic(rel: string, text: string, exclusive: boolean): Promise<boolean> {
+    forgetReads(this.config.vaultPath, rel);
+    try { return await this.atomicWrite(rel, text, exclusive); } finally { forgetReads(this.config.vaultPath, rel); }
+  }
+  private async atomicWrite(rel: string, text: string, exclusive: boolean): Promise<boolean> {
     const target = await this.path(rel, true), temp = join(dirname(target), `.ctx-tmp-${randomUUID()}`);
     const handle = await open(temp, 'wx', 0o600);
     try { await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle.close(); }
@@ -178,6 +239,11 @@ export class Vault {
   async create(rel: string, text: string): Promise<boolean> { return this.atomic(rel, text, true); }
   /** 1ファイルを削除する。無い場合はfalse。Writerロック内で、退避の片付けなど記録を残した操作からだけ使う。 */
   async remove(rel: string): Promise<boolean> {
+    // 書き込みと同じく、削除の前後で読み取りの使い回しを捨てる（削除の途中に読んだ値を残さない）。
+    forgetReads(this.config.vaultPath, rel);
+    try { return await this.removeFile(rel); } finally { forgetReads(this.config.vaultPath, rel); }
+  }
+  private async removeFile(rel: string): Promise<boolean> {
     const target = await this.path(rel);
     try { await unlink(target); } catch (error) { if (missing(error)) return false; throw error; }
     await syncDirectory(dirname(target)); return true;
@@ -202,7 +268,7 @@ export class Vault {
     const lock = await lockPath(this.config, scope), reaper = `${lock}.reap`, token = randomUUID(), deadline = performance.now() + 10_000;
     await ensureLockRoot();
     while (true) {
-      if (performance.now() >= deadline) throw new Error(scope === 'organize' ? '別の整理処理が実行中か、整理ロックの残骸があります。ctx doctorで確認してください' : '別のWriterまたはロック残骸があります。ctx doctorで確認してください');
+      if (performance.now() >= deadline) throw new LockTimeoutError(scope);
       if (await directoryInfo(reaper)) { await pause(20); continue; }
       try {
         await mkdir(lock, { mode: 0o700 });
@@ -217,8 +283,10 @@ export class Vault {
         await pause(20);
       }
     }
-    try { return await fn(); }
+    heldLocks.set(lock, token);
+    try { return await (scope === 'writer' ? lockSection.run({ vault: resolve(this.config.vaultPath), memo: new Map() }, fn) : fn()); }
     finally {
+      heldLocks.delete(lock);
       const { owner } = await readLockOwner(lock);
       if (owner.token === token) { await unlink(join(lock, 'owner.json')); await rmdir(lock); }
     }

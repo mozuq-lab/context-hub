@@ -1,4 +1,6 @@
+import { listText } from './markdown-text.js';
 import {rebuildPoliciesLocked,readPolicies} from './policies.js';
+import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions } from './item-resolutions.js';
 import { effectiveSchedules,readItemSchedules,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
@@ -8,27 +10,29 @@ import { decodeIntake } from './intake-format.js';
 import { readProjects,inspectProjects,projectIssueFields,mergeTargets,mergeIssues } from './projects.js';
 import {buildReviewIndex,writeReviewIndexLocked,type ReviewCandidate} from './candidate-review.js';
 import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
-import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel } from './views.js';
+import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel,lastEvidenceAt } from './views.js';
 import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage } from './intake.js';
 import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
 import { referencesStopped,referencesPath,unassignedReferenceSection } from './references.js';
 import type { HubConfig, Input } from './types.js';
-import { describeFindings, findSecrets, secretSettings } from './secrets.js';
+import { describeFindings, findSecrets, secretSettings, writePrivacyPatternsLocked } from './secrets.js';
 import { rebuildIdeaIndexLocked, ideaSection } from './idea-links.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readExclusionOverlays, rereadResolutionIds } from './item-rereads.js';
 import { backupHomeLine, backupStatus, readBackupChecks } from './backup-check.js';
 // HTMLコメントの開始はNOWと同じく無害化し、以降の行が隠れないようにする。
-const plain=(s:string)=>s.replace(/[\r\n|]/g,' ').replaceAll('[','\\[').replaceAll(']','\\]').replaceAll('<!--','&lt;!--');
+const plain=listText;
 const clip=(s:string,n=120)=>{const a=Array.from(plain(s));return a.length>n?a.slice(0,n).join('')+'…':a.join('');};
 const DAY=86_400_000;
 /** HOMEの「次の一手」に載せる、プロジェクトごとの上限。全件は各NOWとアプリで確認する。 */
 const NEXT_PER_PROJECT=3;
-/** NOW.mdの最終根拠日時。未生成・解析不能なら未定。 */
-export async function lastEvidenceAt(vault:Vault,projectId:string):Promise<string|undefined>{
- const raw=await vault.read(`10_projects/${projectId}/NOW.md`);if(raw===undefined)return undefined;
- try{const value=parseMarkdown(raw).meta.last_evidence_at;return typeof value==='string'&&Number.isFinite(Date.parse(value))?value:undefined;}catch{return undefined;}
+const STATUS_ROWS=20;
+/** 通常の状態（受領済み・整理済み）の行は新しい順にSTATUS_ROWS件までにし、残りを件数の1行にまとめる。並びは元の順を保つ。 */
+function recentRoutine(rows:{row:string;routine:boolean;at:number}[],label:string):string[]{
+ const keep=new Set(rows.map((r,i)=>({r,i})).filter(x=>x.r.routine).sort((a,b)=>b.r.at-a.r.at||b.i-a.i).slice(0,STATUS_ROWS).map(x=>x.i));
+ const shown=rows.filter((r,i)=>!r.routine||keep.has(i)).map(r=>r.row),omitted=rows.length-shown.length;
+ return omitted?[...shown,`- ほかに${label}${omitted}件（古い順に省略しています）`]:shown;
 }
 /** HOMEに載せる、秘密情報らしい文字列を含むメモの上限。新しい順に載せる。 */
 const SECRET_ROWS=10;
@@ -47,6 +51,8 @@ export async function rebuildDashboard(config:HubConfig,options:{now?:Date}={}):
 /** Writerロックを持つ呼び出し元から使う。競合の片付けで、HOMEを作り直すときにも使う。 */
 export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,options:{now?:Date}={}):Promise<{path:string;conflict?:string}>{
  const clock=options.now??new Date();
+ // アプリが「選んで深掘り」で同じ追加規則を当てられるよう、設定の伏せ字の規則を同期するファイルへ書く（内容が変わったときだけ）。
+ await writePrivacyPatternsLocked(config,vault);
  {
   // 不正なプロジェクト定義があると一覧・方針・候補を組み立てられない。どのファイルのどの項目かをHOMEに示して止める。
   const definitionIssues=(await inspectProjects(config)).issues;
@@ -54,7 +60,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n\n## プロジェクト定義の不正（${definitionIssues.length}件）\n次のプロジェクト定義を読めないため、整理・HOMEの一覧・方針の更新を止めています。端末からのメモは受け付けて記録し、失われません（プロジェクトへの関連付けは定義を直すまで待ちます）。括弧内の項目を直してから、次のcycleを待つか \`ctx doctor\` で確認してください。\n${definitionIssues.map(i=>`- [${plain(i.path)}](<${i.path}>): ${plain(projectIssueFields(i))}`).join('\n')}\n\n名前（title）は1〜200文字、別名（aliases）とキーワード（keywords）は1件100文字までの文字列を50件まで、状態（status）は文字列で書きます。\n`;
    return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
   }
-  await rebuildPoliciesLocked(config,vault);
+  const modifiedKnowledge=await rebuildPoliciesLocked(config,vault);
   const projects=await readProjects(config),review=await buildReviewIndex(config),effective=await readEffectiveInputs(config),receipts=await readReceipts(config),acks=await readIntakeReceipts(config);
   await writeReviewIndexLocked(vault,review);
   const candidates=review.items,pending=candidates.filter(c=>c.status==='pending'),attention=candidates.filter(c=>c.status==='stale'||c.status==='unavailable'),history=candidates.filter(c=>c.status==='approved'||c.status==='rejected');
@@ -119,13 +125,17 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const reviewRaw=await vault.read('REVIEW.md');let reviewDays=config.retrieve.digestDays;
   if(reviewRaw!==undefined)try{const d=parseMarkdown(reviewRaw).meta.period_days;if(typeof d==='number'&&Number.isSafeInteger(d)&&d>0)reviewDays=d;}catch{/* 解析できないふりかえりは設定の日数で案内する。 */}
   const reviewLink=reviewRaw!==undefined?`\n直近${reviewDays}日のふりかえり: [REVIEW.md](REVIEW.md)`:'';
-  const statuses:string[]=[];
+  // 受領と整理状況は、対応が要るもの（受付待ち・内容変更・整理待ち・整理失敗）を全件、受領済み・整理済みは新しい順にSTATUS_ROWS件まで並べ、残りは件数で示す。
+  const statuses:string[]=[],acksByPath=new Map(acks.map(a=>[a.path,a])),receiptsById=new Map(receipts.map(r=>[r.input_id,r]));
+  const intakeRows:{row:string;routine:boolean;at:number}[]=[];
   for(const path of await intakePaths(vault)){
-   const ack=acks.find(a=>a.path===path);let changed=false;
+   const ack=acksByPath.get(path);let changed=false;
    if(ack)try{const bytes=await vault.readBytes(path,config.capture.maxInputChars*4+8192);changed=!bytes||hash(decodeIntake(bytes))!==ack.request_hash;}catch{changed=true;}
-   statuses.push(`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`);
+   intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:!!ack&&!changed,at:ack?Date.parse(ack.received_at):0});
   }
-  for(const unit of effective){const latest=receipts.find(r=>r.input_id===unit.chain.latest.id);statuses.push(`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`);}
+  statuses.push(...recentRoutine(intakeRows,'Mac mini受領済み'));
+  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id);return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:latest?.status==='organized',at:Date.parse(unit.chain.root.occurred_at)};});
+  statuses.push(...recentRoutine(inputRows,'整理済み'));
   // 秘密情報らしい文字列を含むメモ。原文は変えずモデルへ渡す前に伏せているが、同期先の端末には原文のまま残る。
   const secretRows=secretInputRows(config,effective.flatMap(u=>[u.chain.root,...u.chain.revisions]));
   // 似ているアイデアの索引。束ねの記録が壊れていてもHOMEは作り、壊れた記録を示す。
@@ -140,6 +150,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    if(g.kind==='now')errors.push(`- [NOWの更新が止まっています](${g.latest}): ${plain(g.title??g.projectId??g.target)} — NOW.mdの自動領域が手で変更されています（${g.stoppedAt?dateLabel(g.stoppedAt,config.timezone)+'の生成から':''}更新なし${count}）。アプリの「生成版に戻す」か\`ctx conflict resolve\`で戻せます。手で変えた行はメモとして残ります`);
    else errors.push(`- [生成物の競合](${g.latest}): ${plain(g.target)}${count?` / ${count.slice(1)}`:''}${g.resolvable?' — `ctx conflict resolve`で作り直せます':''}`);
   }
+  if(modifiedKnowledge.length)errors.push(`- ${plain(modifiedKnowledgeWarning(modifiedKnowledge))}`);
   for(const issue of mergeIssues(projects))errors.push(`- ${plain(issue)}（project.mdのmerged_intoを直すか外してください）`);
   for(const path of draftRecords.problems)errors.push(`- [作業記録の下書きの記録が不正です](${path})`);
   errors.push(...nextProblems);
