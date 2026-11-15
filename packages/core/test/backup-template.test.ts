@@ -98,3 +98,17 @@ test.skipIf(process.platform !== 'darwin')('launchd例は選んだVaultと保存
     expect(await readFile(join(vault, '00_inbox', 'sample.md'), 'utf8')).toBe(original);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
+
+test.skipIf(process.platform === 'win32')('バックアップの完了行は、どのOSでもアーカイブのバイト数を示す', async () => {
+  const folder = await mkdtemp(join(tmpdir(), 'ctx-backup-size-'));
+  try {
+    const vault = join(folder, 'vault'), backups = join(folder, 'backups');
+    await mkdir(join(vault, '00_inbox'), { recursive: true });
+    await writeFile(join(vault, '00_inbox', 'sample.md'), '架空の原文\n');
+    const result = spawnSync('/bin/sh', [backupScript], { env: { ...process.env, HOME: folder, CTX_VAULT: vault, CTX_BACKUP_DIR: backups, CTX_BACKUP_KEEP_DAYS: '30' }, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    const archive = (await readdir(backups)).find(name => /^vault-.*\.tar\.gz$/.test(name))!;
+    const size = (await readFile(join(backups, archive))).length;
+    expect(result.stdout).toMatch(new RegExp(` ok .*${archive} ${size} bytes kept=1\\n$`));
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});

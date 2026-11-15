@@ -54,10 +54,14 @@ TMP="$DEST/.vault-$TS.tar.gz.tmp"
 OUT="$DEST/vault-$TS.tar.gz"
 trap 'rm -f "$TMP"' EXIT
 # 書き込み途中の一時ファイルは除外する。原文は一時ファイル→renameで公開されるため、tarには完成したファイルだけが入る。
+# Writerロックは取らない。複数のファイルにまたがる操作の途中の状態が入りうるが、各操作は記録を先に書き、
+# 復元後のcycle（停止回復）で続きを行う。整合した復元点が必要なときはWriterと同期を止めてから実行する（docs/operations.md）。
 tar --exclude='.ctx-tmp-*' --exclude='*.tmp' -czf "$TMP" -C "$VAULT" .
 tar -tzf "$TMP" >/dev/null
 mv "$TMP" "$OUT"
 trap - EXIT
 find "$DEST" -maxdepth 1 -type f -name 'vault-*.tar.gz' -mtime +"$KEEP_DAYS" -delete
 COUNT=$(find "$DEST" -maxdepth 1 -type f -name 'vault-*.tar.gz' | wc -l | tr -d ' ')
-echo "$(date '+%Y-%m-%dT%H:%M:%S%z') ok $OUT $(stat -f %z "$OUT") bytes kept=$COUNT"
+# statの書式はBSDとGNUで異なるため、バイト数はwc -cで数える。
+SIZE=$(wc -c < "$OUT" | tr -d ' ')
+echo "$(date '+%Y-%m-%dT%H:%M:%S%z') ok $OUT $SIZE bytes kept=$COUNT"
