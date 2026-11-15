@@ -27,7 +27,11 @@ export interface Input {
   occurred_at: string; received_at: string; project?: string; tool?: string;
   meta?: Record<string, string>; origin: 'user-note' | 'ai-self-report'; text: string; path: string;
 }
-export interface Project { id: string; title: string; aliases: string[]; keywords: string[]; status: string }
+export interface Project {
+  id: string; title: string; aliases: string[]; keywords: string[]; status: string;
+  /** 本人がこのプロジェクトを統合した先のID。入力・完了報告・日付は統合先のものとして読み替える（原文と記録は書き換えない）。 */
+  merged_into?: string;
+}
 export interface ExtractedItem { text: string; status: 'confirmed' | 'proposal' | 'unverified'; input_id?: string }
 export interface OrganizeResult {
   project_proposal?: ProjectProposal | null;

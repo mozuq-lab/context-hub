@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { parse, parseDocument, isMap, isScalar, isSeq } from 'yaml';
 import { Vault, hash, parseMarkdown } from './storage.js';
-import { projectIdSchema, projectSchema, readProjects } from './projects.js';
+import { ProjectMergedError, projectIdSchema, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig } from './types.js';
 
@@ -168,6 +168,8 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
         return result;
       }
     }
+    // 統合済みのプロジェクトの名前・別名・キーワードは統合先へ足してある。統合先の定義を変えるか、統合を取り消してから変える。
+    if (project.merged_into) throw new ProjectMergedError(project.merged_into);
     if (current !== r.expectedHash) throw new Error('プロジェクト定義が変更されています。再確認してください');
     const changed = changedFields(before, after);
     if (!changed.length) throw new Error('名前・別名・キーワードに変更がありません');

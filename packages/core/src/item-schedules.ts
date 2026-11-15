@@ -2,8 +2,8 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { readInputs } from './capture.js';
-import { projectIdSchema, readProjects } from './projects.js';
-import { activeResolutions, itemSections, readItemResolutions, readNowItems, type ItemSection } from './item-resolutions.js';
+import { assertNotMerged, projectIdSchema, readProjects } from './projects.js';
+import { activeResolutions, itemMergeTargets, itemSections, readItemResolutions, readNowItems, retargetItemRecord, type ItemSection } from './item-resolutions.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -35,8 +35,11 @@ export type ItemSchedule = z.infer<typeof itemScheduleSchema>;
 const scheduleDir = '90_system/item-schedules';
 const schedulePath = (id: string) => `${scheduleDir}/${id}.json`;
 
-/** 記録と、読めなかった記録のパス。不正な記録があってもNOWやHOMEの生成は止めず、HOMEとdoctorで示す。 */
-export async function readItemSchedules(vault: Vault): Promise<{ records: ItemSchedule[]; problems: string[] }> {
+/**
+ * 記録と、読めなかった記録のパス。不正な記録があってもNOWやHOMEの生成は止めず、HOMEとdoctorで示す。
+ * 統合元のプロジェクトで付けた日付は、完了報告と同じく統合先の項目の記録として読み替える（rawを指定すると記録のまま）。
+ */
+export async function readItemSchedules(vault: Vault, options: { raw?: boolean } = {}): Promise<{ records: ItemSchedule[]; problems: string[] }> {
   const records: ItemSchedule[] = [], problems: string[] = [];
   for (const path of await vault.files(scheduleDir)) {
     if (!/^90_system\/item-schedules\/SCH-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
@@ -46,7 +49,9 @@ export async function readItemSchedules(vault: Vault): Promise<{ records: ItemSc
       records.push(record);
     } catch { problems.push(path); }
   }
-  return { records: records.sort((a, b) => a.id.localeCompare(b.id)), problems };
+  records.sort((a, b) => a.id.localeCompare(b.id));
+  const targets = options.raw ? new Map<string, string>() : await itemMergeTargets(vault);
+  return { records: targets.size ? records.map(r => retargetItemRecord(r, targets)) : records, problems };
 }
 /** 項目ごとに最後の記録だけを有効にする。最後の記録が日付を外したものなら含めない。 */
 export function activeSchedules(records: ItemSchedule[], projectId?: string): Map<string, ItemSchedule> {
@@ -118,11 +123,13 @@ export async function setItemSchedule(config: HubConfig, request: ItemScheduleRe
   // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
   const { rebuildNowLocked, readReceipts } = await import('./views.js');
   return vault.withLock(async () => {
-    if (!(await readProjects(config)).some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
+    const projects = await readProjects(config);
+    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
     const { records } = await readItemSchedules(vault);
     const rebuild = async () => { await rebuildNowLocked(vault, config, r.projectId, await readInputs(config), await readReceipts(config)); };
     if (r.sourceEventId) {
-      const previous = records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
+      // 再送の照合は記録のままで行う（受け付けた後にプロジェクトが統合されても、同じ依頼として扱う）。
+      const previous = (await readItemSchedules(vault, { raw: true })).records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
       if (previous) {
         // 引き継いだ日付を外した記録は、引き継ぎ元のキーで残る。
         if (previous.project_id !== r.projectId || (previous.item_key !== r.itemKey && (r.due !== null || r.reviewAfter !== null)) || previous.due !== r.due || previous.review_after !== r.reviewAfter) throw new Error('同じ受付IDで別の日付が記録されています');
@@ -130,6 +137,8 @@ export async function setItemSchedule(config: HubConfig, request: ItemScheduleRe
         return { projectId: r.projectId, itemKey: r.itemKey, scheduleId: previous.id, deduped: true };
       }
     }
+    // 統合済みのプロジェクトの項目は統合先のNOWにある（キーも統合先のものになる）。
+    assertNotMerged(projects, r.projectId);
     const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
     const clearing = r.due === null && r.reviewAfter === null, { byKey, orphaned } = effectiveSchedules(records, r.projectId, list, resolved);
     const item = list.find(i => i.key === r.itemKey), orphan = orphaned.find(o => o.item_key === r.itemKey);

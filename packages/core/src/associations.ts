@@ -3,7 +3,7 @@ import{completeRedacted}from'./secrets.js';
 import { z } from 'zod';
 import { Vault, hash } from './storage.js';
 import { PromptTooLargeError } from './infer.js';
-import { readProjects } from './projects.js';
+import { readProjects, mergeTargets } from './projects.js';
 import { candidateProjects,lifecycleOf } from './project-status.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import type { HubConfig, LlmClient, OrganizeResult, Project } from './types.js';
@@ -55,7 +55,26 @@ export async function applyAssociations(config:HubConfig,effective:EffectiveInpu
   const record=item.receipt?await readAssociation(vault,bound,registry):undefined;
   result.push(record?.status==='associated'&&item.receipt?.result?{...item,receipt:{...item.receipt,result:{...item.receipt.result,project_candidates:record.project_candidates}}}:item);
  }
- return result;
+ const targets=mergeTargets(registry);
+ return targets.size?result.map(item=>redirectMerged(item,targets)):result;
+}
+/**
+ * 統合済みのプロジェクトへの帰属（本人の指定とAIの関連候補）を、統合先のものとして読み替える。
+ * 原文・処理記録・再関連付けの記録は書き換えず、読んだ値だけを置き換える（統合を取り消せば元の帰属に戻る）。
+ */
+export function redirectMerged(item:EffectiveInput,targets:Map<string,string>):EffectiveInput{
+ const {chain,receipt}=item,owner=chain.root.project===undefined?undefined:targets.get(chain.root.project);
+ const candidates=receipt?.result?.project_candidates,moved=candidates?.some(c=>targets.has(c.id));
+ if(!owner&&!moved)return item;
+ let next=item;
+ if(owner){const root={...chain.root,project:owner};next={...next,chain:{...chain,root,latest:chain.latest.id===chain.root.id?root:chain.latest}};}
+ if(moved&&receipt?.result){
+  // 統合元と統合先の両方が候補にあれば、確からしさの高い方を1件にまとめる。順序は最初に出た位置を保つ。
+  const merged=new Map<string,number>();
+  for(const c of candidates!){const id=targets.get(c.id)??c.id;merged.set(id,Math.max(merged.get(id)??0,c.confidence));}
+  next={...next,receipt:{...receipt,result:{...receipt.result,project_candidates:[...merged].map(([id,confidence])=>({id,confidence}))}}};
+ }
+ return next;
 }
 /** ロック内で確定した再関連付けの対象。モデル呼び出しはロック外で行い、確定時に同じ根拠と定義かを再検査する。 */
 export interface AssociationPlan { effective:EffectiveInput; projects:Project[]; snapshot:string; record:AssociationResult; prompt:string; policyRevision:string }

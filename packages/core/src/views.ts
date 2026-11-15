@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { readInputs } from './capture.js';
-import { readProjects } from './projects.js';
+import { readProjects, mergedSources } from './projects.js';
 import { groundExtractedStatuses, organizeResultSchema } from './llm.js';
 import { groundExtractedHistory } from './llm.js';
 import { correctionNotice, effectiveFromInputs } from './effective-inputs.js';
@@ -86,7 +86,9 @@ export const nowBaselinePath = (projectId: string) => `90_system/now-generated/$
 export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectId: string, inputs: Input[], receipts: Receipt[], generatedAt = new Date().toISOString(), options: { overwriteAuto?: boolean } = {}): Promise<{ path: string; conflict?: string }> {
   if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(projectId)) throw new Error('プロジェクトIDが不正です');
   const chains=await readCorrectionChains(config), hashes=new Map(chains.map(c=>[c.root.id,c.evidenceHash]));
-  const units = await applyAssociations(config,effectiveFromInputs(inputs,receipts).map(e=>({...e,chain:{...e.chain,evidenceHash:hashes.get(e.chain.root.id)??''}})));
+  // 統合元のプロジェクトへの帰属は、applyAssociationsがこのプロジェクト（統合先）のものとして読み替える。
+  const projects = await readProjects(config), sources = mergedSources(projects, projectId);
+  const units = await applyAssociations(config,effectiveFromInputs(inputs,receipts).map(e=>({...e,chain:{...e.chain,evidenceHash:hashes.get(e.chain.root.id)??''}})),projects);
   const evidence = units.flatMap((unit) => {
     const {chain,receipt}=unit, input=chain.root;
     const index=[chain.root,...chain.revisions].findIndex(i=>i.id===receipt?.input_id);
@@ -135,7 +137,10 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
   // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。
-  const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId).map(d => dismissalKey(d.project_id, d.item_key, d.input_id)));
+  // 統合元で整理・見送りしたときの項目キーは統合元のIDで作られているため、同じ項目のこのプロジェクトでのキーへ対応付ける。
+  const alias = new Map<string, string>();
+  for (const item of items.values()) for (const source of sources) alias.set(itemKey(source, item.section, item.input_id, item.text), item.key);
+  const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId || sources.includes(d.project_id)).map(d => dismissalKey(projectId, alias.get(d.item_key) ?? d.item_key, d.input_id)));
   const reopenedAt = new Map<string, number>();
   for (const r of resolutionRecords) if (r.project_id === projectId && r.action === 'reopen') reopenedAt.set(r.item_key, Math.max(reopenedAt.get(r.item_key) ?? 0, Date.parse(r.created_at)));
   const hinted: { item: NowItem; input: Input; quote: string }[] = [];
@@ -143,11 +148,11 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     const { chain, receipt } = unit;
     if (chain.root.project !== projectId || unit.pendingCorrection || receipt?.status !== 'organized' || receipt.input_id !== chain.latest.id) continue;
     for (const hint of receipt.result?.resolution_hints ?? []) {
-      const item = items.get(hint.item_key);
-      if (!item || item.resolution || item.input_id === chain.root.id || dismissed.has(dismissalKey(projectId, hint.item_key, chain.root.id))) continue;
+      const item = items.get(hint.item_key) ?? items.get(alias.get(hint.item_key) ?? '');
+      if (!item || item.resolution || item.input_id === chain.root.id || dismissed.has(dismissalKey(projectId, item.key, chain.root.id))) continue;
       // このメモより後の根拠で改めて挙がった項目は、このメモでは片付いていない。
       if (Date.parse(chain.root.occurred_at) < Date.parse(inputs.find(i => i.id === item.input_id)?.occurred_at ?? chain.root.occurred_at)) continue;
-      if (Date.parse(receipt.organized_at) <= (reopenedAt.get(hint.item_key) ?? Number.NEGATIVE_INFINITY)) continue;
+      if (Date.parse(receipt.organized_at) <= (reopenedAt.get(item.key) ?? Number.NEGATIVE_INFINITY)) continue;
       if ((item.hints ??= []).some(h => h.input_id === chain.root.id) || item.hints.length >= 20) continue;
       item.hints.push({ input_id: chain.root.id, quote: hint.quote, at: receipt.organized_at });
       hinted.push({ item, input: chain.root, quote: hint.quote });

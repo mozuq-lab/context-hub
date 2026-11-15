@@ -4,7 +4,7 @@ import { associatedProjects } from './views.js';
 import { readEffectiveInputs, correctionNotice, type EffectiveInput } from './effective-inputs.js';
 import { readInputs } from './capture.js';
 import { readCorrectionChains } from './corrections.js';
-import { readProjects, projectIdSchema } from './projects.js';
+import { readProjects, projectIdSchema, resolveProject } from './projects.js';
 import { Vault, parseMarkdown, hash } from './storage.js';
 import type { HubConfig, Input } from './types.js';
 import { redactText, secretSettings } from './secrets.js';
@@ -44,7 +44,8 @@ export async function pending(config: HubConfig): Promise<string> {
   }
   return lines.join('\n\n') || '見つかりません（未整理・失敗なし）';
 }
-export const findKinds = ['memo','work-summary','correction','idea','knowledge','now'] as const;
+/** referenceは種類ではなく絞り込みの条件で、整理でAIが参考資料に分類したメモ・作業要約（訂正を含む）に当たる。 */
+export const findKinds = ['memo','work-summary','correction','idea','knowledge','now','reference'] as const;
 export type FindKind = typeof findKinds[number];
 export interface FindOptions {
   /** このContextHubプロジェクトに帰属・関連する記録だけにする。AI推定の関連候補は結果で区別する。 */
@@ -72,24 +73,26 @@ export function parseFindTime(value: string, endOfDay = false): number {
   if (!/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Error('期間はYYYY-MM-DDまたはタイムゾーン付き日時で指定してください');
   return Date.parse(value);
 }
-type Doc = { path:string; text:string; id:string; at:string; when:string; source:string; ids:string[]; kind:FindKind; owner?:string; retracted?:boolean };
+type Doc = { path:string; text:string; id:string; at:string; when:string; source:string; ids:string[]; kind:Exclude<FindKind,'reference'>; owner?:string; retracted?:boolean; reference?:boolean };
 /** 検索と束ねた文脈で共有する記録の一覧。原文・アイデア・知識・NOWと、入力ごとのプロジェクトの帰属を読む。 */
 async function collectDocs(config: HubConfig) {
   const vault = new Vault(config), inputs = await readInputs(config);
   const effective=await readEffectiveInputs(config);
   // 入力IDごとの帰属。本人が指定したプロジェクトは確定、整理結果の関連候補はAI推定として区別する。
-  const assigned = new Map<string,{ owned:Set<string>; estimated:Set<string> }>();
+  const assigned = new Map<string,{ owned:Set<string>; estimated:Set<string> }>(), references = new Set<string>();
   for (const unit of effective) {
+    // 有効な解釈（最後に整理できた訂正）が参考資料なら、元のメモと訂正を資料として絞り込めるようにする。
+    if (unit.receipt?.result?.category === 'reference') for (const input of [unit.chain.root,...unit.chain.revisions]) references.add(input.id);
     const owned = new Set(unit.chain.root.project ? [unit.chain.root.project] : []);
     const estimated = new Set(unit.receipt ? associatedProjects(unit.chain.root,unit.receipt,config).filter(p => !owned.has(p)) : []);
     for (const input of [unit.chain.root,...unit.chain.revisions]) assigned.set(input.id,{owned,estimated});
   }
   // atは表示用、whenは期間と新しい順の判定用。NOWは最終根拠、アイデアは元のメモの発生日時で判断し、再生成や整理の遅れに左右されないようにする。
-  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind}));
+  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind,...(references.has(i.id)?{reference:true}:{})}));
   for (const dir of ['20_ideas','30_knowledge','10_projects']) for(const path of await vault.files(dir)) {
     if (!path.endsWith('.md') || (dir === '10_projects' && !path.endsWith('/NOW.md') && !/^10_projects\/[^/]+\/knowledge\/KNW-[^/]+\.md$/.test(path))) continue;
     const {meta,text} = parseMarkdown((await vault.read(path))!);
-    const kind: FindKind = dir === '20_ideas' ? 'idea' : path.endsWith('/NOW.md') ? 'now' : 'knowledge';
+    const kind: Doc['kind'] = dir === '20_ideas' ? 'idea' : path.endsWith('/NOW.md') ? 'now' : 'knowledge';
     const at=String(meta.generated_at ?? meta.approved_at ?? '');
     docs.push({path,text,id:String(meta.id ?? meta.project ?? path),at,when:String((kind==='now'?meta.last_evidence_at:kind==='idea'?meta.occurred_at:undefined) ?? at),retracted:meta.retracted===true,source:meta.verified === true ? '人の承認記録付き' : 'AI生成・未検証',ids:Array.isArray(meta.input_ids)?meta.input_ids.map(String):[],kind,...(dir === '10_projects' ? {owner:path.split('/')[1]} : {})});
   }
@@ -117,18 +120,24 @@ export async function find(config: HubConfig, query: string, options: FindOption
   if (query.length > 500 || (!tokens.length && !filtered)) throw new Error('検索語は1〜500文字にしてください（絞り込み条件があれば検索語は省略できます）');
   const sort = options.sort ?? (tokens.length ? 'relevance' : 'newest');
   if (sort !== 'relevance' && sort !== 'newest') throw new Error('並び順はrelevanceまたはnewestにしてください');
-  if (options.project !== undefined && !(await readProjects(config)).some(p => p.id === options.project)) return '見つかりません（プロジェクト未登録）';
+  // 統合済みのプロジェクトで絞り込んだときは、統合先に帰属・関連する記録を返す（入力の帰属を統合先として読み替えているため）。
+  let scope = options.project;
+  if (scope !== undefined) {
+    const projects = await readProjects(config);
+    if (!projects.some(p => p.id === scope)) return '見つかりません（プロジェクト未登録）';
+    scope = resolveProject(projects, scope);
+  }
   const { inputs, effective, docs, relation } = await collectDocs(config);
   const time = (doc: Doc) => Date.parse(doc.when) || 0;
   const hits = docs.map(doc=>{
     const normalized = doc.text.normalize('NFKC').toLocaleLowerCase();
     const score = !tokens.length ? 1 : tokens.every(t=>normalized.includes(t)) ? tokens.reduce((n,t)=>n+normalized.split(t).length-1,0) : 0;
-    const related = options.project === undefined ? undefined : relation(doc,options.project);
+    const related = scope === undefined ? undefined : relation(doc,scope);
     return { ...doc, score, related };
   }).filter(doc=>doc.score>0
     // 分類を取り消したアイデアは、種類での絞り込みではアイデアとして数えない。
-    && (kinds === undefined || (kinds.has(doc.kind) && !doc.retracted))
-    && (options.project === undefined || doc.related !== undefined)
+    && (kinds === undefined || (kinds.has(doc.kind) && !doc.retracted) || (kinds.has('reference') && doc.reference === true))
+    && (scope === undefined || doc.related !== undefined)
     && (since === undefined || (Number.isFinite(Date.parse(doc.when)) && Date.parse(doc.when) >= since))
     && (until === undefined || (Number.isFinite(Date.parse(doc.when)) && Date.parse(doc.when) <= until)))
     .sort((a,b)=>(sort === 'relevance' ? b.score-a.score : 0) || time(b)-time(a) || a.path.localeCompare(b.path));
@@ -155,8 +164,12 @@ export async function find(config: HubConfig, query: string, options: FindOption
 }
 export async function resume(config: HubConfig, project: string): Promise<string> {
   projectIdSchema.parse(project);
-  const definition = (await readProjects(config)).find(p=>p.id===project);
-  if (!definition) return '見つかりません（プロジェクト未登録）';
+  const projects = await readProjects(config), requested = projects.find(p=>p.id===project);
+  if (!requested) return '見つかりません（プロジェクト未登録）';
+  // 統合済みのプロジェクトは、統合先の現在地を返す。
+  const target = resolveProject(projects, project);
+  if (target !== project) return `注意: ${requested.title}（${project}）は統合済みです。統合先の現在地を示します。\n\n${await resume(config, target)}`;
+  const definition = requested;
   const path = `10_projects/${project}/NOW.md`, raw = await new Vault(config).read(path);
   const notices=(await readEffectiveInputs(config)).filter(e=>e.pendingCorrection&&(e.chain.root.project===project||(e.receipt&&associatedProjects(e.chain.root,e.receipt,config).includes(project)))).map(correctionNotice).join('\n');
   if (!raw) return `# ${definition.title}\n\n# 現在地\n不明（整理済みの根拠なし）\n\n# 次の一手\n不明\n\n# 未解決\n不明\n`;
@@ -169,7 +182,11 @@ export async function resume(config: HubConfig, project: string): Promise<string
 }
 export async function context(config: HubConfig, project: string, maxChars = config.retrieve.contextMaxChars): Promise<string> {
   projectIdSchema.parse(project);
-  if (!(await readProjects(config)).some(p=>p.id===project)) return '見つかりません（プロジェクト未登録）';
+  const projects = await readProjects(config);
+  if (!projects.some(p=>p.id===project)) return '見つかりません（プロジェクト未登録）';
+  // 統合済みのプロジェクトは、統合先の文脈と方針を返す。
+  const target = resolveProject(projects, project);
+  if (target !== project) return context(config, target, maxChars);
   const vault = new Vault(config), inputs = await readInputs(config), related: string[] = [], unprocessed: string[] = [];
   const hideSecrets = (text: string) => redactText(text, secretSettings(config)).text;
   for (const unit of (await readEffectiveInputs(config)).reverse()) {
@@ -199,7 +216,7 @@ export function fenced(text: string): string {
   return `${fence}text\n${text.trim()}\n${fence}`;
 }
 const oneLine = (value: string) => value.replace(/[\u0000-\u001f\u007f]+/g, ' ');
-const kindLabels: Record<FindKind,string> = { memo:'メモ', 'work-summary':'作業要約', correction:'訂正', idea:'アイデア', knowledge:'知識', now:'NOW' };
+const kindLabels: Record<Doc['kind'],string> = { memo:'メモ', 'work-summary':'作業要約', correction:'訂正', idea:'アイデア', knowledge:'知識', now:'NOW' };
 /**
  * 本人が選んだ記録だけを、出典・訂正の注意・帰属の区別と方針を付けて1つの資料にする。
  * 記録は指定順に並べ、上限に収まらない記録は本文の途中で切らずに丸ごと省き、末尾にIDを示す。

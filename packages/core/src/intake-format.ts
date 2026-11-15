@@ -36,7 +36,9 @@ const projectCreate=z.object({...base,operation:z.literal('project-create'),proj
 const conflictResolve=z.object({...base,operation:z.literal('conflict-resolve'),target:resolvableTargetSchema,target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 2件のアイデアを束ねる（link）か、別の話とする（separate）。ハッシュは索引で確認した内容のもので、束ねるときだけ一致を確かめる。
 const ideaLink=z.object({...base,operation:z.literal('idea-link'),idea_ids:z.tuple([ideaIdSchema,ideaIdSchema]).refine(([a,b])=>a!==b,'異なる2件のアイデアを指定してください'),idea_hashes:z.tuple([z.string().regex(/^[a-f0-9]{64}$/),z.string().regex(/^[a-f0-9]{64}$/)]),action:ideaLinkActionSchema,confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink]);
+// 統合元（project_id）を統合先（into_id）へまとめる、またはその統合を取り消す。ハッシュは確認した時点の2つのproject.mdのもの。
+const projectMerge=z.object({...base,operation:z.enum(['project-merge','project-unmerge']),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),into_id:projectIdSchema,into_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault, hash } from './storage.js';
 import { readInputs } from './capture.js';
-import { projectIdSchema, readProjects } from './projects.js';
+import { assertNotMerged, inspectProjects, mergeTargets, projectIdSchema, readProjects } from './projects.js';
 import type { HubConfig } from './types.js';
 
 /** NOWの「次の一手」「未解決」の項目を、本人が完了・解決と報告した記録。原文と整理結果は変えない。 */
@@ -41,7 +41,20 @@ export function itemKey(projectId: string, section: ItemSection, inputId: string
   return hash(`${projectId}\n${section}\n${inputId}\n${text}`);
 }
 
-export async function readItemResolutions(vault: Vault): Promise<ItemResolution[]> {
+/** 統合元→統合先。定義を読めないときは読み替えない（定義の不正はHOMEとdoctorで示す）。 */
+export async function itemMergeTargets(vault: Vault): Promise<Map<string, string>> {
+  try { return mergeTargets((await inspectProjects(vault.config)).projects); } catch { return new Map(); }
+}
+/**
+ * 統合元のプロジェクトで付けた記録を、統合先の項目の記録として読み替える。項目キーはプロジェクトIDを含むため、
+ * 記録に残した欄・根拠・本文から統合先でのキーを求め直す。ファイルは書き換えず、統合を取り消せば元に戻る。
+ */
+export function retargetItemRecord<T extends { project_id: string; item_key: string; section: ItemSection; input_id: string; text: string }>(record: T, targets: Map<string, string>): T {
+  const target = targets.get(record.project_id);
+  return target ? { ...record, project_id: target, item_key: itemKey(target, record.section, record.input_id, record.text) } : record;
+}
+/** rawを指定すると、統合の読み替えをせず記録のままを返す（同じ受付IDの再送の照合に使う）。 */
+export async function readItemResolutions(vault: Vault, options: { raw?: boolean } = {}): Promise<ItemResolution[]> {
   const result: ItemResolution[] = [];
   for (const path of await vault.files(resolutionDir)) {
     if (!/^90_system\/item-resolutions\/RES-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
@@ -50,7 +63,10 @@ export async function readItemResolutions(vault: Vault): Promise<ItemResolution[
     if (path !== `${resolutionDir}/${record.id}.json`) throw new Error(`解決記録とパスが一致しません: ${path}`);
     result.push(record);
   }
-  return result.sort((a, b) => a.id.localeCompare(b.id));
+  result.sort((a, b) => a.id.localeCompare(b.id));
+  if (options.raw) return result;
+  const targets = await itemMergeTargets(vault);
+  return targets.size ? result.map(r => retargetItemRecord(r, targets)) : result;
 }
 /** 項目ごとに最後の記録だけを有効にする。最後が解決なら解決済み、再開なら未解決へ戻す。 */
 export function activeResolutions(records: ItemResolution[], projectId?: string): Map<string, ItemResolution> {
@@ -80,17 +96,21 @@ export async function setItemResolution(config: HubConfig, request: ItemResoluti
   // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
   const { rebuildNowLocked, readReceipts } = await import('./views.js');
   return vault.withLock(async () => {
-    if (!(await readProjects(config)).some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
+    const projects = await readProjects(config);
+    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
     const records = await readItemResolutions(vault);
     const rebuild = async () => { await rebuildNowLocked(vault, config, r.projectId, await readInputs(config), await readReceipts(config)); };
     if (r.sourceEventId) {
-      const previous = records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
+      // 再送の照合は記録のままで行う（受け付けた後にプロジェクトが統合されても、同じ依頼として扱う）。
+      const previous = (await readItemResolutions(vault, { raw: true })).find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
       if (previous) {
         if (previous.project_id !== r.projectId || previous.item_key !== r.itemKey || previous.action !== r.action) throw new Error('同じ受付IDで別の解決報告が記録されています');
         await rebuild();
         return { projectId: r.projectId, itemKey: r.itemKey, action: r.action, resolutionId: previous.id, deduped: true };
       }
     }
+    // 統合済みのプロジェクトの項目は統合先のNOWにある（キーも統合先のものになる）。
+    assertNotMerged(projects, r.projectId);
     const items = await readNowItems(vault, r.projectId);
     const item = items?.items.find(i => i.key === r.itemKey);
     if (!item) throw new Error('NOWに該当する項目がありません。最新のNOWで確認してください');

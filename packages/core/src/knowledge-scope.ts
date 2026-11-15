@@ -30,7 +30,9 @@ export async function validateAdoptionTarget(vault:Vault,target:AdoptionTarget):
  const t=adoptionTargetSchema.parse(target);if(t.scope==='global')return t;
  const bytes=await vault.readBytes(`10_projects/${t.projectId}/project.md`,1_048_576);if(!bytes)throw new Error('採用先プロジェクトが見つかりません');
  const raw=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes),project=projectSchema.parse(parseMarkdown(raw).meta);
- if(project.id!==t.projectId||hash(raw)!==t.projectHash)throw new Error('採用先プロジェクトが変更されています。再確認してください');return t;
+ if(project.id!==t.projectId||hash(raw)!==t.projectHash)throw new Error('採用先プロジェクトが変更されています。再確認してください');
+ // 統合済みのプロジェクトの方針は、どの入力にも適用されなくなる。
+ if(project.merged_into)throw new Error('採用先プロジェクトは統合済みです。統合先を採用先にしてください');return t;
 }
 export interface ReviewProject{id:string;title:string;path:string;hash:string}
 export async function readProjectCatalog(vault:Vault):Promise<ReviewProject[]>{

@@ -2,11 +2,11 @@ import { z } from 'zod';
 import { Vault, markdown, parseMarkdown } from './storage.js';
 import type { HubConfig, Project } from './types.js';
 export const projectIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{1,40}$/);
-export const projectSchema = z.object({ id: projectIdSchema, title: z.string().min(1).max(200), aliases: z.array(z.string().max(100)).max(50), keywords: z.array(z.string().max(100)).max(50), status: z.string().max(100) });
+export const projectSchema = z.object({ id: projectIdSchema, title: z.string().min(1).max(200), aliases: z.array(z.string().max(100)).max(50), keywords: z.array(z.string().max(100)).max(50), status: z.string().max(100), merged_into: projectIdSchema.optional() });
 const schema=projectSchema;
 /** 不正なプロジェクト定義のファイルと、不正な項目。 */
 export interface ProjectDefinitionIssue { path: string; fields: string[] }
-const fieldLabels: Record<string, string> = { id: 'ID', title: '名前（title）', aliases: '別名（aliases）', keywords: 'キーワード（keywords）', status: '状態（status）' };
+const fieldLabels: Record<string, string> = { id: 'ID', title: '名前（title）', aliases: '別名（aliases）', keywords: 'キーワード（keywords）', status: '状態（status）', merged_into: '統合先（merged_into）' };
 export function projectIssueFields(issue: ProjectDefinitionIssue): string {
   return issue.fields.map(f => fieldLabels[f] ?? f).join('・');
 }
@@ -55,4 +55,57 @@ const normalizeName=(s:string)=>s.normalize('NFKC').trim().toLocaleLowerCase();
 export function overlappingProject(names:{title:string;aliases:string[]},projects:Project[]):Project|undefined{
   const wanted=new Set([names.title,...names.aliases].map(normalizeName).filter(Boolean));
   return projects.find(p=>[p.id,p.title,...p.aliases].some(s=>wanted.has(normalizeName(s))));
+}
+
+/**
+ * 統合元のID→読み替え先のID。統合先がさらに統合されていれば最後までたどる。
+ * 統合先が見つからない・自分自身・循環している定義は統合として扱わず（そのプロジェクトのまま読む）、mergeIssuesで示す。
+ */
+export function mergeTargets(projects: Project[]): Map<string, string> {
+  const byId = new Map(projects.map(p => [p.id, p])), result = new Map<string, string>();
+  for (const project of projects) {
+    if (!project.merged_into) continue;
+    const seen = new Set([project.id]); let current = project, broken = false;
+    while (current.merged_into) {
+      const next = byId.get(current.merged_into);
+      if (!next || seen.has(next.id)) { broken = true; break; }
+      seen.add(next.id); current = next;
+    }
+    if (!broken) result.set(project.id, current.id);
+  }
+  return result;
+}
+/** 統合されていれば統合先のID、そうでなければ元のID。 */
+export function resolveProject(projects: Project[], id: string): string;
+export function resolveProject(projects: Project[], id: string | undefined): string | undefined;
+export function resolveProject(projects: Project[], id: string | undefined): string | undefined {
+  return id === undefined ? undefined : mergeTargets(projects).get(id) ?? id;
+}
+/** このプロジェクトへ読み替えられる統合元のID（ID順）。 */
+export function mergedSources(projects: Project[], id: string): string[] {
+  return [...mergeTargets(projects)].filter(([, target]) => target === id).map(([source]) => source).sort();
+}
+/** 手で書いたmerged_intoの不整合。本体の統合操作では作られない。 */
+export function mergeIssues(projects: Project[]): string[] {
+  const byId = new Map(projects.map(p => [p.id, p])), targets = mergeTargets(projects), issues: string[] = [];
+  for (const project of projects) {
+    if (!project.merged_into) continue;
+    if (!byId.has(project.merged_into)) issues.push(`統合先のプロジェクトが見つかりません: 10_projects/${project.id}/project.md（merged_into: ${project.merged_into}）`);
+    else if (!targets.has(project.id)) issues.push(`統合先が循環しています: 10_projects/${project.id}/project.md（merged_into: ${project.merged_into}）`);
+    else if (byId.get(project.merged_into)!.merged_into) issues.push(`統合先がさらに統合されています（${targets.get(project.id)}として読み替えています）: 10_projects/${project.id}/project.md（merged_into: ${project.merged_into}）`);
+  }
+  return issues;
+}
+/** 統合済みのプロジェクトを対象にした操作。受付で理由付きに記録し、統合先で操作し直すよう示す。 */
+export class ProjectMergedError extends Error {
+  readonly reason: { code: 'project-merged'; project_id: string };
+  constructor(target: string) {
+    super(`このプロジェクトは${target}に統合されています。統合先で操作するか、先に統合を取り消してください`);
+    this.reason = { code: 'project-merged', project_id: target };
+  }
+}
+/** 統合済みなら、統合先を示して止める。 */
+export function assertNotMerged(projects: Project[], id: string): void {
+  const project = projects.find(p => p.id === id);
+  if (project?.merged_into) throw new ProjectMergedError(mergeTargets(projects).get(id) ?? project.merged_into);
 }
