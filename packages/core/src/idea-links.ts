@@ -101,7 +101,8 @@ export function latestDecisions(records: IdeaLink[]): Map<string, IdeaLink> {
   return latest;
 }
 
-export interface IdeaGroup { representative: string; ideas: string[] }
+/** linksは束をつないでいる、本人が束ねた組（直接の判断）。束から外すにはこの組を別の話にする。 */
+export interface IdeaGroup { representative: string; ideas: string[]; links: [string, string][] }
 export interface IdeaCandidate { ideas: [string, string]; score: number; hashes: [string, string] }
 export interface IdeaIndex {
   schema_version: 1; generated_at: string; threshold: number;
@@ -116,17 +117,18 @@ export interface IdeaIndex {
 export const ideaIndexSchema = z.object({
   schema_version: z.literal(1), generated_at: z.string().datetime({ offset: true }), threshold: z.number().min(0).max(1),
   candidates: z.array(z.object({ ideas: pairSchema, score: z.number().min(0).max(1), hashes: z.tuple([digest, digest]) }).strict()),
-  groups: z.array(z.object({ representative: ideaIdSchema, ideas: z.array(ideaIdSchema).min(2) }).strict()),
+  groups: z.array(z.object({ representative: ideaIdSchema, ideas: z.array(ideaIdSchema).min(2), links: z.array(pairSchema).min(1) }).strict()),
   total_candidates: z.number().int().min(0),
   summaries: z.record(ideaIdSchema, z.string()),
 }).strict();
 
 /** 束ねの判断から、今あるアイデアの束を組み立てる。 */
 export function ideaGroups(ideas: IdeaDoc[], decisions: Map<string, IdeaLink>): IdeaGroup[] {
-  const alive = new Map(ideas.map(i => [i.id, i])), parent = new Map<string, string>();
+  const alive = new Map(ideas.map(i => [i.id, i])), parent = new Map<string, string>(), linked: [string, string][] = [];
   const root = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; parent.set(x, r); return r; };
   for (const d of decisions.values()) {
     if (d.action !== 'link' || !alive.has(d.ideas[0]) || !alive.has(d.ideas[1])) continue;
+    linked.push([d.ideas[0], d.ideas[1]]);
     for (const id of d.ideas) if (!parent.has(id)) parent.set(id, id);
     const [a, b] = [root(d.ideas[0]), root(d.ideas[1])];
     if (a !== b) parent.set(a < b ? b : a, a < b ? a : b);
@@ -136,7 +138,8 @@ export function ideaGroups(ideas: IdeaDoc[], decisions: Map<string, IdeaLink>): 
   const newest = (a: IdeaDoc, b: IdeaDoc) => (Date.parse(b.occurredAt) || 0) - (Date.parse(a.occurredAt) || 0) || b.id.localeCompare(a.id);
   return [...members.values()].filter(m => m.length > 1).map(m => {
     const docs = m.map(id => alive.get(id)!).sort(newest);
-    return { representative: docs[0]!.id, ideas: docs.map(d => d.id) };
+    const set = new Set(m);
+    return { representative: docs[0]!.id, ideas: docs.map(d => d.id), links: linked.filter(([a]) => set.has(a)).sort((x, y) => x[0].localeCompare(y[0]) || x[1].localeCompare(y[1])) };
   }).sort((a, b) => newest(alive.get(a.representative)!, alive.get(b.representative)!));
 }
 

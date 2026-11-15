@@ -52,7 +52,7 @@ test('似ているアイデアをHOMEと索引に出し、アプリからの依�
   current = await index(vault);
   expect(current.candidates).toEqual([]);
   // 代表は元のメモが新しい方。
-  expect(current.groups).toEqual([{ representative: idea(1), ideas: [idea(1), idea(0)] }]);
+  expect(current.groups).toEqual([{ representative: idea(1), ideas: [idea(1), idea(0)], links: [[idea(0), idea(1)].sort()] }]);
   await rebuildDashboard(config);
   expect(await vault.read('HOME.md')).toContain('## 束ねたアイデア（1組）');
   const found = await find(config, '開発再開', { kinds: ['idea'] });
