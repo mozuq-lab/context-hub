@@ -1,4 +1,4 @@
-import {readPolicies,resolvePolicyProject,policyProjectFor,policyContext,policyUnavailable,secretSettings,redactText,projectIdSchema} from '@context-hub/core';
+import {readPolicies,resolvePolicyTarget,missingRootsWarning,policyProjectFor,policyContext,policyUnavailable,secretSettings,redactText,projectIdSchema} from '@context-hub/core';
 import { Type } from 'typebox';
 import type { HubDependencies, PluginApi, ToolResult } from './api.js';
 
@@ -112,11 +112,12 @@ export function registerHub(api: PluginApi, deps: HubDependencies): void {
     if(ctx.channel&&!allowed(ctx.channel,channelIdFromConversation(ctx.chatId??ctx.channelId),ctx.senderId,ctx.accountId))return;
     try{
       if(!ctx.workspaceDir)throw new Error('作業フォルダーがありません');
-      const hubConfig=await deps.loadConfig(config.configPath),mapped=await resolvePolicyProject(hubConfig,ctx.workspaceDir);
+      // 見つからない作業フォルダーの対応付けは外して件数を警告に添える（Claude Code・Codexのhookと同じ）。
+      const hubConfig=await deps.loadConfig(config.configPath),target=await resolvePolicyTarget(hubConfig,ctx.workspaceDir),mapped=target.projectId;
       // 統合済みのプロジェクトは、作業フォルダーの対応と同じく統合先の方針を使う。
       const bound=await policyProjectFor(hubConfig,binding.projectId);
       if(mapped&&bound&&mapped!==bound)throw new Error('project対応が競合しています');
-      const bundle=await readPolicies(hubConfig,bound??mapped),text=policyContext(bundle,secretSettings(hubConfig));
+      const read=await readPolicies(hubConfig,bound??mapped),bundle=target.missingRoots?{...read,warnings:[...read.warnings,missingRootsWarning(target.missingRoots)]}:read,text=policyContext(bundle,secretSettings(hubConfig));
       api.logger?.info(JSON.stringify({status:'ok',revision:bundle.revision,scope:bundle.projectId??'global',count:bundle.global.length+bundle.project.length}));
       return{prependContext:text};
     }catch{api.logger?.warn('context-hub: policy status=unavailable');return{prependContext:policyUnavailable+' このcontext追加hookだけでは実行停止を強制する保証はありません。'};}
