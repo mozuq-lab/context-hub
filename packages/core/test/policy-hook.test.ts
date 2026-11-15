@@ -24,5 +24,7 @@ test('作業フォルダー対応の1件が存在しなくても、無関係な�
  expect(mapped.status).toBe('ok');expect(mapped.bundle?.projectId).toBe('one');
  // 存在しない対応付けは警告として示す（パスは出さない）。
  expect(mapped.bundle?.warnings.join('\n')).toContain('見つからない作業フォルダー');expect(JSON.stringify(mapped.output)).not.toContain('消したリポジトリ');
- const {doctor}=await import('../src/doctor.js');expect((await doctor(f.config)).issues.join('\n')).toContain('作業フォルダーの対応付けが見つかりません');
+ // doctorでは、外付けを外しただけで異常（終了コード1）にしないよう、issuesではなく注意（notices）に示す。
+ const {doctor}=await import('../src/doctor.js'),checked=await doctor(f.config);
+ expect(checked.notices?.join('\n')).toContain('作業フォルダーの対応付けが見つかりません');expect(checked.issues.join('\n')).not.toContain('作業フォルダー');
 });
