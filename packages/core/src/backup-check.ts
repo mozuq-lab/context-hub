@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { createReadStream } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Vault, VAULT_DIRS, hash } from './storage.js';
 import { parseInput, readInputs } from './capture.js';
 import { readProjects } from './projects.js';
@@ -22,8 +22,10 @@ import type { HubConfig, Input } from './types.js';
  */
 export const backupCheckIdSchema = z.string().regex(/^BKC-[0-9A-HJKMNP-TV-Z]{26}$/);
 const counts = z.object({ files: z.number().int().min(0), inputs: z.number().int().min(0), projects: z.number().int().min(0), receipts: z.number().int().min(0) }).strict();
+/** 記録に残すアーカイブのファイル名（保存先のパスは残さない）。 */
+const archiveFileSchema = z.string().min(1).max(200).regex(/^[^/\\\p{Cc}]+$/u);
 export const backupCheckSchema = z.object({
-  schema_version: z.literal(1), id: backupCheckIdSchema, archive: z.string().min(1).max(200).regex(/^[^/\\\p{Cc}]+$/u),
+  schema_version: z.literal(1), id: backupCheckIdSchema, archive: archiveFileSchema,
   archive_created_at: z.string().datetime({ offset: true }), archive_bytes: z.number().int().min(0), checked_at: z.string().datetime({ offset: true }),
   status: z.enum(['ok', 'failed']),
   // 展開できた範囲の件数。展開の前に失敗した場合はnull。
@@ -40,8 +42,31 @@ const checkDir = '90_system/backup-checks';
 export const backupCheckPath = (id: string) => `${checkDir}/${id}.json`;
 /** 残す確認結果の件数。古いものから消す。 */
 const KEEP_CHECKS = 30;
-/** scripts/vault-backup.sh が作るアーカイブの名前。 */
-const archiveName = /^vault-\d{8}-\d{6}\.tar\.gz$/;
+/** scripts/vault-backup.sh が作るアーカイブの名前。名前の日時は、バックアップを作った端末の時刻。 */
+const archiveName = /^vault-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.tar\.gz$/;
+/** 指定のタイムゾーンでの年月日・時刻を時点へ直す。 */
+function zonedTime(parts: number[], timezone: string): number {
+  const [y, mo, d, h, mi, sec] = parts as [number, number, number, number, number, number], wall = Date.UTC(y, mo - 1, d, h, mi, sec);
+  const format = new Intl.DateTimeFormat('en-US', { timeZone: timezone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const offset = (t: number) => { const v = Object.fromEntries(format.formatToParts(new Date(t)).map(p => [p.type, Number(p.value)])); return Date.UTC(v.year!, v.month! - 1, v.day!, v.hour!, v.minute!, v.second!) - t; };
+  return wall - offset(wall - offset(wall));
+}
+/**
+ * バックアップを作った時刻。ふつうはファイルの更新時刻を使う。別の媒体から写し直したアーカイブは更新時刻が写した時刻になるため、
+ * 所定の名前の日時より1日以上新しい更新時刻は使わず、名前の日時（設定のタイムゾーンとして読む）を使う。
+ */
+export function archiveCreatedAt(name: string, mtimeMs: number, timezone: string): number {
+  const match = archiveName.exec(name);
+  if (!match) return mtimeMs;
+  const named = zonedTime(match.slice(1).map(Number), timezone);
+  return Number.isFinite(named) && mtimeMs - named > 26 * 3_600_000 ? named : mtimeMs;
+}
+/** 確かめた復元点。復元できた確認のうち、いちばん新しいバックアップ（同じなら後の確認）。古いアーカイブを後から確かめても、復元点は古くならない。 */
+export function restorePointOf(records: BackupCheck[]): BackupCheck | undefined {
+  let point: BackupCheck | undefined;
+  for (const r of records) if (r.status === 'ok' && (!point || Date.parse(r.archive_created_at) >= Date.parse(point.archive_created_at))) point = r;
+  return point;
+}
 const LIST_MAX = 50, TEXT_MAX = 300;
 const clipText = (text: string) => { const a = Array.from(text.replace(/[\r\n]+/g, ' ')); return a.length > TEXT_MAX ? a.slice(0, TEXT_MAX - 1).join('') + '…' : a.join(''); };
 
@@ -59,13 +84,13 @@ export async function readBackupChecks(vault: Vault): Promise<{ records: BackupC
 }
 
 export interface BackupStatus {
-  /** 最後の確認。 */ latest?: BackupCheck; /** 最後に復元できた確認（確かめた復元点）。 */ restorePoint?: BackupCheck;
+  /** 最後の確認。 */ latest?: BackupCheck; /** 復元できた確認のうち、いちばん新しいバックアップ（確かめた復元点）。 */ restorePoint?: BackupCheck;
   /** 復元点が何日前のバックアップか。 */ restorePointAgeDays?: number;
   /** 本人に知らせる注意。バックアップ先を設定していない間は、確認結果がある場合だけ示す。 */ warnings: string[];
 }
 const DAY = 86_400_000;
 export function backupStatus(config: HubConfig, records: BackupCheck[], now: Date = new Date()): BackupStatus {
-  const settings = backupSettings(config), latest = records.at(-1), restorePoint = records.filter(r => r.status === 'ok').at(-1), warnings: string[] = [];
+  const settings = backupSettings(config), latest = records.at(-1), restorePoint = restorePointOf(records), warnings: string[] = [];
   const age = restorePoint ? Math.max(0, Math.floor((now.getTime() - Date.parse(restorePoint.archive_created_at)) / DAY)) : undefined;
   if (latest?.status === 'failed') warnings.push(`最後の確認でバックアップ（${latest.archive}）から復元できませんでした（${latest.issues.length}件の問題）。\`ctx backup status\`で内容を確かめ、バックアップを取り直してください`);
   if (settings.dir !== null || records.length) {
@@ -98,7 +123,8 @@ const cstring = (field: Buffer) => { const end = field.indexOf(0); return field.
 function parseHeader(block: Buffer): TarHeader {
   let sum = 0; for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : block[i]!;
   if (sum !== parseOctal(block.subarray(148, 156))) throw new BackupArchiveError('アーカイブの見出しの検査値が一致しません');
-  const prefix = block.subarray(257, 262).toString('latin1') === 'ustar' ? cstring(block.subarray(345, 500)) : '';
+  // 名前の前半（prefix）はPOSIXのustar形式だけにある。GNU形式（magicが「ustar  」）では同じ場所を別の用途に使う。
+  const prefix = block.subarray(257, 263).toString('latin1') === 'ustar\0' ? cstring(block.subarray(345, 500)) : '';
   const name = cstring(block.subarray(0, 100));
   return { path: prefix ? `${prefix}/${name}` : name, size: parseOctal(block.subarray(124, 136)), type: String.fromCharCode(block[156] || 48) };
 }
@@ -182,15 +208,15 @@ export async function extractArchive(archive: string, dest: string, limits: Extr
         const path = nextPath ?? header.path; nextPath = undefined; nextSize = undefined;
         if (++entries > limits.maxFiles) throw new BackupArchiveError('アーカイブのエントリー数が上限を超えました');
         const where = target(path), name = path.split('/').filter(Boolean).at(-1) ?? '';
-        if (header.type === '5') { if (!where) reject(path, '展開先の外を指すパス'); else await ensureDir(where); current = { remaining: size, padding, kind: 'skip' }; }
+        if (header.type === '5') { if (!where) reject(path, '展開先の外を指すパス'); else await ensureDir(where).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOTDIR') throw error; reject(path, 'ファイルと同じ名前のフォルダー'); }); current = { remaining: size, padding, kind: 'skip' }; }
         else if (header.type === '0' || header.type === '7') {
           if (!where || where === dest) { reject(path, '展開先の外を指すパス'); current = { remaining: size, padding, kind: 'skip' }; }
           else if (name.startsWith('._')) { outcome.appleDouble++; current = { remaining: size, padding, kind: 'skip' }; }
           else {
-            await ensureDir(dirname(where));
-            // 同じパスが2回入っているアーカイブは、後のエントリーで上書きせずに報告する。
+            // 同じパスが2回入っているアーカイブは、後のエントリーで上書きせずに報告する。ファイルと同じ名前のフォルダーの中身も書かない。
             let handle: Awaited<ReturnType<typeof open>> | undefined;
-            try { handle = await open(where, 'wx', 0o600); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; reject(path, '同じパスが重複'); }
+            try { await ensureDir(dirname(where)); handle = await open(where, 'wx', 0o600); }
+            catch (error) { const code = (error as NodeJS.ErrnoException).code; if (code === 'EEXIST' || code === 'EISDIR') reject(path, '同じパスが重複'); else if (code === 'ENOTDIR') reject(path, 'ファイルと同じ名前のフォルダー'); else throw error; }
             if (handle) outcome.files++;
             current = { remaining: size, padding, kind: handle ? 'file' : 'skip', ...(handle ? { handle } : {}) };
           }
@@ -219,7 +245,7 @@ export async function latestArchive(dir: string): Promise<string | undefined> {
 }
 async function inside(parent: string, child: string): Promise<boolean> {
   const rel = relative(await realpath(parent), child);
-  return !rel || (!rel.startsWith('..') && !isAbsolute(rel));
+  return !rel || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel));
 }
 
 export interface BackupVerifyOptions { /** 確かめるアーカイブ。省略時は設定のバックアップ先でいちばん新しいもの。 */ archive?: string; /** 展開先の親。省略時はOSの一時フォルダー。 */ workDir?: string; /** 確認後も展開先を残す。 */ keep?: boolean; now?: Date }
@@ -235,15 +261,24 @@ export async function verifyBackup(config: HubConfig, options: BackupVerifyOptio
   if (!archive) throw new Error(options.archive || settings.dir ? '確かめるバックアップが見つかりません。バックアップ先とファイル名（vault-日付-時刻.tar.gz）を確認してください' : 'バックアップ先が設定されていません。設定のbackup.dirを指定するか、--archiveでアーカイブを指定してください');
   let info; try { info = await lstat(archive); } catch { throw new Error('確かめるバックアップを読めません'); }
   if (!info.isFile()) throw new Error('確かめるバックアップが通常のファイルではありません');
+  if (!archiveFileSchema.safeParse(basename(archive)).success) throw new Error('確かめるバックアップのファイル名を記録できません（200文字以内で、制御文字を含まない名前にしてください）');
+  const createdAt = archiveCreatedAt(basename(archive), info.mtimeMs, config.timezone);
   const vaultRoot = await realpath(resolve(config.vaultPath));
   const parent = await realpath(resolve(options.workDir ?? tmpdir()));
   if (await inside(vaultRoot, parent)) throw new Error('展開先はVaultの外に指定してください');
-  const work = await mkdtemp(join(parent, 'ctx-backup-verify-')), restoredRoot = join(work, 'vault');
+  // 現在のVaultを読めないときは、展開を始める前に止める（展開先を残さない）。
+  const liveInputs = await readInputs(config), liveProjects = await readProjects(config).catch(() => []);
+  // 前回の確認が途中で止まって残った展開先（1日以上前のもの）を片付ける。本人が--keepで残したものは別の名前なので消さない。
+  for (const name of await readdir(parent).catch(() => [] as string[])) {
+    if (!/^ctx-backup-verify-[A-Za-z0-9]{6}$/.test(name)) continue;
+    const stale = join(parent, name);
+    try { const s = await lstat(stale); if (s.isDirectory() && now.getTime() - s.mtimeMs > DAY) await rm(stale, { recursive: true, force: true }); } catch { /* 片付けられない残骸は、確認を止める理由にしない。 */ }
+  }
+  let work = await mkdtemp(join(parent, 'ctx-backup-verify-')), restoredRoot = join(work, 'vault');
   const issues: string[] = [], notes: string[] = [];
   const issue = (text: string) => { if (issues.length < LIST_MAX) issues.push(clipText(text)); };
   const note = (text: string) => { if (notes.length < LIST_MAX) notes.push(clipText(text)); };
   let restored: BackupCheck['restored'] = null;
-  const liveInputs = await readInputs(config), liveProjects = await readProjects(config).catch(() => []);
   try {
     await mkdir(restoredRoot, { mode: 0o700 });
     let extracted: ExtractOutcome | undefined;
@@ -275,24 +310,30 @@ export async function verifyBackup(config: HubConfig, options: BackupVerifyOptio
       if (changed) issue(`バックアップと現在のVaultで内容が違う原文が${changed}件あります`);
       if (missing) issue(`バックアップにあって現在のVaultにない原文が${missing}件あります`);
       // バックアップを作るより前（余裕を10分みる）に受け取った原文は、バックアップに入っているはず。
-      const have = new Set(inputs.map(i => i.id)), before = info.mtimeMs - 10 * 60_000;
+      const have = new Set(inputs.map(i => i.id)), before = createdAt - 10 * 60_000;
       const absent = liveInputs.filter(i => Date.parse(i.received_at) < before && !have.has(i.id)).length;
       if (absent) issue(`バックアップより前に受け取った原文が${absent}件入っていません`);
-      if (!inputs.length && liveInputs.length) issue('バックアップに原文が1件も入っていません');
       // 復元先でのdoctorは参考として残す。現在のVaultにも同じ指摘があれば、バックアップの問題ではない。
       try { const result = await doctor(copy); if (result.issues.length) { note(`復元先でのdoctorの指摘: ${result.issues.length}件（現在のVaultにも同じ指摘があれば、バックアップの問題ではありません）`); for (const text of result.issues.slice(0, 10)) note(`doctor: ${text}`); } }
       catch { note('復元先でdoctorを実行できませんでした'); }
     }
-  } finally { if (!options.keep) await rm(work, { recursive: true, force: true }); }
+  } finally {
+    if (!options.keep) await rm(work, { recursive: true, force: true });
+    else {
+      // 残す展開先は、次の確認の片付けで消えない名前にする。
+      const kept = join(parent, basename(work).replace('ctx-backup-verify-', 'ctx-backup-restored-'));
+      try { await rename(work, kept); work = kept; restoredRoot = join(work, 'vault'); } catch { /* 名前を変えられなければ、そのまま残す。 */ }
+    }
+  }
   const check: BackupCheck = backupCheckSchema.parse({
-    schema_version: 1, id: `BKC-${ulid()}`, archive: basename(archive), archive_created_at: new Date(info.mtimeMs).toISOString(), archive_bytes: info.size, checked_at: now.toISOString(),
+    schema_version: 1, id: `BKC-${ulid()}`, archive: basename(archive), archive_created_at: new Date(createdAt).toISOString(), archive_bytes: info.size, checked_at: now.toISOString(),
     status: issues.length ? 'failed' : 'ok', restored, live: { inputs: liveInputs.length, projects: liveProjects.length }, verify_max_age_days: backupSettings(config).verifyMaxAgeDays, issues, notes,
   });
   await vault.withLock(async () => {
     if (!await vault.create(backupCheckPath(check.id), JSON.stringify(check, null, 2) + '\n')) throw new Error('確認結果の記録が競合しました');
     const { records } = await readBackupChecks(vault);
-    // 最後に復元できた確認は、古くても残す（確かめた復元点として示すため）。
-    const lastOk = records.filter(r => r.status === 'ok').at(-1)?.id;
+    // 確かめた復元点の確認は、古くても残す。
+    const lastOk = restorePointOf(records)?.id;
     for (const old of records.slice(0, Math.max(0, records.length - KEEP_CHECKS))) if (old.id !== lastOk) await vault.remove(backupCheckPath(old.id));
   });
   return { check, ...(options.keep ? { restoredTo: restoredRoot } : {}) };

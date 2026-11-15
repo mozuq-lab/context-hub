@@ -93,16 +93,18 @@ test('CLIでバックアップを確かめると結果を記録し、復元で�
  await cli(config,['init']);expect((await cli(config,['add','--occurred-at','2026-10-30T00:00:00Z'],'バックアップを確かめるメモ\n')).code).toBe(0);
  // バックアップがまだない間は、確かめられないことを失敗として返す。
  const none=await cli(config,['backup','verify']);expect(none.code).not.toBe(0);
- const archive=join(backups,'vault-20261101-033000.tar.gz');
+ // 実際のバックアップと同じく、名前の日時（日本時間）と作った時刻をそろえる。
+ const stamp=(hoursAgo:number)=>{const local=new Date(Date.now()+(9-hoursAgo)*3_600_000).toISOString();return `vault-${local.slice(0,10).replaceAll('-','')}-${local.slice(11,19).replaceAll(':','')}.tar.gz`;};
+ const name=stamp(1),archive=join(backups,name);
  expect(spawnSync('tar',['-czf',archive,'-C',join(root,'vault'),'.']).status).toBe(0);
  const verified=await cli(config,['backup','verify']);expect(verified.code).toBe(0);
  const result=JSON.parse(verified.out) as {check:{status:string;archive:string;restored:{inputs:number}}};
- expect(result.check).toMatchObject({status:'ok',archive:'vault-20261101-033000.tar.gz',restored:{inputs:1}});
+ expect(result.check).toMatchObject({status:'ok',archive:name,restored:{inputs:1}});
  expect(await readFile(join(root,'vault/HOME.md'),'utf8')).toContain('最後に確かめた復元点: ');
  const status=JSON.parse((await cli(config,['backup','status'])).out) as {restore_point:{archive:string}|null;warnings:string[]};
- expect(status.restore_point?.archive).toBe('vault-20261101-033000.tar.gz');expect(status.warnings).toEqual([]);
+ expect(status.restore_point?.archive).toBe(name);expect(status.warnings).toEqual([]);
  // 途中で切れたアーカイブは復元できないと記録し、終了コードで知らせる。確かめた復元点は残す。
- const broken=join(backups,'vault-20261102-033000.tar.gz');await writeFile(broken,(await readFile(archive)).subarray(0,200));
+ const broken=join(backups,stamp(0));await writeFile(broken,(await readFile(archive)).subarray(0,200));
  const failed=await cli(config,['backup','verify']);expect(failed.code).toBe(1);expect(JSON.parse(failed.out).check.status).toBe('failed');
- expect(JSON.parse((await cli(config,['backup','status'])).out).restore_point.archive).toBe('vault-20261101-033000.tar.gz');
+ expect(JSON.parse((await cli(config,['backup','status'])).out).restore_point.archive).toBe(name);
 },30000);

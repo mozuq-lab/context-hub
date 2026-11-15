@@ -59,12 +59,17 @@ export function rereadResolutionIds(exclusions: ItemResolution[], root: { id: st
   const since = Date.parse(organizedAt);
   return exclusions.filter(r => r.input_id === root.id && Date.parse(r.created_at) >= since && (r.reason === 'misread' || (r.reason === 'wrong-project' && r.project_id !== root.project))).map(r => r.id);
 }
-/** この有効解釈に今も重ねる読み直し。訂正待ちの間は、訂正を含めた整理を待つため重ねない。 */
+/**
+ * この有効解釈に今も重ねる読み直し。訂正待ちの間は、訂正を含めた整理を待つため重ねない。
+ * 読み直しのもとになった「外す」記録がすべて今も有効なら重ねる。その後に外す記録が増えた場合（読み直した項目をさらに外したときなど）も、
+ * 次の読み直しが保存されるまでは今の読み直しを重ねたままにする。もとになった記録が1つでも戻されたら重ねない。
+ */
 export function appliedReread(overlays: ExclusionOverlays, unit: EffectiveInput): Reread | undefined {
   const { chain, receipt, pendingCorrection } = unit, record = overlays.rereads.get(chain.root.id);
   if (!record || record.status !== 'reread' || pendingCorrection || !receipt?.result || receipt.input_id !== chain.latest.id) return undefined;
   if (record.latest_input_id !== chain.latest.id || record.evidence_hash !== chain.evidenceHash || record.receipt_organized_at !== receipt.organized_at) return undefined;
-  return isDeepStrictEqual(record.resolution_ids, rereadResolutionIds(overlays.exclusions, chain.root, receipt.organized_at)) ? record : undefined;
+  const wanted = new Set(rereadResolutionIds(overlays.exclusions, chain.root, receipt.organized_at));
+  return record.resolution_ids.every(id => wanted.has(id)) ? record : undefined;
 }
 /**
  * 処理記録の結果へ読み直しを重ねる。アイデアとして保存した入力は、アイデアの本文（要約）と食い違わないよう分類と要約を変えない。
@@ -78,13 +83,13 @@ export function overlayReread(result: OrganizeResult, reread: RereadResult): Org
 const EXCLUDED_OWN_MAX = 10, EXCLUDED_OTHERS_MAX = 10, EXCLUDED_TEXT_CHARS = 200;
 /**
  * 整理・読み直しのときにモデルへ見せる、本人が誤りとして外した項目。
- * この入力から外された項目はすべて、ほかの入力の例は読み違いと「別のプロジェクトの話」だけを新しい順に見せる。
+ * この入力から外された項目はすべての理由を、ほかの入力の例は読み違いと「別のプロジェクトの話」だけを、それぞれ新しい順に見せる。
  * 本人がプロジェクトを指定した入力にはそのプロジェクトの例だけ、指定のない入力には帰属候補として示すプロジェクトの例を見せる。
  */
 export function excludedRefsFor(exclusions: ItemResolution[], root: { id: string; project?: string }, offeredProjectIds: string[]): ExcludedItemRef[] {
   const ref = (own: boolean) => (r: ItemResolution): ExcludedItemRef => ({ project: r.project_id, section: r.section, reason: r.reason!, text: r.text.slice(0, EXCLUDED_TEXT_CHARS), ...(r.note ? { note: r.note } : {}), own });
   const scope = new Set(root.project ? [root.project] : offeredProjectIds);
-  const own = exclusions.filter(r => r.input_id === root.id && r.reason).slice(-EXCLUDED_OWN_MAX);
+  const own = exclusions.filter(r => r.input_id === root.id && r.reason).slice(-EXCLUDED_OWN_MAX).reverse();
   const others = exclusions.filter(r => r.input_id !== root.id && scope.has(r.project_id) && (r.reason === 'misread' || r.reason === 'wrong-project')).slice(-EXCLUDED_OTHERS_MAX).reverse();
   return [...own.map(ref(true)), ...others.map(ref(false))];
 }
@@ -94,7 +99,7 @@ export function wrongProjectsFor(overlays: Pick<ExclusionOverlays, 'wrongProject
 }
 
 /** ロック内で確定した読み直しの対象。モデル呼び出しはロック外で行い、確定時に同じ根拠・定義・方針・外す記録かを再検査する。 */
-export interface RereadPlan { effective: EffectiveInput; projects: Project[]; snapshot: string; record: Reread; policyText: string; policyRevision: string; excludedItems: ExcludedItemRef[]; wrongProjects: Set<string> }
+export interface RereadPlan { effective: EffectiveInput; projects: Project[]; snapshot: string; record: Reread; policyText: string; policyRevision: string; excludedItems: ExcludedItemRef[]; wrongProjects: Set<string>; /** 前の読み直しの記録を置き換える（失敗したときも、表示を元の読み方へ作り直す）。 */ replaces: boolean }
 /**
  * 読み直しが要るかを決める。'recover'は、読み直しを保存した後のNOWの作り直しが途中で止まっているもの。
  * 失敗した読み直しは、同じ「外す」記録の組に対しては --retry-failed のときだけ、上限回数まで試す。
@@ -114,7 +119,7 @@ export async function prepareRereadLocked(config: HubConfig, effective: Effectiv
     schema_version: 1, input_id: chain.root.id, latest_input_id: chain.latest.id, evidence_hash: chain.evidenceHash, receipt_organized_at: receipt.organized_at, resolution_ids: ids,
     status: 'reread', attempts: (bound?.attempts ?? 0) + 1, result: null, error: null, reread_at: new Date().toISOString(), model: config.organize.llm.model ?? (config.organize.llm.provider === 'mock' ? 'mock' : 'inherited-unverified'), views_complete: false,
   };
-  return { effective, projects, snapshot: JSON.stringify(projects), record, policyText: formatPolicies(policies), policyRevision: policies.revision, excludedItems: excludedRefsFor(overlays.exclusions, chain.root, offered), wrongProjects };
+  return { effective, projects, snapshot: JSON.stringify(projects), record, policyText: formatPolicies(policies), policyRevision: policies.revision, excludedItems: excludedRefsFor(overlays.exclusions, chain.root, offered), wrongProjects, replaces: existing?.status === 'reread' };
 }
 async function receiptOrganizedAt(vault: Vault, id: string): Promise<string | undefined> {
   const raw = await vault.read(`90_system/receipts/${id}.json`);

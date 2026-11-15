@@ -10,7 +10,7 @@ import { saveProjectCandidateLocked,recoverProjectApprovalsLocked } from './proj
 import { applyAssociations,associationEligible,associationViewsComplete,markAssociationViewsCompleteLocked,readAssociation,projectRegistryHash,prepareAssociationLocked,runAssociation,commitAssociationLocked,type AssociationPlan } from './associations.js';
 import { buildOrganizePrompt, groundExtractedHistory, groundResolutionHints, InvalidOrganizeOutput, validateOrganizeResult, type ExcludedItemRef, type OpenItemRef } from './llm.js';
 import { readNowItems } from './item-resolutions.js';
-import { commitRereadLocked, excludedRefsFor, markRereadViewsCompleteLocked, prepareRereadLocked, readExclusionOverlays, wrongProjectsFor, type ExclusionOverlays, type Reread, type RereadPlan } from './item-rereads.js';
+import { commitRereadLocked, excludedRefsFor, markRereadViewsCompleteLocked, prepareRereadLocked, readExclusionOverlays, type ExclusionOverlays, type Reread, type RereadPlan } from './item-rereads.js';
 import { hash,parseMarkdown,Vault } from './storage.js';
 import { associatedProjects, dateLabel, generatedMarkdown, readReceipts, receiptSchema, rebuildNowLocked, writeGeneratedLocked } from './views.js';
 import type { HubConfig, Input, LlmClient, LlmCompletion, OrganizeResult, Project, Receipt } from './types.js';
@@ -41,7 +41,7 @@ async function classify(config: HubConfig, llm: LlmClient, input: Input, project
   if (input.text.length > config.capture.maxInputChars) throw new InvalidOrganizeOutput();
   // 休止・完了のプロジェクトは帰属候補として提示しない。人が明示したプロジェクトは残す。
   // 方針の本文などから休止中のIDが返っても整理全体を失敗にしないよう、検証は全プロジェクトに対して行う。
-  // 本人が「別のプロジェクトの話」として外したプロジェクトは提示せず、返ってきても帰属候補にしない。
+  // 読み直しでは、本人が「別のプロジェクトの話」として外したプロジェクトを提示せず、返ってきても帰属候補にしない。
   const offered = candidateProjects(projects, chain.root.project ?? input.project).filter(p => !excluded.wrongProjects.has(p.id));
   // モデルは伏せ字にした本文を見る。作業要約のラベルとの照合も、モデルが見たのと同じ伏せ字の本文で行う。
   const settings = secretSettings(config), hide = <T extends Input>(i: T): T => ({ ...i, text: redactText(i.text, settings).text });
@@ -120,12 +120,14 @@ async function loadState(config: HubConfig): Promise<OrganizeState> {
 }
 /** ロック内で確定した整理対象。新規はロック外でモデルを呼び、journalがあれば呼ばずに確定する。 */
 interface OrganizePlan { chain: CorrectionChain; input: Input; projects: Project[]; registry: string; receipt: Receipt; resumed: boolean; policyText: string; policyRevision?: string; openItems: OpenItemRef[]; excluded: ExclusionContext }
-/** 本人の「誤りとして外す」記録から、この入力の整理でモデルへ渡す資料を選ぶ。記録を読めないときは資料なしで整理を続ける。 */
+/**
+ * 本人の「誤りとして外す」記録から、この入力の整理でモデルへ渡す資料を選ぶ。記録を読めないときは資料なしで整理を続ける。
+ * 処理記録は書き換えられないので、「別のプロジェクトの話」として外したプロジェクトも帰属候補から除かずに記録する
+ * （除くのは読むとき。外す記録を戻せば、訂正を整理した後でも関連が戻る）。モデルには、外した項目の例として伝わる。
+ */
 function exclusionContext(overlays: ExclusionOverlays | undefined, chain: CorrectionChain, projects: Project[]): ExclusionContext {
   if (!overlays?.exclusions.length) return noExclusions;
-  const wrongProjects = wrongProjectsFor(overlays, chain.root);
-  const offered = candidateProjects(projects, chain.root.project).filter(p => !wrongProjects.has(p.id)).map(p => p.id);
-  return { items: excludedRefsFor(overlays.exclusions, chain.root, offered), wrongProjects };
+  return { items: excludedRefsFor(overlays.exclusions, chain.root, candidateProjects(projects, chain.root.project).map(p => p.id)), wrongProjects: new Set() };
 }
 async function policyRevision(config: HubConfig, projectId: string | undefined): Promise<string | undefined> {
   try { return (await readPolicies(config, projectId)).revision; } catch { return undefined; }
@@ -332,7 +334,8 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         const result = await commitRereadLocked(config, vault, plan, record, { inboxUnchanged: state.key === rereads.key });
         // 対象外になった入力は次回の実行に任せる。
         if (!result) return;
-        if (result.status === 'failed') { outcome.failed++; return; }
+        // 失敗の記録が前の読み直しを置き換えたときは、前の読み直しを重ねていたNOWを元の読み方へ作り直す。
+        if (result.status === 'failed') { outcome.failed++; if (plan.replaces) await rebuildAffected(state, outcome, chain, [...state.byId.values()], result.reread_at); return; }
         outcome.processed++; outcome.reread = (outcome.reread ?? 0) + 1;
         await rebuildAffected(state, outcome, chain, [...state.byId.values()], result.reread_at);
         await markRereadViewsCompleteLocked(vault, result);

@@ -151,18 +151,19 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
       if (item.status === 'confirmed' && !latestTexts.has(item.text)) open.push(...entry('open', item.text, old.input, '過去の報告との差異（矛盾・時点差は未確認）: '));
     }
   }
-  // 外したことでNOWの根拠から消えた項目も、戻せるように一覧へ残す。
-  // 「別のプロジェクトの話」としてメモごとこのプロジェクトから外れた場合と、読み直しで項目の本文が変わった場合が当たる。
-  // 新しい作業要約に置き換わって自然に外れた項目は載せない。
+  // 外した後にNOWの根拠から消えた項目も、戻せるように一覧へ残す。「別のプロジェクトの話」としてメモごとこのプロジェクトから外れた場合、
+  // 読み直しで項目の本文が変わった場合、読み直した項目をさらに外して次の読み直しを待っている場合、訂正の整理で項目が変わった場合が当たる。
+  // 新しい作業要約に置き換わって自然に外れた次の一手は載せない（完了・解決の報告と同じ）。
   const overlays = await readExclusionOverlays(vault);
   for (const r of resolved.values()) {
     if (r.action !== 'exclude' || !r.reason || items.has(r.item_key)) continue;
     const unit = units.find(u => u.chain.root.id === r.input_id), input = unit?.chain.root;
     if (!unit || !input) continue;
-    const detached = input.project !== projectId && overlays.wrongProjects.get(input.id)?.has(projectId) === true, reread = appliedReread(overlays, unit)?.resolution_ids.includes(r.id);
-    if (!detached && !reread) continue;
+    const detached = input.project !== projectId && overlays.wrongProjects.get(input.id)?.has(projectId) === true;
+    if (!detached && r.section === 'next' && latest && latest.input.id !== input.id) continue;
+    const reread = appliedReread(overlays, unit)?.resolution_ids.includes(r.id);
     items.set(r.item_key, { key: r.item_key, section: r.section, label: '', text: r.text, input_id: r.input_id, resolution: { id: r.id, at: r.created_at, source: r.source, action: 'exclude', reason: r.reason, ...(r.note ? { note: r.note } : {}) }, schedule: null });
-    excluded.push(`- ${r.section === 'next' ? '次の一手: ' : '未解決: '}${plain(r.text)} ${ref(input)} — 理由: ${exclusionReasonLabels[r.reason]}${r.note ? `（${plain(r.note)}）` : ''} / 本人報告 ${dateLabel(r.created_at, config.timezone)} ${r.id}${detached ? ' / このメモはこのプロジェクトから外しています' : ' / メモを読み直しました'}`);
+    excluded.push(`- ${r.section === 'next' ? '次の一手: ' : '未解決: '}${plain(r.text)} ${ref(input)} — 理由: ${exclusionReasonLabels[r.reason]}${r.note ? `（${plain(r.note)}）` : ''} / 本人報告 ${dateLabel(r.created_at, config.timezone)} ${r.id}${detached ? ' / このメモはこのプロジェクトから外しています' : reread ? ' / メモを読み直しました' : ' / いまの整理結果にはない項目です'}`);
   }
   const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
   for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after }; }

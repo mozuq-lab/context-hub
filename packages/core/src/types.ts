@@ -13,9 +13,9 @@ export interface HubConfig {
   logging: { dir: string; retentionDays: number };
   /** 作業記録の下書きに使うローカルリポジトリ。本人が設定したものだけを読み取り専用で参照する。 */
   git: { enabled: boolean; repos: { projectId: string; path: string; name?: string }[]; maxCommits: number; lookbackDays: number };
-  /** 秘密情報らしい文字列（APIキー・トークン・パスワード等）を、モデルへ渡す前と別AI向けのcontextで伏せる。原文は変えない。 */
   /** バックアップから復元できるかの確認。dirは scripts/vault-backup.sh の保存先（Vaultの外）。確かめた復元点がverifyMaxAgeDaysより古いとHOMEで知らせる。 */
   backup?: { dir: string | null; verifyMaxAgeDays: number };
+  /** 秘密情報らしい文字列（APIキー・トークン・パスワード等）を、モデルへ渡す前と別AI向けのcontextで伏せる。原文は変えない。 */
   privacy?: { redactSecrets: boolean; /** 追加の検出規則。labelは伏せ字に出す種類名、patternはJavaScriptの正規表現。 */ patterns: { label: string; pattern: string }[] };
 }
 

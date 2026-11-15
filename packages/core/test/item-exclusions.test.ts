@@ -192,6 +192,67 @@ test('「読み違い」で外したメモを理由と一言を添えて読み�
   const corrected = new RecordingLlm();
   expect(await organize(config, corrected)).toMatchObject({ processed: 1 });
   expect(dataOf(corrected.prompts[0]!).excluded_items).toMatchObject([{ own: true, reason: 'misread' }]);
+  // 訂正で本文が変わって元の項目がなくなっても、外した記録は一覧に残り、未解決へ戻して片付けられる。
+  const text3 = await now(config);
+  expect(section(text3, '未解決')).toContain(`${text}（追記）`);
+  expect(section(text3, '誤りとして外した項目（本人報告）')).toContain('いまの整理結果にはない項目です');
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === key)).toMatchObject({ resolution: { action: 'exclude' } });
+  await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'reopen', source: 'cli' });
+  expect(await now(config)).not.toContain('# 誤りとして外した項目（本人報告）');
+  expect((await readNowItems(vault, 'hub'))!.items.map(i => i.text)).toEqual([`${text}（追記）`]);
+});
+
+test('読み直した項目をさらに外しても、次の読み直しまで今の読み直しを使い、外した項目はどちらも戻せる', async () => {
+  const { config, vault, inputId, text } = await memoFixture();
+  const first = (await readNowItems(vault, 'hub'))!.items[0]!.key;
+  await setItemResolution(config, { projectId: 'hub', itemKey: first, action: 'exclude', reason: 'misread', source: 'cli' });
+  // 読み直しで、未解決の本文が変わる。
+  const reworded = '配布の経路を決めたい';
+  const rereadResult = { category: 'question', summary: reworded, project_candidates: [{ id: 'hub', confidence: 0.9 }], next_action_suggestions: [], extracted: { current: [], next: [], open: [] }, knowledge_candidate: null, new_project_hint: null };
+  expect(await organize(config, new MockLlm([rereadResult as never]))).toMatchObject({ reread: 1 });
+  expect(section(await now(config), '未解決')).toContain(reworded);
+  const second = (await readNowItems(vault, 'hub'))!.items.find(i => i.text === reworded)!.key;
+  // 読み直した項目も読み違いだった。次の読み直しを待つ間も、元の読み方へは戻さない。
+  await setItemResolution(config, { projectId: 'hub', itemKey: second, action: 'exclude', reason: 'misread', note: 'まだ決める段階ではない', source: 'cli' });
+  let view = await now(config);
+  expect(section(view, '未解決')).not.toContain(reworded);
+  expect(section(view, '未解決')).not.toContain(text);
+  expect(section(view, '誤りとして外した項目（本人報告）')).toContain(`- 未解決: ${reworded} `);
+  expect(section(view, '誤りとして外した項目（本人報告）')).toContain(`- 未解決: ${text} `);
+  expect((await readNowItems(vault, 'hub'))!.items.map(i => [i.key, i.resolution?.action])).toEqual(expect.arrayContaining([[first, 'exclude'], [second, 'exclude']]));
+  // 2件目を戻すと、読み直した本文の項目が欄へ戻る。
+  await setItemResolution(config, { projectId: 'hub', itemKey: second, action: 'reopen', source: 'cli' });
+  expect(section(await now(config), '未解決')).toContain(reworded);
+  await setItemResolution(config, { projectId: 'hub', itemKey: second, action: 'exclude', reason: 'misread', source: 'cli' });
+  // 次の読み直しに失敗しても、外した2件はどちらも一覧に残り、戻せる。
+  expect(await organize(config, new RecordingLlm(1))).toMatchObject({ failed: 1 });
+  view = await now(config);
+  expect(section(view, '未解決')).not.toContain(text);
+  expect(section(view, '誤りとして外した項目（本人報告）')).toContain('いまの整理結果にはない項目です');
+  expect((await readNowItems(vault, 'hub'))!.items.map(i => i.key).sort()).toEqual([first, second].sort());
+  await setItemResolution(config, { projectId: 'hub', itemKey: second, action: 'reopen', source: 'cli' });
+  // 1件目だけが有効に戻ったので、1件目の読み直しをやり直す。
+  expect(await organize(config, new MockLlm([rereadResult as never]))).toMatchObject({ reread: 1 });
+  expect(section(await now(config), '未解決')).toContain(reworded);
+  expect((await readRereads(vault)).records.get(inputId)).toMatchObject({ status: 'reread' });
+  expect((await doctor(config)).issues).toEqual([]);
+});
+
+test('「別のプロジェクトの話」で外した後に訂正を整理しても、処理記録には関連候補を残し、未解決へ戻すとメモが戻る', async () => {
+  const { config, vault, inputId, text } = await memoFixture();
+  const key = (await readNowItems(vault, 'hub'))!.items[0]!.key;
+  await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'exclude', reason: 'wrong-project', source: 'cli' });
+  expect(await organize(config, new MockLlm())).toMatchObject({ reread: 1 });
+  const corrected = `${text}（集約ツールの話）`;
+  const correction = await correctInput(config, inputId, { text: corrected, source: 'cli', occurredAt: '2026-10-31T00:00:00Z' });
+  expect(await organize(config, new MockLlm())).toMatchObject({ processed: 1 });
+  // 処理記録はモデルの関連候補をそのまま持つ。外した記録が有効な間は、読むときに除く。
+  expect(JSON.parse((await vault.read(`90_system/receipts/${correction.inputId}.json`))!).result.project_candidates).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'hub' })]));
+  expect(await find(config, '配布', { project: 'hub' })).not.toContain(`- [${inputId}]`);
+  expect(section(await now(config), '誤りとして外した項目（本人報告）')).toContain('このメモはこのプロジェクトから外しています');
+  await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'reopen', source: 'cli' });
+  expect(section(await now(config), '未解決')).toContain(corrected);
+  expect(await find(config, '配布', { project: 'hub' })).toContain(`- [${inputId}]`);
 });
 
 test('読み直しに失敗しても外した項目は外れたままで、HOMEに示し --retry-failed で再試行する', async () => {

@@ -144,7 +144,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 本人が誤りとして外した項目のメモの読み直しに失敗したもの。外した項目は外れたままで、読み直しだけを再試行できる。
   try{
    const overlays=await readExclusionOverlays(vault);
-   for(const unit of effective){const r=overlays.rereads.get(unit.chain.root.id);if(r?.status==='failed'&&unit.receipt&&r.receipt_organized_at===unit.receipt.organized_at&&isDeepStrictEqual(r.resolution_ids,rereadResolutionIds(overlays.exclusions,unit.chain.root,unit.receipt.organized_at)))errors.push(`- [誤りとして外した項目のメモを読み直せませんでした](${unit.chain.root.path}): ${unit.chain.root.id} — 外した項目はNOWから外れたままです。\`ctx cycle --retry-failed\`で読み直しを再試行します（${r.attempts}回失敗）`);}
+   for(const unit of effective){const r=overlays.rereads.get(unit.chain.root.id);if(r?.status==='failed'&&unit.receipt&&r.receipt_organized_at===unit.receipt.organized_at&&isDeepStrictEqual(r.resolution_ids,rereadResolutionIds(overlays.exclusions,unit.chain.root,unit.receipt.organized_at)))errors.push(`- [誤りとして外した項目のメモを読み直せませんでした](${unit.chain.root.path}): ${unit.chain.root.id} — 外した項目はNOWから外れたままです。${r.attempts<config.organize.maxAttempts?`\`ctx cycle --retry-failed\`で読み直しを再試行します（${r.attempts}回失敗）`:`再試行の上限（${r.attempts}回）に達しました。メモを訂正するか、項目を未解決に戻してから外し直すと、もう一度読み直します`}`);}
    for(const path of overlays.problems)errors.push(`- [読み直しの記録が不正です](${path})`);
   }catch{errors.push('- 完了・解決・誤りとして外した記録を読めません（`ctx doctor`で確認してください）');}
   for(const p of gitProblems)errors.push(`- 作業記録の下書き（${plain(p.projectId)} / ${plain(p.repo)}）: ${plain(p.error)}`);
