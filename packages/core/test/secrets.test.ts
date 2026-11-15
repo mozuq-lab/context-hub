@@ -5,7 +5,7 @@ import { addProject } from '../src/projects.js';
 import { capture } from '../src/capture.js';
 import { organize } from '../src/organize.js';
 import { MockLlm } from '../src/llm.js';
-import { context } from '../src/retrieve.js';
+import { bundle, context } from '../src/retrieve.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { doctor } from '../src/doctor.js';
 import { validateConfig } from '../src/config.js';
@@ -129,6 +129,12 @@ test('別AI向けのcontext、HOME、doctorでは値を出さない', async () =
   expect(text).not.toContain('s3cr3tPass');
   expect(text).toContain('[伏せ字:パスワード]');
   expect(text).toContain('秘密情報らしい文字列は[伏せ字:種類]に置き換えています');
+  // 選んだ記録を束ねた資料（bundle）でも同じ。
+  const picked = await bundle(config, [memo.inputId, 'hub'], 20000);
+  expect(picked).not.toContain(KEY);
+  expect(picked).not.toContain('s3cr3tPass');
+  expect(picked).toContain('[伏せ字:APIキー]');
+  expect(picked).toContain('秘密情報らしい文字列は[伏せ字:種類]に置き換えています');
   await rebuildDashboard(config);
   const home = (await vault.read('HOME.md'))!;
   expect(home).toContain('## 秘密情報らしい文字列を含むメモ（1件）');

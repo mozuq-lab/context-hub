@@ -9,6 +9,8 @@ import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
 import { activeResolutions, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
+import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
+import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import type { HubConfig, Input, Receipt } from './types.js';
 
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -95,14 +97,17 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${dateLabel(input.occurred_at, config.timezone)} ${config.timezone} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${evidence.find(e=>e.input.id===input.id)?.notice ? ' '+evidence.find(e=>e.input.id===input.id)!.notice.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
-  const resolved = activeResolutions(await readItemResolutions(vault), projectId), items = new Map<string, NowItem>(), done: string[] = [];
+  const resolutionRecords = await readItemResolutions(vault), resolved = activeResolutions(resolutionRecords, projectId), items = new Map<string, NowItem>(), done: string[] = [];
+  // 本人が付けた期日・見直す日は行の末尾に示す（出典より後ろに置き、項目との照合に使う行頭は変えない）。
+  // 引き継ぎは項目がそろってから決まるため、行には項目キーの印を付けておき、最後に日付へ置き換える。
+  const mark = '\u0000';
   const entry = (section: ItemSection, text: string, input: Input, label = ''): string[] => {
     const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key);
     if (!items.has(key)) {
-      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null });
+      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null, schedule: null });
       if (resolution) done.push(`- ${section === 'next' ? '完了' : '解決'}: ${label}${plain(text)} ${ref(input)} — 本人報告 ${dateLabel(resolution.created_at, config.timezone)} ${resolution.id}`);
     }
-    return resolution ? [] : [row(text, input, label)];
+    return resolution ? [] : [`${row(text, input, label)}${mark}${key}`];
   };
   const current = latest?.result.extracted.current.filter((item) => item.status === 'confirmed').map((item) => row(item.text, latest.input)) ?? [];
   const next = latest?.result.extracted.next.filter((item) => item.status === 'confirmed').flatMap((item) => entry('next', item.text, latest.input)) ?? [];
@@ -124,8 +129,35 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
       if (item.status === 'confirmed' && !latestTexts.has(item.text)) open.push(...entry('open', item.text, old.input, '過去の報告との差異（矛盾・時点差は未確認）: '));
     }
   }
+  const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
+  for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after }; }
+  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key); return s ? ` — ${scheduleLabel(s)}` : ''; }));
+  next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
+  // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
+  // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。
+  const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId).map(d => dismissalKey(d.project_id, d.item_key, d.input_id)));
+  const reopenedAt = new Map<string, number>();
+  for (const r of resolutionRecords) if (r.project_id === projectId && r.action === 'reopen') reopenedAt.set(r.item_key, Math.max(reopenedAt.get(r.item_key) ?? 0, Date.parse(r.created_at)));
+  const hinted: { item: NowItem; input: Input; quote: string }[] = [];
+  for (const unit of units) {
+    const { chain, receipt } = unit;
+    if (chain.root.project !== projectId || unit.pendingCorrection || receipt?.status !== 'organized' || receipt.input_id !== chain.latest.id) continue;
+    for (const hint of receipt.result?.resolution_hints ?? []) {
+      const item = items.get(hint.item_key);
+      if (!item || item.resolution || item.input_id === chain.root.id || dismissed.has(dismissalKey(projectId, hint.item_key, chain.root.id))) continue;
+      // このメモより後の根拠で改めて挙がった項目は、このメモでは片付いていない。
+      if (Date.parse(chain.root.occurred_at) < Date.parse(inputs.find(i => i.id === item.input_id)?.occurred_at ?? chain.root.occurred_at)) continue;
+      if (Date.parse(receipt.organized_at) <= (reopenedAt.get(hint.item_key) ?? Number.NEGATIVE_INFINITY)) continue;
+      if ((item.hints ??= []).some(h => h.input_id === chain.root.id) || item.hints.length >= 20) continue;
+      item.hints.push({ input_id: chain.root.id, quote: hint.quote, at: receipt.organized_at });
+      hinted.push({ item, input: chain.root, quote: hint.quote });
+    }
+  }
+  for (const item of items.values()) if (item.hints && !item.hints.length) delete item.hints;
+  hinted.sort((a, b) => Date.parse(b.input.occurred_at) - Date.parse(a.input.occurred_at) || a.input.id.localeCompare(b.input.id));
+  const hintRows = hinted.map(({ item, input, quote }) => `- ${item.label || (item.section === 'next' ? '次の一手: ' : '未解決: ')}${plain(item.text)} ← 「${plain(quote)}」 ${ref(input)}`);
   const fallback = '- 不明（根拠となる入力がありません）';
-  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? '- 残っている次の一手はありません（完了報告済み）' : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? '- 残っている未解決はありません（解決報告済み）' : '- 不明（未解決事項の確認が必要です）')}\n${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}`;
+  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? '- 残っている次の一手はありません（完了報告済み）' : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? '- 残っている未解決はありません（解決報告済み）' : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}`;
   const relative = `10_projects/${projectId}/NOW.md`; const existing = await vault.read(relative);
   let before = '（手動領域: この領域は再生成しても保持されます）\n\n'; let after = '\n'; let oldMeta: Record<string, unknown> = {}; let conflict = false;
   if (existing !== undefined) {

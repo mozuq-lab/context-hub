@@ -22,7 +22,7 @@
 
 1. `HOME.md` で正式プロジェクト、候補、受領・整理状況、失敗・競合を確認する。「最近どうなったか」を聞かれたら `REVIEW.md`（直近の期間のふりかえり）も読む。休止・完了のプロジェクトは、明示されない限り作業対象として扱わない。
 2. Vault直下の `POLICY.md` を読む。扱いは「3. 方針（POLICY）」に従う。
-3. 対象プロジェクトが分かれば、その `project.md`・`NOW.md`・`POLICY.md` を読む。対象が曖昧なら候補を示し、帰属を確定しない。他プロジェクトの方針を流用しない。
+3. 対象プロジェクトが分かれば、その `project.md`・`NOW.md`・`POLICY.md` を読む。これまでの流れ（休止から戻る、完了にする、経緯を聞かれた）が必要なら `HISTORY.md`（月ごとの経緯）も読む。対象が曖昧なら候補を示し、帰属を確定しない。他プロジェクトの方針を流用しない。
 4. 下表から、依頼に必要な根拠だけを読む。Vault全体を毎回読み込まない。
 
 | 対象 | いつ読むか |
@@ -35,6 +35,8 @@
 | `Input/REQ-*.md`、`90_system/intake/`、`90_system/intake-errors/`、`90_system/receipts/IN-*.json`（直下のみ） | 未受領の入力や保存結果を詳しく確認するときだけ。手順は `_ContextHub/docs/file-input.md` |
 | `_ContextHub/docs/`、`_ContextHub/templates/`、`_ContextHub/scripts/submit-input.mjs` | 書式・コマンド・挙動を確認するときだけ |
 | 上記以外の `90_system/`（`receipts/pending/`、`receipts/events/`、`project-confirmations/`、`policies/`、`review/`、`now-generated/`、`conflict-archive/` など）、設定・認証情報・バックアップ・`.obsidian/`・Vault外の会話履歴 | 読まない。利用者が保守調査を明示的に依頼したときだけ、必要な記録に限って読む |
+
+`HISTORY.md` は根拠から作り直す生成物です。AIは書き換えません。期日・見直す日は本人が付けるもので、AIは推測して付けたり受付ファイルを代作したりしません。
 
 NOWの `<!-- ctx:auto:start -->` から `<!-- ctx:auto:end -->` までは生成領域です。手で書き換えるとそのNOWは更新が止まり、HOMEに「NOWの更新が止まっています」と出ます。AIはこの領域を書き換えません。本人のメモは領域の外に書きます。
 

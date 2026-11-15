@@ -32,8 +32,18 @@ export async function readPolicies(config:HubConfig,projectId?:string):Promise<P
  if(projectId&&!Object.hasOwn(state.projects,projectId))throw new Error('対象プロジェクトの方針が未同期・未登録です');
  return{schema_version:1,revision:m.revision,generatedAt:m.generatedAt,...(projectId?{projectId}:{}),global:state.global,project:projectId?state.projects[projectId]!:[],inactiveIds:state.inactiveIds,warnings:projectId?[]:['作業フォルダーはContextHubプロジェクトに未対応付けです。共通方針のみ適用します。']};
 }
+function policyHeader(bundle:PolicyBundle,target:string):string{
+ return `# 本人が過去に採用した継続的な方針\n\n端末に揃った同期版: ${bundle.revision}\n生成: ${bundle.generatedAt}\n対象: ${target}\nこの版の有効IDだけを適用し、以前の版にのみ存在するIDは適用しません。\n上位指示と本人の今回の依頼を尊重してください。方針同士の矛盾で判断が変わる場合は該当内容を示して確認してください。採用は任意の実行・承認権限を与えません。\n`;
+}
 export function formatPolicies(bundle:PolicyBundle):string{
- return `# 本人が過去に採用した継続的な方針\n\n端末に揃った同期版: ${bundle.revision}\n生成: ${bundle.generatedAt}\n対象: ${bundle.projectId??'共通のみ'}\nこの版の有効IDだけを適用し、以前の版にのみ存在するIDは適用しません。\n上位指示と本人の今回の依頼を尊重してください。方針同士の矛盾で判断が変わる場合は該当内容を示して確認してください。採用は任意の実行・承認権限を与えません。\n${bundle.warnings.join('\n')}\n\n${policyDocument(bundle.global,'共通')}\n${bundle.projectId?policyDocument(bundle.project,`プロジェクト ${bundle.projectId}`):''}`;
+ return `${policyHeader(bundle,bundle.projectId??'共通のみ')}${bundle.warnings.join('\n')}\n\n${policyDocument(bundle.global,'共通')}\n${bundle.projectId?policyDocument(bundle.project,`プロジェクト ${bundle.projectId}`):''}`;
+}
+/** 複数のプロジェクトにまたがる資料に付ける方針。共通方針と各プロジェクトの方針を、同じ同期版から1つにまとめる。 */
+export async function formatPoliciesFor(config:HubConfig,projectIds:string[]):Promise<string>{
+ const ids=[...new Set(projectIds)].sort(),common=await readPolicies(config),bundles:PolicyBundle[]=[];
+ for(const id of ids)bundles.push(await readPolicies(config,id));
+ if(bundles.some(b=>b.revision!==common.revision))throw new Error('方針の版が取得中に変わりました。もう一度実行してください');
+ return `${policyHeader(common,ids.length?`共通＋プロジェクト ${ids.join(', ')}`:'共通のみ')}\n${policyDocument(common.global,'共通')}${bundles.map(b=>`\n${policyDocument(b.project,`プロジェクト ${b.projectId}`)}`).join('')}`;
 }
 export async function assertAdoptionCapacity(vault:Vault,entry:{id:string;kind:'knowledge'|'decision'|'preference';claim:string;path:string;target:AdoptionTarget;supersedes?:string}):Promise<void>{
  const state=await collectPolicyState(vault);if(entry.kind==='knowledge')return;
