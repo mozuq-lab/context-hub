@@ -63,3 +63,16 @@ test('進行中のプロジェクトがなければ次の一手の節を出さ�
  await addProject(config,{id:'garden',title:'家庭菜園'});await rebuildDashboard(config);
  expect(await vault.read('HOME.md')).toContain('## 次の一手（進行中のプロジェクト）\n進行中のプロジェクトに次の一手はありません。');
 });
+test('HOMEの受領と整理状況は、未整理・失敗と直近の整理済みだけを並べ、残りは件数で示す',async()=>{
+ const{config,vault}=await workflowSetup(roots);config.organize.maxItemsPerRun=100;
+ const{capture}=await import('../src/capture.js'),{organize}=await import('../src/organize.js'),{MockLlm}=await import('../src/llm.js');
+ const ids:string[]=[];for(let i=0;i<30;i++)ids.push((await capture(config,{source:'cli',occurredAt:new Date(Date.UTC(2026,9,1,i)).toISOString(),text:`メモ${i}`})).inputId);
+ await organize(config,new MockLlm());
+ const failed=(await capture(config,{source:'cli',occurredAt:'2026-09-01T00:00:00Z',text:'失敗するメモ'})).inputId;await organize(config,{complete:async()=>{throw new Error('障害');}});
+ const waiting=(await capture(config,{source:'cli',occurredAt:'2026-09-02T00:00:00Z',text:'整理待ちのメモ'})).inputId;
+ await rebuildDashboard(config);const home=(await vault.read('HOME.md'))!,section=home.split('## 受領と整理状況')[1]!.split('\n## ')[0]!;
+ expect(section).toContain(`[${failed}]`);expect(section).toContain('整理失敗');expect(section).toContain(`[${waiting}]`);expect(section).toContain('整理待ち');
+ // 整理済みは新しい20件だけを並べ、古い10件は件数で示す。
+ expect(section).toContain(`[${ids[29]}]`);expect(section).toContain(`[${ids[10]}]`);expect(section).not.toContain(`[${ids[9]}]`);
+ expect(section).toContain('ほかに整理済み10件');
+});

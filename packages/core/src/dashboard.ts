@@ -33,6 +33,13 @@ export async function lastEvidenceAt(vault:Vault,projectId:string):Promise<strin
  try{const value=parseMarkdown(raw).meta.last_evidence_at;return typeof value==='string'&&Number.isFinite(Date.parse(value))?value:undefined;}catch{return undefined;}
 }
 /** HOMEに載せる、秘密情報らしい文字列を含むメモの上限。新しい順に載せる。 */
+const STATUS_ROWS=20;
+/** 通常の状態（受領済み・整理済み）の行は新しい順にSTATUS_ROWS件までにし、残りを件数の1行にまとめる。並びは元の順を保つ。 */
+function recentRoutine(rows:{row:string;routine:boolean;at:number}[],label:string):string[]{
+ const keep=new Set(rows.map((r,i)=>({r,i})).filter(x=>x.r.routine).sort((a,b)=>b.r.at-a.r.at||b.i-a.i).slice(0,STATUS_ROWS).map(x=>x.i));
+ const shown=rows.filter((r,i)=>!r.routine||keep.has(i)).map(r=>r.row),omitted=rows.length-shown.length;
+ return omitted?[...shown,`- ほかに${label}${omitted}件（古い順に省略しています）`]:shown;
+}
 const SECRET_ROWS=10;
 export function secretInputRows(config:HubConfig,inputs:Input[]):string{
  const settings=secretSettings(config);if(!settings.enabled)return'';
@@ -123,13 +130,17 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const reviewRaw=await vault.read('REVIEW.md');let reviewDays=config.retrieve.digestDays;
   if(reviewRaw!==undefined)try{const d=parseMarkdown(reviewRaw).meta.period_days;if(typeof d==='number'&&Number.isSafeInteger(d)&&d>0)reviewDays=d;}catch{/* 解析できないふりかえりは設定の日数で案内する。 */}
   const reviewLink=reviewRaw!==undefined?`\n直近${reviewDays}日のふりかえり: [REVIEW.md](REVIEW.md)`:'';
-  const statuses:string[]=[];
+  // 受領と整理状況は、対応が要るもの（受付待ち・内容変更・整理待ち・整理失敗）を全件、受領済み・整理済みは新しい順にSTATUS_ROWS件まで並べ、残りは件数で示す。
+  const statuses:string[]=[],acksByPath=new Map(acks.map(a=>[a.path,a])),receiptsById=new Map(receipts.map(r=>[r.input_id,r]));
+  const intakeRows:{row:string;routine:boolean;at:number}[]=[];
   for(const path of await intakePaths(vault)){
-   const ack=acks.find(a=>a.path===path);let changed=false;
+   const ack=acksByPath.get(path);let changed=false;
    if(ack)try{const bytes=await vault.readBytes(path,config.capture.maxInputChars*4+8192);changed=!bytes||hash(decodeIntake(bytes))!==ack.request_hash;}catch{changed=true;}
-   statuses.push(`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`);
+   intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:!!ack&&!changed,at:ack?Date.parse(ack.received_at):0});
   }
-  for(const unit of effective){const latest=receipts.find(r=>r.input_id===unit.chain.latest.id);statuses.push(`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`);}
+  statuses.push(...recentRoutine(intakeRows,'Mac mini受領済み'));
+  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id);return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:latest?.status==='organized',at:Date.parse(unit.chain.root.occurred_at)};});
+  statuses.push(...recentRoutine(inputRows,'整理済み'));
   // 秘密情報らしい文字列を含むメモ。原文は変えずモデルへ渡す前に伏せているが、同期先の端末には原文のまま残る。
   const secretRows=secretInputRows(config,effective.flatMap(u=>[u.chain.root,...u.chain.revisions]));
   // 似ているアイデアの索引。束ねの記録が壊れていてもHOMEは作り、壊れた記録を示す。
