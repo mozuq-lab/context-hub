@@ -12,7 +12,7 @@ import { MockLlm } from '../src/llm.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { doctor } from '../src/doctor.js';
 import { defaultConfig, validateConfig } from '../src/config.js';
-import { BackupArchiveError, archiveCreatedAt, backupStatus, extractArchive, latestArchive, readBackupChecks, verifyBackup, type BackupCheck } from '../src/backup-check.js';
+import { BackupArchiveError, archiveCreatedAt, backupExtractLimits, backupStatus, extractArchive, latestArchive, readBackupChecks, verifyBackup, type BackupCheck } from '../src/backup-check.js';
 import type { HubConfig } from '../src/types.js';
 
 const roots: string[] = [];
@@ -292,4 +292,16 @@ test('バックアップ先はVaultの外に設定する', async () => {
   expect(validateConfig(base).backup).toEqual({ dir: null, verifyMaxAgeDays: 7 });
   expect(() => validateConfig({ ...base, backup: { dir: '/tmp/ctx-vault/backups', verifyMaxAgeDays: 7 } })).toThrow('Vaultの外');
   expect(() => validateConfig({ ...base, backup: { dir: 'relative/backups', verifyMaxAgeDays: 7 } })).toThrow();
+});
+
+test('確認の展開上限はVaultの大きさと空き容量から決め、空きが足りなければ展開しない', () => {
+  const MiB = 1024 ** 2, GiB = 1024 ** 3;
+  // 小さいVaultでも256MiBまでは展開できる。
+  expect(backupExtractLimits(10 * MiB).maxBytes).toBe(256 * MiB);
+  // 大きいVaultは4倍まで。64GiBは超えない。
+  expect(backupExtractLimits(2 * GiB).maxBytes).toBe(8 * GiB);
+  expect(backupExtractLimits(40 * GiB).maxBytes).toBe(64 * GiB);
+  // 空き容量が分かれば、256MiBを残した分までにする。
+  expect(backupExtractLimits(2 * GiB, 5 * GiB).maxBytes).toBe(5 * GiB - 256 * MiB);
+  expect(() => backupExtractLimits(2 * GiB, 2 * GiB)).toThrow('空き容量が足りません');
 });
