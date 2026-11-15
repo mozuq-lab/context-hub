@@ -18,7 +18,7 @@ import { setItemResolution,readNowItems,readItemResolutions } from './item-resol
 import { collectGitDrafts,readGitDrafts,useGitDraft,dismissGitDraft } from './git-drafts.js';
 import { Vault, unlockVault, LOCK_SCOPES, hash } from './storage.js';
 import { addProject, readProjects } from './projects.js';
-import { find, findKinds, recent, pending, resume, context, type FindKind } from './retrieve.js';
+import { find, findKinds, recent, pending, resume, context, bundle, bundleMaxIds, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
 import { listConflicts,resolveConflict } from './conflicts.js';
 import { organize } from './organize.js';
@@ -100,6 +100,7 @@ program.command('recent').option('--n <n>','表示件数',positive,10).action(as
 program.command('pending').action(async()=>output(await pending(await config())));
 program.command('resume <project>').action(async id=>output(await resume(await config(),id)));
 program.command('context <project>').option('--max-chars <n>','最大文字数',positive).action(async(id,opts)=>output(await context(await config(),id,opts.maxChars)));
+program.command('bundle <ids...>').description(`選んだ記録（IN・IDEA・KNWのID、NOWはプロジェクトID。最大${bundleMaxIds}件）を、出典・訂正の注意・方針付きの1つの資料にする`).option('--max-chars <n>','最大文字数',positive).action(async(ids,opts)=>output(await bundle(await config(),ids,opts.maxChars)));
 program.command('policies').description('同期版の有効方針を読取専用で取得').option('--project <id>','ContextHubプロジェクト').option('--cwd <path>','対応付ける作業フォルダー').option('--json','JSON出力').action(async opts=>{const c=await config(),id=opts.project??(opts.cwd?await resolvePolicyProject(c,opts.cwd):undefined),b=await readPolicies(c,id);output(opts.json?b:formatPolicies(b));});
 program.command('retire <id>').requiredOption('--hash <sha256>','確認した正式知識のハッシュ').requiredOption('--confirm','本人による適用停止').action(async(id,opts)=>output(await retireKnowledge(await config(),id,opts.hash)));
 program.command('candidates').action(async()=>output(await listCandidates(await config())));
