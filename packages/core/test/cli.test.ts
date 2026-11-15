@@ -49,3 +49,22 @@ test('CLIで次の一手を完了にするとHOMEの次の一手からも外れ�
  expect(await home()).not.toContain('  - 利用者に見せる');
  expect(await home()).toContain('  - 名前を決める');
 },15000);
+test('CLIで期日を付けると保たれ、片方だけ変えられ、--clearで外せる。経緯も作り直せる',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ await cli(config,['project','add','hub','--title','集約ツール']);
+ await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-30T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n');
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const key=(JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string}[])[0]!.key;
+ expect((await cli(config,['item','schedule','hub',key])).code).not.toBe(0);
+ expect((await cli(config,['item','schedule','hub',key,'--confirm'])).code).not.toBe(0);
+ expect((await cli(config,['item','schedule','hub',key,'--due','2026-02-30','--confirm'])).code).not.toBe(0);
+ expect(JSON.parse((await cli(config,['item','schedule','hub',key,'--due','2099-12-01','--confirm'])).out)).toMatchObject({due:'2099-12-01',review_after:null});
+ expect(JSON.parse((await cli(config,['item','schedule','hub',key,'--review','2099-11-01','--confirm'])).out)).toMatchObject({due:'2099-12-01',review_after:'2099-11-01'});
+ expect(JSON.parse((await cli(config,['item','list','hub'])).out)[0]).toMatchObject({due:'2099-12-01',review_after:'2099-11-01'});
+ expect(JSON.parse((await cli(config,['item','schedule','hub',key,'--due','none','--confirm'])).out)).toMatchObject({due:null,review_after:'2099-11-01'});
+ expect(await readFile(join(root,'vault/HOME.md'),'utf8')).toContain('見直す日まで休ませている項目: 1件');
+ expect(JSON.parse((await cli(config,['item','schedule','hub',key,'--clear','--confirm'])).out)).toMatchObject({due:null,review_after:null});
+ expect((await cli(config,['item','schedule','hub',key,'--clear','--due','2099-12-01','--confirm'])).code).not.toBe(0);
+ const history=await cli(config,['history','hub']);expect(history.code).toBe(0);expect(JSON.parse(history.out)).toEqual([{projectId:'hub',path:'10_projects/hub/HISTORY.md',written:false}]);
+ expect(await readFile(join(root,'vault/10_projects/hub/HISTORY.md'),'utf8')).toContain('# 集約ツールの経緯');
+},20000);

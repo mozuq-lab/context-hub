@@ -9,6 +9,7 @@ import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
 import { activeResolutions, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
+import { activeSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
 import type { HubConfig, Input, Receipt } from './types.js';
 
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -96,13 +97,15 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
   const resolved = activeResolutions(await readItemResolutions(vault), projectId), items = new Map<string, NowItem>(), done: string[] = [];
+  // 本人が付けた期日・見直す日は行の末尾に示す（出典より後ろに置き、項目との照合に使う行頭は変えない）。解決済みの項目には付けない。
+  const scheduled = activeSchedules((await readItemSchedules(vault)).records, projectId);
   const entry = (section: ItemSection, text: string, input: Input, label = ''): string[] => {
-    const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key);
+    const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key), schedule = resolution ? undefined : scheduled.get(key);
     if (!items.has(key)) {
-      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null });
+      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null, schedule: schedule ? { id: schedule.id, due: schedule.due, review_after: schedule.review_after } : null });
       if (resolution) done.push(`- ${section === 'next' ? '完了' : '解決'}: ${label}${plain(text)} ${ref(input)} — 本人報告 ${dateLabel(resolution.created_at, config.timezone)} ${resolution.id}`);
     }
-    return resolution ? [] : [row(text, input, label)];
+    return resolution ? [] : [row(text, input, label) + (schedule ? ` — ${scheduleLabel(schedule)}` : '')];
   };
   const current = latest?.result.extracted.current.filter((item) => item.status === 'confirmed').map((item) => row(item.text, latest.input)) ?? [];
   const next = latest?.result.extracted.next.filter((item) => item.status === 'confirmed').flatMap((item) => entry('next', item.text, latest.input)) ?? [];

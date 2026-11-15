@@ -10,10 +10,12 @@ AIとの作業要約や日々の思いつきをMarkdownに集め、数日後で�
 - AIが分類・要約・関連候補を返し、コードが検証してアイデアやプロジェクトのNOWを更新する。
 - HOMEから受領・整理状態を確認し、[検索](docs/operations.md#普段の確認)（プロジェクト・種類・期間での絞り込みと続きの表示）や別AI向けのコンテキスト出力を使う。
 - 直近7日の[ふりかえり](docs/project-lifecycle.md#ふりかえりreviewmd)で、動いたプロジェクト・現在地の変化・持ち越しの未解決を確認する。
+- プロジェクトごとの[経緯（HISTORY.md）](docs/project-lifecycle.md#経緯historymd)で、月ごとの入力・現在地の移り変わり・完了報告・状態の切り替えを通して読む。
 - 止まっているプロジェクトをHOMEで見つけ、本人の操作で[休止・完了](docs/project-lifecycle.md)に切り替える。
 - プロジェクトの名前・別名・キーワードを、本人の確認で[安全に書き換える](docs/project-lifecycle.md#名前別名キーワードの手入れ)。手で壊した定義は、ファイルと項目をHOMEと`doctor`で示す。
 - 進行中のプロジェクトの次の一手を、HOMEで[まとめて確認](docs/work-records.md#homeの次の一手)する。
 - NOWの次の一手・未解決を、本人の報告で[完了・解決](docs/work-records.md)にする。
+- 次の一手・未解決に本人が[期日と次に見直す日](docs/work-records.md#期日と次に見直す日)を付け、HOMEで「期限切れ・今日・7日以内」を先に確認する。
 - 設定したローカルリポジトリのコミット件名から[作業記録の下書き](docs/work-records.md#コミット履歴からの作業記録の下書き)を作り、本人の確認後に入力にする（既定は無効）。
 - 原文を残した訂正と、本人操作によるプロジェクト案・知識候補の承認を扱う。
 - [採用先付きの知識・方針](docs/policies.md)を共通/プロジェクトへ保存し、有効方針の読取・適用停止・AI接続用の設定差分を用意する。
@@ -82,7 +84,7 @@ flowchart LR
 - [AI作業要約の形式](docs/prompts/handoff-summary.md)
 - [選択肢を選んで記録・壁打ちする（選んで深掘り）](docs/prompts/guided-capture.md)
 - [候補の確認待ちを使う](docs/candidate-review.md)
-- [プロジェクトの状態とふりかえり](docs/project-lifecycle.md)
+- [プロジェクトの状態・ふりかえり・経緯](docs/project-lifecycle.md)
 - [開発と検証](docs/development.md)
 - [Mac・Androidアプリ（別リポジトリ）](https://github.com/mozuq-lab/context-hub-flutter-client)
 
