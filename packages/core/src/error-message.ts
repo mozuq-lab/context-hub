@@ -9,7 +9,11 @@ const knownCodes: Record<string, string> = {
   'infer:options': 'モデル実行の設定値が不正です。設定のorganizeを確認してください',
   timeout: 'モデルの応答が時間内に返りませんでした',
 };
-const japanese = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+/**
+ * 本体が書いた案内文の書き出し。日本語で始まるか、英字の語1つ（Vault・NOW・frontmatterなど）の直後か空白1つの後に日本語が続く。
+ * JSON・YAMLの解析エラーやライブラリの英文は、例外の文に原文（Vaultの本文）の一部を含むことがあるため、この形に当たらない。
+ */
+const ownMessage = /^(?:[A-Za-z][\w.:-]* ?)?[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 // 絶対パス（/…、~/…、C:\…）らしい部分。
 const absolutePath = /(?:^|[\s'"(（:：=])(?:\/|~\/|[A-Za-z]:\\)[^\s]/;
 /** zodの項目の場所（値は含めない）。 */
@@ -23,13 +27,15 @@ export function issuePaths(error: ZodError, limit = 5): string[] {
 }
 /**
  * CLIで本人へ示すエラー文。パス・本文・外部プロセスのstderrを例外から転記しない。
- * 本体が書いた日本語の1行（先頭が英字の語でも可）と、既知の失敗コード・形式の誤り（項目の場所だけ）を示し、それ以外は一般的な案内にする。
+ * 本体が書いた日本語の1行（先頭が英字の語1つでも可）と、既知の失敗コード・形式の誤り（項目の場所だけ）を示し、それ以外は一般的な案内にする。
  */
 export function userFacingError(error: unknown): string {
   const fallback = '処理に失敗しました。設定・引数とctx doctorを確認してください';
   if (error instanceof ZodError) { const paths = issuePaths(error); return `引数・記録の形式が正しくありません${paths.length ? `（${paths.join('、')}）` : ''}`; }
   const message = error instanceof Error ? error.message : '';
   if (knownCodes[message]) return knownCodes[message]!;
-  if (!message || message.includes('\n') || message.length > 500 || !japanese.test(message.slice(0, 40)) || absolutePath.test(message)) return fallback;
+  // 解析エラー（JSON.parseのSyntaxErrorなど）とOS・ライブラリのエラー（codeを持つ）は、本文や場所を含みうるため常に一般的な案内にする。
+  if (error instanceof SyntaxError || (error instanceof Error && 'code' in error && (error as { code?: unknown }).code !== undefined)) return fallback;
+  if (!message || message.includes('\n') || message.length > 500 || !ownMessage.test(message) || absolutePath.test(message)) return fallback;
   return message;
 }

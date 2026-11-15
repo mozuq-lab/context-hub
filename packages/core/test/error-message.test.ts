@@ -31,3 +31,11 @@ test('設定の誤りは、値を出さずにキーの場所を示す',async()=>
  const run=await new Promise<string>(done=>{const p=spawn(process.execPath,[resolve('packages/core/dist/cli.js'),'--config',path,'doctor'],{stdio:['ignore','ignore','pipe']});let err='';p.stderr.on('data',d=>err+=d);p.on('close',()=>done(err));});
  expect(run).toContain('organize.timeoutSec');expect(run).not.toContain('秘密の値');
 });
+test('JSON・YAMLの解析エラーやOSのエラーは、Vaultの本文を含みうるため一般的な案内にする',async()=>{
+ const parse=(text:string)=>{try{JSON.parse(text);}catch(error){return error;}};
+ for(const error of [parse('{"claim":社内Wikiの合言葉はsakura2026"}'),parse('パスワードはhunter22です'),parse('{"a":1}xパスワード'),new Error('Unexpected token: 社外秘の本文'),Object.assign(new Error('権限がありません 山田の記録'),{code:'EACCES'})]){
+  const message=userFacingError(error);expect(message).toBe('処理に失敗しました。設定・引数とctx doctorを確認してください');
+ }
+ const{parseMarkdown}=await import('../src/storage.js');let yaml:unknown;try{parseMarkdown('---\na: 1\na: 社外秘の合言葉\n---\n');}catch(error){yaml=error;}
+ expect(yaml).toBeDefined();expect(userFacingError(yaml)).not.toContain('社外秘');
+});
