@@ -119,7 +119,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    else if(packet.operation==='git-draft-dismiss')result=await dismissGitDraft(config,{draftId:packet.draft_id,expectedHash:packet.draft_hash,source:packet.source,sourceEventId:id});
    else if(packet.operation==='project-create')result=await createProject(config,{projectId:packet.project_id,title:packet.title,aliases:packet.aliases,keywords:packet.keywords,firstMemo:packet.text,occurredAt:packet.occurred_at,source:packet.source,sourceEventId:id});
    else if(packet.operation==='conflict-resolve')result=await resolveConflict(config,{target:packet.target,expectedHash:packet.target_hash,source:packet.source,sourceEventId:id});
-   else if(packet.operation==='idea-link')result=await setIdeaLink(config,{ideas:packet.idea_ids,hashes:packet.idea_hashes,action:packet.action,source:packet.source,sourceEventId:id});
+   else if(packet.operation==='idea-link')result=await setIdeaLink(config,{ideas:packet.idea_ids,hashes:packet.idea_hashes,action:packet.action,source:packet.source,sourceEventId:id,decidedAt:packet.occurred_at});
    else if(packet.operation==='knowledge-reject')result=await reject(config,packet.candidate_id,packet.candidate_hash);
    else if('confirmation_token'in packet)result=await decideProject(config,{candidateId:packet.candidate_id,expectedHash:packet.candidate_hash,confirmationToken:packet.confirmation_token,confirmed:packet.confirmed,action:packet.operation==='project-approve'?'approve':'reject',source:packet.source,sourceEventId:id});
    else throw new Error('受付操作が不正です');

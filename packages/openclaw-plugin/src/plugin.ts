@@ -1,4 +1,4 @@
-import {readPolicies,resolvePolicyProject,policyContext,policyUnavailable,projectIdSchema} from '@context-hub/core';
+import {readPolicies,resolvePolicyProject,policyContext,policyUnavailable,secretSettings,projectIdSchema} from '@context-hub/core';
 import { Type } from 'typebox';
 import type { HubDependencies, PluginApi, ToolResult } from './api.js';
 
@@ -114,7 +114,7 @@ export function registerHub(api: PluginApi, deps: HubDependencies): void {
       if(!ctx.workspaceDir)throw new Error('作業フォルダーがありません');
       const hubConfig=await deps.loadConfig(config.configPath),mapped=await resolvePolicyProject(hubConfig,ctx.workspaceDir);
       if(mapped&&binding.projectId&&mapped!==binding.projectId)throw new Error('project対応が競合しています');
-      const bundle=await readPolicies(hubConfig,binding.projectId??mapped),text=policyContext(bundle);
+      const bundle=await readPolicies(hubConfig,binding.projectId??mapped),text=policyContext(bundle,secretSettings(hubConfig));
       api.logger?.info(JSON.stringify({status:'ok',revision:bundle.revision,scope:bundle.projectId??'global',count:bundle.global.length+bundle.project.length}));
       return{prependContext:text};
     }catch{api.logger?.warn('context-hub: policy status=unavailable');return{prependContext:policyUnavailable+' このcontext追加hookだけでは実行停止を強制する保証はありません。'};}

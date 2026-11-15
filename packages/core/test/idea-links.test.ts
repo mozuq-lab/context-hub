@@ -8,15 +8,14 @@ import { ingest, readIntakeReceipts } from '../src/intake.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { find } from '../src/retrieve.js';
 import { doctor } from '../src/doctor.js';
-import { buildIdeaIndex, ideaIndexPath, ideaIndexSchema, ideaSimilarity, ideaSummary, readIdeaLinks, setIdeaLink, similarPairs } from '../src/idea-links.js';
+import { buildIdeaIndex, ideaIndexPath, ideaIndexSchema, ideaSimilarity, ideaSummary, readIdeaLinks, readIdeas, setIdeaLink, similarPairs } from '../src/idea-links.js';
 import type { Vault } from '../src/storage.js';
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
 
-async function fixture() {
+async function fixture(texts = ['開発再開を助ける仕組みがあると面白そう', '数日ぶりの開発再開を助ける仕組み、面白そう。', 'いつか週末にキャンプへ行く計画を立てたい']) {
   const { config, vault } = await workflowSetup(roots);
-  const texts = ['開発再開を助ける仕組みがあると面白そう', '数日ぶりの開発再開を助ける仕組み、面白そう。', 'いつか週末にキャンプへ行く計画を立てたい'];
   const ids: string[] = [];
   for (const [i, text] of texts.entries()) ids.push((await capture(config, { source: 'cli', text, occurredAt: `2026-11-0${i + 1}T00:00:00Z` })).inputId);
   await organize(config, new MockLlm());
@@ -97,4 +96,45 @@ test('壊れた束ねの記録があってもHOMEは作り、doctorで示す', a
   await rebuildDashboard(config);
   expect(await vault.read('HOME.md')).toContain('似ているアイデアの一覧を更新できません');
   expect((await doctor(config)).issues.join('\n')).toContain('アイデアの束ねの記録が不正です');
+});
+
+test('3件の束でも、直接束ねた組を別の話にするとその組だけが外れる', async () => {
+  const { config, vault, idea } = await fixture(['開発再開を助ける仕組みがあると面白そう', '数日ぶりの開発再開を助ける仕組み、面白そう。', '開発再開を助ける仕組みを週末に試したい、面白そう']);
+  const hashes = new Map((await readIdeas(vault)).map(i => [i.id, i.hash]));
+  expect(hashes.size).toBe(3);
+  const link = (a: number, b: number) => setIdeaLink(config, { ideas: [idea(a), idea(b)], hashes: [hashes.get(idea(a))!, hashes.get(idea(b))!], action: 'link', source: 'cli' });
+  await link(0, 1);
+  await link(1, 2);
+  let current = await buildIdeaIndex(vault);
+  expect(current.groups).toHaveLength(1);
+  expect(current.groups[0]!.ideas).toHaveLength(3);
+  await setIdeaLink(config, { ideas: [idea(0), idea(1)], action: 'separate', source: 'cli' });
+  current = await buildIdeaIndex(vault);
+  expect(current.groups.map(g => [...g.ideas].sort())).toEqual([[idea(1), idea(2)].sort()]);
+  expect(current.groups[0]!.links).toEqual([[idea(1), idea(2)].sort()]);
+});
+
+test('同じ組への判断は受け付けた順ではなく判断した日時の順に反映する', async () => {
+  const { config, vault } = await fixture();
+  const [candidate] = (await buildIdeaIndex(vault)).candidates;
+  const base = { operation: 'idea-link', idea_ids: candidate!.ideas, idea_hashes: candidate!.hashes, confirmed: true };
+  // 受付は名前順なので、後で判断した「別の話」が先に処理される。
+  await packet(config, { ...base, request_id: `REQ-${'0'.repeat(32)}`, action: 'separate', occurred_at: '2026-11-12T10:00:00Z' }, '');
+  await packet(config, { ...base, request_id: `REQ-${'f'.repeat(32)}`, action: 'link', occurred_at: '2026-11-12T09:00:00Z' }, '');
+  expect((await ingest(config)).accepted).toBe(2);
+  const current = await buildIdeaIndex(vault);
+  expect(current.groups).toEqual([]);
+  expect(current.candidates).toEqual([]);
+});
+
+test('アイデアが多くても似ている組の計算は短時間で終わる', () => {
+  // 実際の要約に近く、よく使う文字に偏った文字列を決まった乱数で作る。
+  let seed = 1;
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const common = 'のしてたいるをにがとはでもかうなこれ', rare = Array.from({ length: 2000 }, (_, i) => String.fromCodePoint(0x4e00 + i * 3));
+  const summary = () => Array.from({ length: 20 + Math.floor(next() * 30) }, () => (next() < 0.4 ? common[Math.floor(next() * common.length)] : rare[Math.floor(next() * rare.length)])).join('');
+  const docs = Array.from({ length: 3000 }, (_, i) => ({ id: `IDEA-${String(i).padStart(6, '0')}`, summary: summary(), path: '', occurredAt: '', hash: '' }));
+  const started = performance.now();
+  similarPairs(docs);
+  expect(performance.now() - started).toBeLessThan(3000);
 });

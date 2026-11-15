@@ -87,6 +87,35 @@ test('無効にした設定ではモデルへそのまま渡し、HOMEにも載�
   expect(await new (await import('../src/storage.js')).Vault(off).read('HOME.md')).not.toContain('秘密情報らしい文字列を含むメモ');
 });
 
+test('関連付けを判断するモデルにも伏せ字だけを渡す', async () => {
+  const { config } = await workflowSetup(roots);
+  await capture(config, { source: 'cli', kind: 'work-summary', text: `## 現在地\n- [確認済み] 菜園の通知に ${KEY} を使う`, occurredAt: '2026-11-10T00:00:00Z' });
+  await organize(config, new MockLlm());
+  await addProject(config, { id: 'garden', title: '家庭菜園', keywords: ['菜園'] });
+  const llm = new RecordingLlm();
+  await organize(config, llm);
+  expect(llm.prompts.length).toBeGreaterThan(0);
+  for (const prompt of llm.prompts) expect(prompt).not.toContain(KEY);
+});
+
+test('contextの抜粋で切れる位置にある値も、切る前に伏せる', async () => {
+  const { config } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: '集約ツール' });
+  await capture(config, { source: 'cli', project: 'hub', text: `${'あ'.repeat(285)} ${KEY}`, occurredAt: '2026-11-10T00:00:00Z' });
+  await organize(config, new MockLlm());
+  const text = await context(config, 'hub');
+  expect(text).not.toContain('sk-ant-api03');
+  expect(text).toContain('[伏せ字:APIキー]');
+});
+
+test('URLの資格情報の検出は長い入力でも時間がかからない', () => {
+  const settings = secretSettings({ privacy: { redactSecrets: true, patterns: [] } });
+  const started = performance.now();
+  findSecrets('a'.repeat(50000) + '://', settings);
+  findSecrets('a+'.repeat(25000), settings);
+  expect(performance.now() - started).toBeLessThan(2000);
+});
+
 test('別AI向けのcontext、HOME、doctorでは値を出さない', async () => {
   const { config, vault } = await workflowSetup(roots);
   await addProject(config, { id: 'hub', title: '集約ツール' });

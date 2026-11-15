@@ -20,8 +20,8 @@ export interface SecretFinding { rule: string; label: string; start: number; end
 export const placeholder = (label: string): string => `[伏せ字:${label}]`;
 const PLACEHOLDER_HEAD = '[伏せ字:';
 
-/** 代入の形で値を伏せる鍵の名前。 */
-const SECRET_KEYS = '(?:\\b(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token)|パスワード|暗証番号|合言葉)';
+/** 代入の形で値を伏せる鍵の名前。DB_PASSWORDやAWS_SECRET_ACCESS_KEYのように、前に語が付いた環境変数名も含める。 */
+const SECRET_KEYS = '(?:(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|signature|sig)(?![A-Za-z0-9])|パスワード|暗証番号|合言葉)';
 // 既知の形式を先に並べる。重なった場合は先に見つかった（開始位置が早い、同じなら長い）一致を採る。
 export const builtinSecretRules: readonly SecretRule[] = [
   { id: 'private-key', label: '秘密鍵', pattern: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g },
@@ -36,7 +36,7 @@ export const builtinSecretRules: readonly SecretRule[] = [
   { id: 'jwt', label: 'トークン', pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
   { id: 'bearer', label: 'トークン', pattern: /\bBearer[ \t]+([A-Za-z0-9._~+/=-]{20,})/g, group: 1 },
   // URLに埋め込んだ利用者名とパスワード（scheme://user:pass@host）。パスワードだけを伏せる。
-  { id: 'url-credential', label: 'パスワード', pattern: /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)(?=@)/g, group: 1 },
+  { id: 'url-credential', label: 'パスワード', pattern: /(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)(?=@)/g, group: 1 },
   // password="..." のように引用符で囲んだ値。空白を含む値も伏せる。
   { id: 'assignment-quoted', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}[ \\t]*["']?[ \\t]*[:=：][ \\t]*["'](?!\\[伏せ字)([^"'\\r\\n]{4,})(?=["'])`, 'gi'), group: 1 },
   // password=... や パスワード: ... のような代入。値だけを伏せる。既に伏せた値と短すぎる値は除く。
@@ -46,6 +46,7 @@ export const builtinSecretRules: readonly SecretRule[] = [
 /** 高エントロピーの長い文字列。英大文字・小文字・数字をすべて含む32文字以上で、URLのパスの一部は除く。 */
 const HIGH_ENTROPY = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/g;
 const MIN_ENTROPY_BITS = 4.0;
+const VAULT_ID = /^[A-Z]{2,6}-[A-Za-z0-9]+$/;
 function entropy(value: string): number {
   const counts = new Map<string, number>();
   for (const ch of value) counts.set(ch, (counts.get(ch) ?? 0) + 1);
@@ -57,9 +58,10 @@ function highEntropyFindings(text: string): SecretFinding[] {
   const found: SecretFinding[] = [];
   for (const m of text.matchAll(HIGH_ENTROPY)) {
     const value = m[0], start = m.index!;
-    // URLのパス・クエリ（/…/ や ?id=）の一部は文書IDなどが多いので伏せない。
-    const before = text.slice(Math.max(0, start - 1), start);
-    if (before === '/' || before === '=' || before === '?' || before === '&' || before === '#') continue;
+    // URLのパス（/…/）の一部は文書IDなどが多いので伏せない。クエリの値（?sig=…）は伏せる。
+    if (text[start - 1] === '/') continue;
+    // REQ-やIN-のようなContextHubの記録IDは伏せない。
+    if (VAULT_ID.test(value)) continue;
     if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/[0-9]/.test(value)) continue;
     if (entropy(value) < MIN_ENTROPY_BITS) continue;
     found.push({ rule: 'high-entropy', label: '秘密情報らしい文字列', start, end: start + value.length });
@@ -96,14 +98,21 @@ export function findSecrets(text: string, settings: SecretSettings): SecretFindi
     }
   }
   all.push(...highEntropyFindings(text));
-  all.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+  // 開始位置が早い順、同じなら長い順、さらに同じなら規則の順（Dart側と同じ順序になるよう明示する）。
+  const order = new Map(all.map((f, i) => [f, i]));
+  all.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start) || order.get(a)! - order.get(b)!);
   const result: SecretFinding[] = [];
   let last = -1;
   for (const f of all) {
-    if (f.start < last) continue;
+    if (f.start < last) {
+      // 重なった一致は、先に採った箇所を後ろへ広げて1つの伏せ字にする（後ろの部分を平文に残さない）。
+      const prev = result.at(-1);
+      if (prev && f.end > prev.end) { prev.end = f.end; last = f.end; }
+      continue;
+    }
     // 既に伏せ字になった箇所は数えない。
     if (text.startsWith(PLACEHOLDER_HEAD, f.start)) continue;
-    result.push(f); last = f.end;
+    result.push({ ...f }); last = f.end;
   }
   return result;
 }
