@@ -44,6 +44,37 @@ test('Gateway再開後にRPCが壊れてもGatewayと同期の停止を試みる
  const fail=async(exe,args,o)=>{if(exe===f.config.openclaw.executable&&args[0]==='plugins')broken=true;if(broken&&exe===f.config.openclaw.executable)return{code:1,stdout:'',stderr:'RPC unavailable'};return fake.execute(exe,args,o);};
  await expect(applyPlan(p.planPath,p.planHash,{...deps,run:fail})).rejects.toThrow(/失敗/);expect([...fake.serviceState.values()]).toEqual([false,false]);expect((await deploymentStatus(f.file)).pending.phase).toBe('recovery-required');
 });
+test('rollbackの再開RPCが失敗しても、再開済みGatewayと同期を止めて診断を残す',async()=>{
+ const f=await setup(),fake=await fakeServices(f),deps={run:fake.execute,platform:'darwin',ready:fake.ready};
+ const p=await preparePlan(f.file,{repository:f.repository,...deps});
+ const fail=async(exe,args,o)=>exe===f.config.openclaw.executable&&args[0]==='automations'&&args[1]==='enable'?{code:1,stdout:'',stderr:'fixture rollback RPC failure'}:fake.execute(exe,args,o);
+ await expect(applyPlan(p.planPath,p.planHash,{...deps,run:fail,onProgress:s=>{if(s.phase==='swapping')throw new Error('fixture original update failure');}})).rejects.toThrow('fixture original update failure');
+ expect([...fake.serviceState.values()]).toEqual([false,false]);
+ const status=await deploymentStatus(f.file);
+ expect(status.pending.phase).toBe('recovery-required');expect(status.pending.writersResumed).toBe(true);
+ expect(status.pending.stopResults).toEqual(expect.arrayContaining([{role:'gateway',confirmed:true},{role:'syncPlist',confirmed:true}]));
+ expect(status.pending.failure).toMatchObject({phase:'swapping',message:'fixture original update failure'});
+ expect(status.pending.recoveryFailure).toMatchObject({phase:'rollback-starting',name:'Error'});
+});
+test('rollbackで最初のサービスを起動する前に再開意図がjournalへ保存される',async()=>{
+ const f=await setup(),fake=await fakeServices(f),deps={run:fake.execute,platform:'darwin',ready:fake.ready},p=await preparePlan(f.file,{repository:f.repository,...deps});
+ const observed=[];
+ const inspect=async(exe,args,o)=>{
+  if(exe==='launchctl'&&args[0]==='bootstrap')observed.push(JSON.parse(await readFile(join(f.config.installDir,'deployment-state.json'),'utf8')));
+  return fake.execute(exe,args,o);
+ };
+ await expect(applyPlan(p.planPath,p.planHash,{...deps,run:inspect,onProgress:s=>{if(s.phase==='swapping')throw new Error('fixture rollback trigger');}})).rejects.toThrow('fixture rollback trigger');
+ expect(observed).toHaveLength(2);
+ for(const state of observed)expect(state).toMatchObject({phase:'rollback-starting',writersResumed:true});
+ expect((await deploymentStatus(f.file)).pending).toBeNull();expect([...fake.serviceState.values()]).toEqual([true,true]);
+});
+test('rollbackの再開意図を記録した直後の失敗も、自動再実行せず停止結果を残す',async()=>{
+ const f=await setup(),fake=await fakeServices(f),deps={run:fake.execute,platform:'darwin',ready:fake.ready},p=await preparePlan(f.file,{repository:f.repository,...deps});
+ await expect(applyPlan(p.planPath,p.planHash,{...deps,onProgress:s=>{if(s.phase==='swapping')throw new Error('fixture rollback trigger');if(s.phase==='rollback-starting')throw new Error('fixture recovery interrupted');}})).rejects.toThrow('fixture rollback trigger');
+ const status=await deploymentStatus(f.file);expect(status.pending).toMatchObject({phase:'recovery-required',writersResumed:true,recoveryFailure:{message:'fixture recovery interrupted'}});
+ expect([...fake.serviceState.values()]).toEqual([false,false]);
+ await expect(applyPlan(p.planPath,p.planHash,deps)).rejects.toThrow(/自動再開できません/);
+});
 test('通常更新でもHub設定とdeployment設定を利用者専用で退避する',async()=>{
  const f=await setup(),p=await preparePlan(f.file,options(f)),r=await applyPlan(p.planPath,p.planHash,{run:f.execute}),backup=join(r.backup,'..');
  expect(await readFile(join(backup,'hub-config.json'),'utf8')).toBe(await readFile(f.config.hubConfigPath,'utf8'));expect(await readFile(join(backup,'deployment.json'),'utf8')).toBe(await readFile(f.file,'utf8'));expect((await lstat(r.backup)).mode&0o077).toBe(0);

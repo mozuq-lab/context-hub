@@ -27,6 +27,8 @@
 
 設定と制御ファイルもリポジトリ・Vault・`installDir`の外に置きます。管理対象の所有者と書き込み権限、symlinkを経由しないことを確認します。認証を含む設定・バックアップ・更新領域をGitや公開フォルダーへ入れないでください。
 
+Hub設定の`statePath`と`logging.dir`は、入れ替える`runtime`や`updates`内に置けません。ディレクトリ名の大文字・小文字の違いも含めて配置を検査します。
+
 automationを指定する場合は、Gatewayの稼働中に始めます。`payload.argv`がNode・旧CLI・`cycle`で始まり、`payload.env.CONTEXT_HUB_CONFIG`が同じHub設定を参照する既存ジョブが対象です。それ以外は既存構成を変更せず停止します。
 
 初回には、版が記録されていない既存環境も「既存版不明・初回の基準登録」として確認します。明示した旧参照との一致と新版の`doctor`を確認し、適用前バックアップ後に移行します。旧checkoutやその未コミット変更は保持します。
@@ -58,6 +60,8 @@ npm run deploy -- apply --plan "<表示されたplan.json>" --confirm "<表示�
 
 適用では元のサービス状態を記録し、ジョブ・同期等を一時停止して共通Vaultロックを取得します。Vaultと変更対象をバックアップし、アーカイブを最後まで読めることを確かめてからコードと配布物を切り替えます。`doctor`・設定・Gateway/pluginを検査して、元が稼働中だったものだけを再開します。追加の手動整理やDiscord送信はしません。
 
+Gateway内のcontext-hub登録エラーがないことと、同期等の常駐サービスが稼働状態へ戻ったことを確認してから完了します。backup等の予定実行型ジョブは登録状態の復帰を確認します。
+
 初回だけ、plugin・automation・backup等のコード参照先を`installDir/runtime/`内の固定パスへ変更します。以降は停止中にruntimeを入れ替えます。前版は更新領域の`previous-runtime/`へ保持します。同じcommitで変更がなければ再配置せず終了します。
 
 ## 状態・復旧
@@ -69,6 +73,8 @@ npm run deploy -- status --config "<deployment.jsonの絶対パス>"
 現在のcommit、管理対象の変更（`drift`）、保持対象、未完了操作をJSONで返します。未完了または変更があれば終了コード1です。未導入の`commit: null`は終了コード0です。
 
 新Writerを再開する前の通常エラーでは、確認できる範囲だけ元へ戻します。Gateway等を再開した後の失敗は、旧コードやVaultを自動復元せず、対象サービスすべての停止を試みて復旧待ち状態を残します。`status`の`pending.stopResults`で各停止の確認結果を返します。未確認の対象は停止済みと判断せず、設定・バックアップ・journalを保存先で確認してください。バックアップにはHub設定・deployment設定・OpenClaw設定・指定したplistも含まれます。
+
+元の版へ戻す復旧でも、サービス再開前にjournalへ記録します。その再開が失敗した場合も停止を試み、`pending.failure`に元の失敗、`pending.recoveryFailure`に復旧中の失敗を残します。再開を始めた後の復旧待ちは自動再実行しません。
 
 強制終了などで途中に止まった場合は、まず`status`を確認します。全Writer停止と所有PIDの終了を確認したうえで、共通Vaultロックの残骸は既存の`ctx doctor --unlock`で回収します。その後、同じplanとhashでapplyを再実行します。更新専用ロックは同じplan・死亡PID・journalの一致が確認できる場合だけ回収します。別の変更や再開済みWriterがある場合は自動再開しません。ロックを手で削除して処理を強行しないでください。
 

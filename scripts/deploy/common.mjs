@@ -1,7 +1,7 @@
 import {constants} from 'node:fs';
 import {createReadStream} from 'node:fs';
 import {open,readFile,mkdir,lstat,readdir,readlink,realpath,rename,unlink,rmdir} from 'node:fs/promises';
-import {resolve,dirname,join,relative,isAbsolute,parse} from 'node:path';
+import {resolve,dirname,basename,join,relative,isAbsolute,parse} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {spawn} from 'node:child_process';
 
@@ -19,6 +19,29 @@ export async function safePath(path,{owned=false}={}){
  }
  if(owned&&await exists(path)){const st=await lstat(path);if(st.uid!==process.getuid()||(st.mode&0o022))throw new Error('管理対象の所有者・書き込み権限を確認してください');}
  return resolve(path);
+}
+async function caseInsensitiveAncestor(ancestor){
+ const device=(await lstat(ancestor)).dev;
+ for(let current=ancestor;;current=dirname(current)){
+  const parent=dirname(current);
+  if(parent===current||(await lstat(parent)).dev!==device)throw new Error('未作成パスの大小文字の同一性を確認できません');
+  const name=basename(current),alias=name.replace(/[a-z]/i,c=>c===c.toLowerCase()?c.toUpperCase():c.toLowerCase());
+  if(alias===name)continue;
+  const original=await lstat(current);let other;
+  try{other=await lstat(join(parent,alias));}catch(e){if(e.code==='ENOENT')return false;throw e;}
+  return original.dev===other.dev&&original.ino===other.ino;
+ }
+}
+export async function canonicalPath(path){
+ await safePath(path);let ancestor=resolve(path);const tail=[];
+ for(;;){
+  let physical;
+  try{physical=await realpath(ancestor);}
+  catch(e){if(e.code!=='ENOENT')throw e;tail.push(basename(ancestor));ancestor=dirname(ancestor);continue;}
+  // 同じfilesystemで大小文字aliasを実証できた場合だけ、未作成部分を比較用に揃える。
+  const insensitive=tail.length>0&&await caseInsensitiveAncestor(physical);
+  return join(physical,...tail.toReversed().map(part=>insensitive?part.toLowerCase():part));
+ }
 }
 export async function readBytes(path){
  await safePath(path);let h;

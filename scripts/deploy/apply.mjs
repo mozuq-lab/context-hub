@@ -7,6 +7,11 @@ import {releaseAt,releaseName,coreDoctor} from './prepare.mjs';
 import {inspectServices,stopServices,haltServices,resumeServices,verifyServices,jobHash} from './services.mjs';
 
 async function matches(path,expected){if(await fileHash(path)!==expected)throw new Error('確認後に管理対象が変更されています。planを作り直してください');}
+function failureOf(error,phase){
+ const name=error?.name??'Error',code=typeof error?.code==='string'?error.code:undefined;
+ const message=name==='SyntaxError'?'JSONの形式を確認してください':code?'ファイル・外部コマンドの権限と状態を確認してください':String(error?.message??'処理に失敗しました');
+ return{phase,name,message,...(code?{code}:{})};
+}
 async function core(root,c){
  const storage=await import(pathToFileURL(join(root,'packages/core/dist/storage.js')).href),cfg=await import(pathToFileURL(join(root,'packages/core/dist/config.js')).href);
  const config=await cfg.loadConfig(c.hubConfigPath);return{vault:new storage.Vault(config),storage};
@@ -33,7 +38,7 @@ export async function applyPlan(planPath,confirmation,deps={}){
    return{commit:p.commit,unchanged:true};
   }
   const resuming=state?.planId===p.planId&&!['completed','rolled-back'].includes(state.phase);
-  if(state&&(!['ready','stopping','stopped','swapping','old-moved','installed','files-written','verified','starting','completed','rolled-back','recovery-required'].includes(state.phase)||state.schema_version!==1))throw new Error('更新記録の形式を確認してください');
+  if(state&&(!['ready','stopping','stopped','swapping','old-moved','installed','files-written','verified','starting','restoring','rollback-starting','completed','rolled-back','recovery-required'].includes(state.phase)||state.schema_version!==1))throw new Error('更新記録の形式を確認してください');
   if(state&&!['completed','rolled-back'].includes(state.phase)&&!resuming)throw new Error('別の未完了更新があります');
   if(resuming&&(state.planHash!==planHash||state.writersResumed||state.phase==='recovery-required'))throw new Error('Writer再開後または不明な状態のため、自動再開できません。statusと復旧記録を確認してください');
   if(!resuming){
@@ -59,6 +64,7 @@ export async function applyPlan(planPath,confirmation,deps={}){
    if(partial&&p.previous){const old=await exists(previous)?previous:await exists(candidate)?runtime:null;if(old&&await treeHash(old)!==p.previous.treeHash)throw new Error('中断中に旧運用コードが変更されています');}
   }
   async function restore(){
+   await phase('restoring');
    const codeRoot=await exists(candidate)?candidate:runtime,{vault}=await core(codeRoot,c);
    await vault.withLock(()=>vault.withLock(async()=>{
     for(const [i,a]of [...p.changes,...p.controlChanges].entries()){
@@ -70,6 +76,9 @@ export async function applyPlan(planPath,confirmation,deps={}){
     if(await exists(runtime)&&!await exists(candidate)){if(await treeHash(runtime)!==p.candidateHash)throw new Error('復旧する運用コードが一致しません');await durableRename(runtime,candidate);}
     if(state.hadRuntime&&await exists(previous)&&!await exists(runtime))await durableRename(previous,runtime);
    }),'organize');
+   // 旧版への復旧でも、最初の起動より前に再開意図を残す。
+   if(p.snapshot.agents.some(a=>a.loaded))state.writersResumed=true;
+   await phase('rollback-starting');
    await resumeServices(c,p.snapshot,deps,{rollback:true});await phase('rolled-back');
   }
   try{
@@ -105,10 +114,15 @@ export async function applyPlan(planPath,confirmation,deps={}){
    await resumeServices(c,p.snapshot,deps,{gatewayOnly:true});await verifyServices(c,p.snapshot,deps);await resumeServices(c,p.snapshot,deps);
    await phase('completed');return{commit:p.commit,unchanged:false,backup:join(folder,'backup/vault.tar.gz')};
   }catch(e){
-   try{
-    if(state.writersResumed){state.stopResults=await haltServices(c,p.snapshot,deps);await phase('recovery-required');}
-    else await restore();
-   }catch{state.phase='recovery-required';await writeJson(statePath,state);}
+   state.failure=failureOf(e,state.phase);let restored=false;
+   if(!state.writersResumed){
+    try{await restore();restored=true;}
+    catch(recoveryError){state.recoveryFailure=failureOf(recoveryError,state.phase);}
+   }
+   if(!restored){
+    state.stopResults=await haltServices(c,p.snapshot,deps);
+    state.phase='recovery-required';await writeJson(statePath,state);
+   }
    throw e;
   }
  },{resume:true});

@@ -1,4 +1,4 @@
-import {readJson,safePath,overlaps,within} from './common.mjs';
+import {readJson,safePath,canonicalPath,overlaps,within} from './common.mjs';
 import {resolve,isAbsolute,join} from 'node:path';
 import {homedir} from 'node:os';
 
@@ -23,10 +23,15 @@ export async function loadConfig(file,repository){
  const hub=await readJson(config.hubConfigPath);if(!hub||typeof hub.vaultPath!=='string')throw new Error('Hub設定にvaultPathが必要です');
  config.vaultPath=path(expand(hub.vaultPath));config.statePath=path(expand(hub.statePath??join(homedir(),'Library/Application Support/context-hub')));
  const codeRoots=[repository,config.previousRuntimePath].filter(Boolean);
- if(codeRoots.some(p=>overlaps(config.installDir,p)||overlaps(config.vaultPath,p))||overlaps(config.installDir,config.vaultPath)||config.workspacePath&&[...codeRoots,config.vaultPath,config.installDir].some(p=>overlaps(p,config.workspacePath)))throw new Error('運用先・workspace・Vaultは現在と旧checkoutの外へ分離してください');
  const controls=[file,config.hubConfigPath,...Object.values(config.launchd).filter(Boolean),...(c.openclaw?[config.openclaw.configPath,config.openclaw.gatewayPlist]:[])];
- if(new Set(controls).size!==controls.length)throw new Error('設定の管理対象パスが重なっています');
- for(const p of controls){if([config.vaultPath,config.installDir,...codeRoots,...(config.workspacePath?[config.workspacePath]:[])].some(root=>within(root,p)))throw new Error('設定・制御ファイルはVault・workspace・取得元・運用先の外へ置いてください');await safePath(p,{owned:true});}
+ const loggingDir=path(expand(hub.logging?.dir??join(config.statePath,'logs'))),updateRoots=[join(config.installDir,'runtime'),join(config.installDir,'updates')];
+ const paths=[...codeRoots,...controls,config.installDir,config.vaultPath,config.workspacePath,config.statePath,loggingDir,...updateRoots].filter(Boolean);
+ const physical=new Map(await Promise.all([...new Set(paths)].map(async p=>[p,await canonicalPath(p)])));
+ const contains=(root,p)=>within(physical.get(root),physical.get(p)),collides=(a,b)=>overlaps(physical.get(a),physical.get(b));
+ if(codeRoots.some(p=>collides(config.installDir,p)||collides(config.vaultPath,p))||collides(config.installDir,config.vaultPath)||config.workspacePath&&[...codeRoots,config.vaultPath,config.installDir].some(p=>collides(p,config.workspacePath)))throw new Error('運用先・workspace・Vaultは現在と旧checkoutの外へ分離してください');
+ if(new Set(controls.map(p=>physical.get(p))).size!==controls.length)throw new Error('設定の管理対象パスが重なっています');
+ if([config.statePath,loggingDir].some(p=>updateRoots.some(root=>contains(root,p))))throw new Error('Hubの状態・ログはruntimeと更新領域の外へ置いてください');
+ for(const p of controls){if([config.vaultPath,config.installDir,...codeRoots,...(config.workspacePath?[config.workspacePath]:[])].some(root=>contains(root,p)))throw new Error('設定・制御ファイルはVault・workspace・取得元・運用先の外へ置いてください');await safePath(p,{owned:true});}
  for(const p of [config.installDir,config.vaultPath,config.workspacePath,config.previousRuntimePath].filter(Boolean))await safePath(p,{owned:true});
  return config;
 }

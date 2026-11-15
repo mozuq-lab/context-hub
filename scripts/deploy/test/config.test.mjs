@@ -1,7 +1,7 @@
 import {afterEach,expect,test} from 'vitest';
 import {mkdtemp,mkdir,writeFile,rm,realpath,symlink,readFile,lstat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join,dirname,basename} from 'node:path';
 import {loadConfig} from '../config.mjs';
 import {safePath,writeJson,withUpdateLock,run} from '../common.mjs';
 
@@ -59,4 +59,82 @@ test('耐久JSON書き込みが既存内容を置換し、並行した更新ロ�
   await expect(withUpdateLock(f.config.installDir,'plan-b',async()=>{})).rejects.toThrow(/更新.*実行|ロック/);
  });
  await expect(withUpdateLock(f.config.installDir,'plan-b',async()=>42)).resolves.toBe(42);
+});
+
+const caseAlias=p=>join(dirname(p),basename(p).toUpperCase());
+async function hasCaseAlias(p){try{return await realpath(caseAlias(p))===await realpath(p);}catch(e){if(e.code==='ENOENT')return false;throw e;}}
+test.each([
+ ['installDir','vaultPath'],['installDir','repository'],['installDir','previousRuntimePath'],
+ ['workspacePath','vaultPath'],['workspacePath','repository'],['workspacePath','previousRuntimePath'],['workspacePath','installDir'],
+ ['vaultPath','repository'],['vaultPath','previousRuntimePath'],
+])('既存祖先の大小文字aliasでも%sを%s内へ置けない',async(child,parent,ctx)=>{
+ const f=await fixture(),paths={...f.config,vaultPath:f.vault,repository:f.repository,previousRuntimePath:join(f.root,'legacy checkout')};
+ await mkdir(paths.previousRuntimePath);await mkdir(f.config.installDir);
+ if(!await hasCaseAlias(paths[parent]))ctx.skip();
+ f.config.previousRuntimePath=paths.previousRuntimePath;
+ const nested=join(caseAlias(paths[parent]),'new','nested'),hub={vaultPath:f.vault,statePath:join(f.root,'state')};
+ if(child==='vaultPath')hub.vaultPath=nested;else f.config[child]=nested;
+ await writeFile(f.config.hubConfigPath,JSON.stringify(hub));await writeFile(f.file,JSON.stringify(f.config));
+ await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/外|重な|包含/);
+});
+test.each(['deployment','hub','syncPlist','backupPlist','backupVerifyPlist','openclawConfig','gatewayPlist'])('Vaultの大小文字alias内の制御ファイル%sを拒否する',async(kind,ctx)=>{
+ const f=await fixture();if(!await hasCaseAlias(f.vault))ctx.skip();
+ const canonical=join(f.vault,'control.json'),alias=join(caseAlias(f.vault),'control.json');let file=f.file;
+ if(kind==='deployment')file=alias;
+ else if(kind==='hub'){
+  await writeFile(canonical,await readFile(f.config.hubConfigPath));f.config.hubConfigPath=alias;
+ }else if(['syncPlist','backupPlist','backupVerifyPlist'].includes(kind))f.config.launchd[kind]=alias;
+ else f.config.openclaw={executable:join(f.root,'openclaw'),configPath:kind==='openclawConfig'?alias:join(f.root,'openclaw.json'),gatewayPlist:kind==='gatewayPlist'?alias:join(f.root,'gateway.plist'),automationId:null};
+ await writeFile(file,JSON.stringify(f.config));
+ await expect(loadConfig(file,f.repository)).rejects.toThrow(/外|重な|包含/);
+});
+test('大小文字aliasで同じ制御ファイルを二重管理しない',async ctx=>{
+ const f=await fixture();if(!await hasCaseAlias(f.config.hubConfigPath))ctx.skip();
+ f.config.launchd.syncPlist=caseAlias(f.config.hubConfigPath);await writeFile(f.file,JSON.stringify(f.config));
+ await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/重な/);
+});
+test('filesystem上で別の大小文字ディレクトリは分離した運用先として扱う',async()=>{
+ const f=await fixture(),alias=caseAlias(f.vault);
+ if(!await hasCaseAlias(f.vault))await mkdir(alias);
+ f.config.installDir=join(alias,'installation');await writeFile(f.file,JSON.stringify(f.config));
+ if(await hasCaseAlias(f.vault))await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/外|重な|包含/);
+ else expect((await loadConfig(f.file,f.repository)).installDir).toBe(join(alias,'installation'));
+});
+test.each(['statePath','logging.dir'])('%sを入れ替えるruntime・候補・前版の領域へ置けない',async kind=>{
+ const f=await fixture();
+ for(const target of ['runtime','runtime/state','updates','updates/fixture/candidate/state','updates/fixture/previous-runtime/state']){
+  const hub={vaultPath:f.vault,statePath:join(f.root,'state'),logging:{dir:join(f.root,'logs')}};
+  if(kind==='statePath')hub.statePath=join(f.config.installDir,target);else hub.logging.dir=join(f.config.installDir,target);
+  await writeFile(f.config.hubConfigPath,JSON.stringify(hub));
+  await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/状態|ログ|runtime|更新領域/);
+ }
+});
+test('statePath配下の運用先とその外にある状態・ログは許可する',async()=>{
+ const f=await fixture(),state=join(f.root,'state');f.config.installDir=join(state,'installation');
+ const hub={vaultPath:f.vault,statePath:state,logging:{dir:join(state,'logs')}};
+ await writeFile(f.config.hubConfigPath,JSON.stringify(hub));await writeFile(f.file,JSON.stringify(f.config));
+ expect((await loadConfig(f.file,f.repository)).installDir).toBe(join(state,'installation'));
+ expect(await readFile(f.config.hubConfigPath,'utf8')).toBe(JSON.stringify(hub));
+ expect(await readFile(f.file,'utf8')).toBe(JSON.stringify(f.config));
+});
+test.each(['statePath','logging.dir'])('未作成のruntime・updatesの大小文字alias内にも%sを置けない',async(kind,ctx)=>{
+ const f=await fixture();if(!await hasCaseAlias(f.root))ctx.skip();
+ for(const target of ['RUNTIME/state','UPDATES/fixture/CANDIDATE/state','UPDATES/fixture/PREVIOUS-RUNTIME/state']){
+  const hub={vaultPath:f.vault,statePath:join(f.root,'state'),logging:{dir:join(f.root,'logs')}};
+  if(kind==='statePath')hub.statePath=join(f.config.installDir,target);else hub.logging.dir=join(f.config.installDir,target);
+  await writeFile(f.config.hubConfigPath,JSON.stringify(hub));
+  await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/状態|ログ|runtime|更新領域/);
+ }
+});
+test('未作成の運用先を指す大小文字alias内の制御ファイルもfilesystemに従って分離する',async()=>{
+ const f=await fixture();f.config.installDir=join(f.root,'Future Installation');f.config.launchd.syncPlist=join(f.root,'FUTURE INSTALLATION','sync.plist');
+ await writeFile(f.file,JSON.stringify(f.config));
+ if(await hasCaseAlias(f.root))await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/外|重な|包含/);
+ else expect((await loadConfig(f.file,f.repository)).launchd.syncPlist).toBe(f.config.launchd.syncPlist);
+});
+test('未作成の制御ファイルの大小文字aliasもfilesystemに従って重複判定する',async()=>{
+ const f=await fixture();f.config.launchd.syncPlist=join(f.root,'Future.plist');f.config.launchd.backupPlist=join(f.root,'FUTURE.plist');
+ await writeFile(f.file,JSON.stringify(f.config));
+ if(await hasCaseAlias(f.root))await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/重な/);
+ else expect((await loadConfig(f.file,f.repository)).launchd.backupPlist).toBe(f.config.launchd.backupPlist);
 });

@@ -80,6 +80,16 @@ async function setLoaded(a,want,deps){
   for(;;){try{process.kill(s.pid,0);}catch(e){if(e.code==='ESRCH')break;throw new Error('サービスのPIDを確認できません');}if(Date.now()>end)throw new Error('サービスの終了を確認できません');await pause();}
  }
 }
+async function resumeAgent(a,deps){
+ await setLoaded(a,a.loaded,deps);
+ const now=deps.now??Date.now,wait=deps.pause??pause,end=now()+25000,needRunning=a.loaded&&a.running&&['gateway','syncPlist'].includes(a.role);
+ for(;;){
+  const current=await loaded(a.label,deps);
+  if(current.loaded===a.loaded&&(!needRunning||current.running))return;
+  if(now()>=end)throw new Error(`サービスの再開を確認できません: ${a.label}`);
+  await wait();
+ }
+}
 async function waitReady(c,deps){
  const end=Date.now()+45000;let ready=false;
  while(Date.now()<end){
@@ -119,10 +129,10 @@ export async function haltServices(c,s,deps={}){
  return results;
 }
 export async function resumeServices(c,s,deps={},options={}){
- for(const a of s.agents.filter(a=>a.role==='gateway'))await setLoaded(a,a.loaded,deps);
+ for(const a of s.agents.filter(a=>a.role==='gateway'))await resumeAgent(a,deps);
  if(s.agents.some(a=>a.role==='gateway'&&a.running))await waitReady(c,deps);
  if(options.gatewayOnly)return;
- for(const a of s.agents.filter(a=>a.role!=='gateway'))await setLoaded(a,a.loaded,deps);
+ for(const a of s.agents.filter(a=>a.role!=='gateway'))await resumeAgent(a,deps);
  if(s.job){
   const current=await checkedJob(c,s,deps),argv=options.rollback?s.job.payload.argv:s.updatedArgv??s.job.payload.argv;
   if(JSON.stringify(current.payload.argv)!==JSON.stringify(argv))await command(c,['automations','edit',c.openclaw.automationId,'--command-argv',JSON.stringify(argv),'--json'],deps);
@@ -134,7 +144,9 @@ export async function verifyServices(c,s,deps={}){
  const validation=JSON.parse(await command(c,['config','validate','--json'],deps));if(validation.valid!==true)throw new Error('OpenClaw設定を検証できません');
  if(!s.agents.find(a=>a.role==='gateway')?.running)return;
  await waitReady(c,deps);
- await command(c,['gateway','health','--json'],deps);
+ const health=JSON.parse(await command(c,['gateway','health','--json'],deps));
+ if(!health||typeof health!=='object'||Array.isArray(health)||health.ok!==true)throw new Error('Gatewayのhealth応答を確認できません');
+ if([...(health.plugins?.errors??[]),...(health.plugins?.unavailable??[])].some(p=>p?.id==='context-hub'))throw new Error('Gateway内のcontext-hub登録を確認できません');
  const v=JSON.parse(await command(c,['plugins','inspect','context-hub','--runtime','--json'],deps)),p=v.plugin;
  if(p?.imported!==true||p?.source!==join(c.installDir,'runtime/packages/openclaw-plugin/dist/index.js'))throw new Error('新版pluginの登録を確認できません');
 }
