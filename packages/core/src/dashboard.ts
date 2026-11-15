@@ -57,7 +57,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     // 旧版のNOWには項目一覧がない。次のcycleで作り直すまで「次の一手なし」と誤解させないよう分けて示す。
     if(!list){nextUnread.push(project.title);continue;}
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null);
-    if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
+    if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${i.hints?.length?'（片付いたかも・要確認）':''}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
    }catch{nextUnread.push(project.title);nextProblems.push(`- [NOW項目の記録が不正です](90_system/now-items/${project.id}.json)`);}
   }
   // 進行中は最近動いた順、停滞は長く止まっている順に並べる。
