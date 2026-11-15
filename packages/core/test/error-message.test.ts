@@ -39,3 +39,14 @@ test('JSON・YAMLの解析エラーやOSのエラーは、Vaultの本文を含�
  const{parseMarkdown}=await import('../src/storage.js');let yaml:unknown;try{parseMarkdown('---\na: 1\na: 社外秘の合言葉\n---\n');}catch(error){yaml=error;}
  expect(yaml).toBeDefined();expect(userFacingError(yaml)).not.toContain('社外秘');
 });
+test('追加の伏せ字規則は、アプリ（Dart）で解釈できない書き方を設定の検証で拒否し、どの規則が何故だめかを示す',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'ctx-config-'));roots.push(root);const path=join(root,'config.json');
+ const load=async(patterns:{label:string;pattern:string}[])=>{await writeFile(path,JSON.stringify({...defaultConfig(join(root,'vault'),join(root,'state')),privacy:{redactSecrets:true,patterns}}));return loadConfig(path).then(()=>undefined,(e:Error)=>e.message);};
+ // 先読み・後読み・名前付きグループ・非捕捉グループはDartも解釈できるので通す。
+ expect(await load([{label:'社員番号',pattern:'(?<![A-Z])EMP-(?<num>\\d{6})(?=\\b)(?:-x)?'},{label:'後読み',pattern:'(?<=ID:)\\d+'},{label:'括弧',pattern:'\\(?i:[(?i:]'}])).toBeUndefined();
+ const inline=await load([{label:'普通',pattern:'EMP-\\d{6}'},{label:'修飾子',pattern:'(?i:secret)-\\d+'}]);
+ expect(inline).toContain('privacy.patterns.1.pattern');expect(inline).toContain('インライン修飾子');expect(inline).not.toContain('secret');
+ expect(await load([{label:'外す修飾子',pattern:'(?-i:Key)\\d+'}])).toContain('privacy.patterns.0.pattern');
+ const dup=await load([{label:'重複',pattern:'(?<n>a\\d)|(?<n>b\\d)'}]);
+ expect(dup).toContain('privacy.patterns.0.pattern');expect(dup).toContain('名前付きグループ');
+});

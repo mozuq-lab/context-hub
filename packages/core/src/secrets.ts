@@ -202,6 +202,27 @@ export async function completeRedacted(config: Pick<HubConfig, 'privacy'>, llm: 
   return { ...completion, text: redactCompletion(completion.text, settings) };
 }
 
+/**
+ * 設定の追加規則のうち、アプリ（Dart）のRegExpでは解釈できない書き方。あれば理由を返す（規則の中身は返さない）。
+ * アプリは解釈できない規則があると、取りこぼしを避けて「選んで深掘り」の送信を止めるため、本体の設定検証で先に拒否する。
+ * インライン修飾子（(?i:…)・(?-i:…)など）と、同じ名前の名前付きグループを拒否する。先読み・後読み・名前付きグループはDartも解釈できる。
+ */
+export function dartPatternProblem(pattern: string): string | undefined {
+  const names = new Set<string>();
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\') { i++; continue; }
+    if (inClass) { if (c === ']') inClass = false; continue; }
+    if (c === '[') { inClass = true; continue; }
+    if (c !== '(' || pattern[i + 1] !== '?') continue;
+    const rest = pattern.slice(i + 2);
+    if (/^(?:[A-Za-z]+(?:-[A-Za-z]*)?|-[A-Za-z]+):/.test(rest)) return 'アプリ（Dart）で解釈できないインライン修飾子（(?i:…)など）があります';
+    const named = /^<([A-Za-z_$][\w$]*)>/.exec(rest);
+    if (named) { if (names.has(named[1]!)) return 'アプリ（Dart）で解釈できない、同じ名前の名前付きグループが複数あります'; names.add(named[1]!); }
+  }
+  return undefined;
+}
 /** 設定の追加規則をアプリへ渡すファイル。形式はFlutterクライアントと共有する取り決め（変えない）。 */
 export const privacyPatternsPath = '90_system/privacy/patterns.json';
 /** 有効な設定から、アプリと共有する追加規則のファイルの本文を作る。生成日時を入れず、同じ設定なら同じ本文にする。 */
