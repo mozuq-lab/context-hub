@@ -64,3 +64,33 @@ test('未知の保存例外の本文や秘密を受付エラーへ露出しな�
  const[path]=await vault.files('90_system/intake-errors'),record=(await vault.read(path))!;
  for(const display of [record,await vault.read('HOME.md'),(await doctor(config)).issues.join('\n')])expect(display).not.toContain('秘密の値');expect(JSON.parse(record).reason).toBeUndefined();
 });
+test('受付済みの依頼は次のingestでWriterロックを取らずに飛ばし、受付が終わった停止回復記録を片付ける',async()=>{
+ const{config,vault}=await workflowSetup(roots);const{hash}=await import('../src/storage.js');
+ const sent=[];for(let i=0;i<3;i++)sent.push(await packet(config,{},`メモ${i}`));
+ expect((await ingest(config)).accepted).toBe(3);expect(await vault.files('90_system/intake/pending')).toEqual([]);
+ // 以前の版が受領後に残した停止回復記録も、受領記録と一致すれば片付ける。
+ const raw=(await vault.read(sent[0]!.path))!;await vault.create(`90_system/intake/pending/${sent[0]!.requestId}.json`,JSON.stringify({schema_version:1,request_id:sent[0]!.requestId,request_hash:hash(raw),path:sent[0]!.path,raw})+'\n');
+ expect((await ingest(config)).deduped).toBe(3);expect(await vault.files('90_system/intake/pending')).toEqual([]);expect((await doctor(config)).issues).toEqual([]);
+ const lock=vi.spyOn(Vault.prototype,'withLock');const run=await ingest(config);
+ expect(run).toMatchObject({accepted:0,rejected:0,deduped:3,requestIds:[]});expect(lock).not.toHaveBeenCalled();
+});
+test('理由付きで拒否した依頼は、同じ内容のままなら再実行せずエラー記録も書き直さない',async()=>{
+ const{config,vault}=await workflowSetup(roots);const{utimes}=await import('node:fs/promises');
+ const original=await capture(config,{source:'cli',occurredAt:'2026-10-01T10:00:00Z',text:'元のメモ'});
+ const latest=await correctInput(config,original.inputId,{source:'quickadd',occurredAt:'2026-10-02T10:00:00Z',text:'最初の訂正'});
+ const stale=await packet(config,{operation:'correct',target_id:original.inputId},'別端末からの訂正');
+ expect((await ingest(config)).rejected).toBe(1);const[path]=await vault.files('90_system/intake-errors'),record=await vault.read(path!);
+ const lock=vi.spyOn(Vault.prototype,'withLock');const run=await ingest(config);
+ expect(run).toMatchObject({accepted:0,rejected:0,deduped:1,requestIds:[]});expect(lock).not.toHaveBeenCalled();expect(await vault.read(path!)).toBe(record);
+ vi.restoreAllMocks();
+ // 同じ受付IDのまま内容を変えれば、飛ばさずに検査し直す（停止回復記録と食い違うため競合として示す）。
+ await vault.write(stale.path,(await vault.read(stale.path))!.replace(original.inputId,latest.inputId));await utimes(join(config.vaultPath,stale.path),new Date(0),new Date(0));
+ expect((await ingest(config)).conflicts).toContain(stale.path);
+});
+test('Writerの混雑でロックを取れない回は、受付エラーを記録できなくてもingestを止めず保留にする',async()=>{
+ const{config,vault}=await workflowSetup(roots);const{LockTimeoutError}=await import('../src/storage.js');await packet(config);
+ vi.spyOn(Vault.prototype,'withLock').mockRejectedValue(new LockTimeoutError('writer'));
+ const run=await ingest(config);expect(run).toMatchObject({accepted:0,rejected:0,deferred:1});
+ vi.restoreAllMocks();expect(await vault.files('90_system/intake-errors')).toEqual([]);
+ expect((await ingest(config)).accepted).toBe(1);
+});

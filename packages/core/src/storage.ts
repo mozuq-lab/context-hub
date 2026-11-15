@@ -129,6 +129,13 @@ export function releaseLocksOnSignal(): void {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.once(signal, () => { releaseHeldLocksSync(); process.exit(128 + osConstants.signals[signal]); });
 }
 
+/** ロックを待ち時間内に取れなかったこと。一時的な混雑として、呼び出し側が次回へ回せるように区別する。 */
+export class LockTimeoutError extends Error {
+  constructor(readonly scope: LockScope) {
+    super(scope === 'organize' ? '別の整理処理が実行中か、整理ロックの残骸があります。ctx doctorで確認してください' : '別のWriterまたはロック残骸があります。ctx doctorで確認してください');
+    this.name = 'LockTimeoutError';
+  }
+}
 export class Vault {
   constructor(readonly config: HubConfig) {}
   private async root(): Promise<string> {
@@ -228,7 +235,7 @@ export class Vault {
     const lock = await lockPath(this.config, scope), reaper = `${lock}.reap`, token = randomUUID(), deadline = performance.now() + 10_000;
     await ensureLockRoot();
     while (true) {
-      if (performance.now() >= deadline) throw new Error(scope === 'organize' ? '別の整理処理が実行中か、整理ロックの残骸があります。ctx doctorで確認してください' : '別のWriterまたはロック残骸があります。ctx doctorで確認してください');
+      if (performance.now() >= deadline) throw new LockTimeoutError(scope);
       if (await directoryInfo(reaper)) { await pause(20); continue; }
       try {
         await mkdir(lock, { mode: 0o700 });
