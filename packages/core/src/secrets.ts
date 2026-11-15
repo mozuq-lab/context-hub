@@ -24,7 +24,16 @@ const PLACEHOLDER_HEAD = '[伏せ字:';
  * 代入の形で値を伏せる鍵の名前。英数字に続く位置では始めないため、DB_PASSWORDやAWS_SECRET_ACCESS_KEYのように
  * 前に語が付いた環境変数名にも当たり、passwordlessのような語の途中には当たらない。
  */
-const SECRET_KEYS = '(?:(?<![A-Za-z0-9])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|signature|sig)(?![A-Za-z0-9])|パスワード|暗証番号|合言葉)';
+const SECRET_KEYS = '(?:(?<![A-Za-z0-9])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|signature|sig|pass)(?![A-Za-z0-9])|パスワード|暗証番号|合言葉)';
+/**
+ * 鍵の名前と区切り（: = ：）の間。空白、引用符1つ、空白の順だけを認める。
+ * 「空白*・引用符?・空白*」と書くと引用符がないときに空白の分け方が二乗に増えて後戻りするため、引用符の後の空白を引用符と組にする。
+ */
+const KEY_GAP = `[ \\t]*(?:["'][ \\t]*)?[:=：]`;
+/** 代入の値。読点や句点・括弧で終わる。半角のカンマ・セミコロンは、直後に空白や区切りが続かない値の途中（ab,cdef）だけ値に含める。 */
+const VALUE_CHAR = `[^\\s"'\`,;、。，；）」』]`;
+/** 日本語の「パスワードは …」。語の続きと区別するため、英数字・記号の6文字以上で、数字か記号を含む値だけを伏せる。 */
+const PARTICLE_VALUE = `(?=[A-Za-z]*[0-9!#$%&*+?@^_~-])[A-Za-z0-9!#$%&*+.?@^_~-]{6,}`;
 // 既知の形式を先に並べる。重なった場合は先に見つかった（開始位置が早い、同じなら長い）一致を採る。
 export const builtinSecretRules: readonly SecretRule[] = [
   { id: 'private-key', label: '秘密鍵', pattern: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g },
@@ -41,9 +50,11 @@ export const builtinSecretRules: readonly SecretRule[] = [
   // URLに埋め込んだ利用者名とパスワード（scheme://user:pass@host）。パスワードだけを伏せる。
   { id: 'url-credential', label: 'パスワード', pattern: /(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)(?=@)/g, group: 1 },
   // password="..." のように引用符で囲んだ値。空白を含む値も伏せる。
-  { id: 'assignment-quoted', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}[ \\t]*["']?[ \\t]*[:=：][ \\t]*["'](?!\\[伏せ字)([^"'\\r\\n]{4,})(?=["'])`, 'gi'), group: 1 },
+  { id: 'assignment-quoted', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}${KEY_GAP}[ \\t]*["'](?!\\[伏せ字)([^"'\\r\\n]{4,})(?=["'])`, 'gi'), group: 1 },
   // password=... や パスワード: ... のような代入。値だけを伏せる。既に伏せた値と短すぎる値は除く。
-  { id: 'assignment', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}[ \\t]*["']?[ \\t]*[:=：][ \\t]*["']?(?!\\[伏せ字)([^\\s"'\`,;、。，；）」』]{6,})`, 'gi'), group: 1 },
+  { id: 'assignment', label: 'パスワード等', pattern: new RegExp(`${SECRET_KEYS}${KEY_GAP}[ \\t]*["']?(?!\\[伏せ字)((?:${VALUE_CHAR}|[,;](?=${VALUE_CHAR})){6,})`, 'gi'), group: 1 },
+  // パスワードは hunter2… のように、日本語の鍵の後に「は」で値を続ける書き方。
+  { id: 'assignment-particle', label: 'パスワード等', pattern: new RegExp(`(?:パスワード|暗証番号|合言葉)は[ \\t]*(?!\\[伏せ字)(${PARTICLE_VALUE})`, 'g'), group: 1 },
 ];
 
 /** 高エントロピーの長い文字列。英大文字・小文字・数字をすべて含む32文字以上で、URLのパスの一部は除く。 */

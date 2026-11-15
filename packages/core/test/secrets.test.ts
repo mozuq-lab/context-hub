@@ -154,3 +154,11 @@ test('設定で検出規則を追加でき、不正な正規表現は設定の�
   expect(validateConfig(base).privacy).toEqual({ redactSecrets: true, patterns: [] });
   expect(() => validateConfig({ ...base, privacy: { redactSecrets: true, patterns: [{ label: 'x', pattern: '(' }] } })).toThrow();
 });
+
+test('鍵の名前の後に長い空白が続いても、検出は文字数に比例する時間で終わる', () => {
+  const settings = secretSettings({ privacy: { redactSecrets: true, patterns: [] } });
+  // 以前は鍵と区切りの間の空白で二乗の後戻りが起き、5万字で数秒かかった。
+  const started = performance.now();
+  for (const text of ['password' + ' '.repeat(50_000) + 'x', 'token' + '\t'.repeat(50_000) + '"x', 'パスワードは' + ' '.repeat(50_000)]) findSecrets(text, settings);
+  expect(performance.now() - started).toBeLessThan(1000);
+});
