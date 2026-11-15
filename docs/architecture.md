@@ -16,12 +16,13 @@ Input/                         端末が追加する不変の受付ファイル
 00_inbox/                      正式原文・訂正原文
 10_projects/<id>/project.md     プロジェクト定義
 10_projects/<id>/NOW.md         現在地・次の一手・未解決の生成ビュー
+10_projects/<id>/HISTORY.md     月ごとの経緯の生成ビュー
 20_ideas/                      AI整理済みアイデア
 30_knowledge/                  共通へ採用した正式知識・方針
 10_projects/<id>/knowledge/     対象projectへ採用した正式知識・方針
 POLICY.md                      共通の有効方針（派生集約）
 10_projects/<id>/POLICY.md      対象projectの有効方針（派生集約）
-90_system/                     受領・処理・訂正解釈・候補・承認・作成・状態変更・定義変更・解決報告・「片付いたかも」の見送り・下書き・競合とその片付けの記録
+90_system/                     受領・処理・訂正解釈・候補・承認・作成・状態変更・定義変更・解決報告・期日・「片付いたかも」の見送り・下書き・競合とその片付けの記録
 HOME.md                        受領と整理状況への入口
 REVIEW.md                      直近の期間のふりかえり（派生）
 _ContextHub/                   共有する入力ツールとテンプレート

@@ -9,6 +9,7 @@ import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
 import { activeResolutions, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
+import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import type { HubConfig, Input, Receipt } from './types.js';
 
@@ -97,13 +98,16 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
   const resolutionRecords = await readItemResolutions(vault), resolved = activeResolutions(resolutionRecords, projectId), items = new Map<string, NowItem>(), done: string[] = [];
+  // 本人が付けた期日・見直す日は行の末尾に示す（出典より後ろに置き、項目との照合に使う行頭は変えない）。
+  // 引き継ぎは項目がそろってから決まるため、行には項目キーの印を付けておき、最後に日付へ置き換える。
+  const mark = '\u0000';
   const entry = (section: ItemSection, text: string, input: Input, label = ''): string[] => {
     const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key);
     if (!items.has(key)) {
-      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null });
+      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null, schedule: null });
       if (resolution) done.push(`- ${section === 'next' ? '完了' : '解決'}: ${label}${plain(text)} ${ref(input)} — 本人報告 ${dateLabel(resolution.created_at, config.timezone)} ${resolution.id}`);
     }
-    return resolution ? [] : [row(text, input, label)];
+    return resolution ? [] : [`${row(text, input, label)}${mark}${key}`];
   };
   const current = latest?.result.extracted.current.filter((item) => item.status === 'confirmed').map((item) => row(item.text, latest.input)) ?? [];
   const next = latest?.result.extracted.next.filter((item) => item.status === 'confirmed').flatMap((item) => entry('next', item.text, latest.input)) ?? [];
@@ -125,6 +129,10 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
       if (item.status === 'confirmed' && !latestTexts.has(item.text)) open.push(...entry('open', item.text, old.input, '過去の報告との差異（矛盾・時点差は未確認）: '));
     }
   }
+  const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
+  for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after }; }
+  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key); return s ? ` — ${scheduleLabel(s)}` : ''; }));
+  next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
   // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。
   const dismissed = new Set((await readHintDismissals(vault)).filter(d => d.project_id === projectId).map(d => dismissalKey(d.project_id, d.item_key, d.input_id)));

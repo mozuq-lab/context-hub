@@ -10,6 +10,11 @@ import { listProjectCandidates,recoverProjectApprovalsLocked } from './project-p
 import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths } from './intake.js';
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
+import { readItemSchedules } from './item-schedules.js';
+import { readProjectStatusChanges } from './project-status.js';
+import { readProjectCreations } from './project-creations.js';
+import { readProjectDefinitionChanges } from './project-definition.js';
+import { historyStopped } from './history.js';
 import type { HubConfig, Input } from './types.js';
 export async function doctor(config: HubConfig): Promise<{issues:string[];inputs:number}> {
   const vault=new Vault(config), issues:string[]=[], inputs:Input[]=[];
@@ -26,6 +31,11 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   let definitionsBroken = false;
   try { for (const issue of (await inspectProjects(config)).issues) { definitionsBroken = true; issues.push(`プロジェクト定義が不正です: ${describeProjectIssue(issue)}`); } } catch { definitionsBroken = true; issues.push('プロジェクト定義が不正です'); }
   const afterDefinitions = (label: string) => `${label}（プロジェクト定義を直してから再確認してください）`;
+  for (const [label, read] of [['状態の切り替え', () => readProjectStatusChanges(vault)], ['プロジェクトの作成', () => readProjectCreations(vault)], ['定義の変更', () => readProjectDefinitionChanges(vault)]] as const) {
+    try { await read(); } catch { issues.push(`${label}の記録が不正です（経緯から省かれます）`); }
+  }
+  try { for (const project of await readProjects(config)) if (await historyStopped(vault, project.id)) issues.push(`経緯の更新が止まっています（手で変更されています）: 10_projects/${project.id}/HISTORY.md`); } catch { /* 定義の不正は上で報告する。 */ }
+  try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
   try { await readEffectiveInputs(config); } catch { issues.push(definitionsBroken?afterDefinitions('訂正履歴・有効解釈と根拠を確認できません'):'訂正履歴・有効解釈と根拠が不正です'); }
   try { await listProjectCandidates(config);if(await recoverProjectApprovalsLocked(config,vault,Number.MAX_SAFE_INTEGER,true))issues.push('プロジェクト承認の回復待ちがあります'); } catch { issues.push(definitionsBroken?afterDefinitions('プロジェクト候補・確認・承認記録を確認できません'):'プロジェクト候補・確認・承認記録が不正です'); }
   try {

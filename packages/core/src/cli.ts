@@ -15,6 +15,8 @@ import { setProjectStatus,projectStatuses,lifecycleOf } from './project-status.j
 import { setProjectDefinition,editDefinition,normalizeDefinition,definitionLimitMessage } from './project-definition.js';
 import { readProjectCatalog } from './knowledge-scope.js';
 import { setItemResolution,readNowItems,readItemResolutions } from './item-resolutions.js';
+import { setItemSchedule,readItemSchedules,activeSchedules } from './item-schedules.js';
+import { rebuildHistories } from './history.js';
 import { dismissResolutionHint } from './resolution-hints.js';
 import { collectGitDrafts,readGitDrafts,useGitDraft,dismissGitDraft } from './git-drafts.js';
 import { Vault, unlockVault, LOCK_SCOPES, hash } from './storage.js';
@@ -74,11 +76,21 @@ project.command('edit <id>').description('本人の確認でプロジェクト�
 project.command('candidates').action(async()=>output(await listProjectCandidates(await config())));
 for(const action of ['approve','reject'] as const)project.command(`${action} <id>`).requiredOption('--hash <sha256>','確認した候補のハッシュ').requiredOption('--token <token>','候補の確認トークン').requiredOption('--confirm','候補詳細を読んだ人の明示確認').action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`})));
 const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決または未解決へ戻す');
-item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution?.id??null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{})})));});
+item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution?.id??null,due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{})})));});
 for(const action of ['resolve','reopen'] as const)item.command(`${action} <project> <key>`).description(action==='resolve'?'項目を完了・解決にする':'解決済みの項目を未解決へ戻す').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,_opts)=>{const c=await config(),vault=new Vault(c);
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ操作なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.action===action&&last.source_event_id?last.source_event_id:`cli:${key}:${action}:${last?.id??'none'}`;const result=await setItemResolution(c,{projectId:id,itemKey:key,action,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
 item.command('dismiss-hint <project> <key> <input-id>').description('「片付いたかも」が違うとき、そのメモからの候補を見送る（項目は未解決のまま）').requiredOption('--confirm','候補と引用を確認した本人による見送り').action(async(id,key,inputId,_opts)=>{const c=await config();const result=await dismissResolutionHint(c,{projectId:id,itemKey:key,inputId,source:'cli',sourceEventId:`cli:${key}:${inputId}:dismiss-hint`});await rebuildDashboard(c);output(result);});
+item.command('schedule <project> <key>').description('項目に期日・次に見直す日を付ける（noneで外す。指定しなかった方は今の日付を保つ）').option('--due <date>','期日（YYYY-MM-DD、またはnone）').option('--review <date>','次に見直す日（YYYY-MM-DD、またはnone）。この日まではHOMEの一覧でたたむ').option('--clear','期日と見直す日を両方外す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
+if(opts.clear&&(opts.due!==undefined||opts.review!==undefined))throw new Error('--clearと--due・--reviewは同時に指定できません');
+if(!opts.clear&&opts.due===undefined&&opts.review===undefined)throw new Error('--due・--review・--clearのいずれかを指定してください');
+const c=await config(),vault=new Vault(c),records=(await readItemSchedules(vault)).records,current=activeSchedules(records,id).get(key);
+const pick=(value:string|undefined,kept:string|null)=>value===undefined?kept:value==='none'?null:value;
+const due=opts.clear?null:pick(opts.due,current?.due??null),reviewAfter=opts.clear?null:pick(opts.review,current?.review_after??null);
+// 直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
+const last=records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.due===due&&last.review_after===reviewAfter&&last.source_event_id?last.source_event_id:`cli:${key}:schedule:${due??'-'}:${reviewAfter??'-'}:${last?.id??'none'}`;
+const result=await setItemSchedule(c,{projectId:id,itemKey:key,due,reviewAfter,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,due,review_after:reviewAfter});});
+program.command('history [project]').description('プロジェクトの経緯HISTORY.mdを根拠と処理記録から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildHistories(await config(),id?{projectId:id}:{})));
 const git=program.command('git').description('設定したローカルリポジトリのコミット履歴から作業記録の下書きを作る（既定は無効）');
 git.command('collect').description('下書きを作ってHOMEを更新').action(async()=>{const c=await config();if(!c.git.enabled)throw new Error('設定のgit.enabledが無効です');const result=await collectGitDrafts(c);await rebuildDashboard(c);output(result);if(result.errors.length)process.exitCode=1;});
 git.command('drafts').description('下書きの一覧').option('--all','入力済み・見送り済みも表示').action(async opts=>output((await readGitDrafts(await config())).filter(d=>opts.all||d.status==='pending').map(d=>({id:d.id,hash:d.hash,status:d.status,project:d.project_id,repo:d.repo,commits:d.commits.length,text:d.text,inputId:d.inputId??null}))));
