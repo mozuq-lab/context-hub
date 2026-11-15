@@ -14,7 +14,7 @@ import { doctor } from '../src/doctor.js';
 import { find } from '../src/retrieve.js';
 import { readItemResolutions, readNowItems, setItemResolution } from '../src/item-resolutions.js';
 import { readRereads, rereadPath } from '../src/item-rereads.js';
-import { Vault } from '../src/storage.js';
+import { Vault, hash } from '../src/storage.js';
 import type { HubConfig, LlmClient, LlmCompletion, LlmOptions } from '../src/types.js';
 
 const roots: string[] = [];
@@ -124,6 +124,23 @@ test('AIが推定した帰属を「別のプロジェクトの話」として外
   await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'reopen', source: 'cli' });
   expect(section(await now(config), '未解決')).toContain(text);
   expect(await find(config, '配布', { project: 'hub' })).toContain(`- [${inputId}]`);
+});
+
+test('同じメモの別の項目を「別のプロジェクトの話」として外した後に届いた依頼は、項目がないことを理由に拒否する', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: '集約ツール' });
+  const r = await capture(config, { source: 'cli', kind: 'memo', occurredAt: at, receivedAt: at, text: '集約ツールの配布方法と名前を決める' });
+  const open = (text: string) => ({ text, status: 'unverified' as const, input_id: r.inputId });
+  await organize(config, new MockLlm([{ category: 'project-update', summary: '配布方法と名前', project_candidates: [{ id: 'hub', confidence: 0.8 }], next_action_suggestions: [], extracted: { current: [], next: [], open: [open('配布方法'), open('名前')] }, knowledge_candidate: null, new_project_hint: null }]));
+  const [first, second] = (await readNowItems(vault, 'hub'))!.items;
+  const base = { operation: 'item-resolution', source: 'flutter', project_id: 'hub', confirmed: true };
+  // 端末では「名前」を先に解決にしたが、受付はファイル名順のため「配布方法」を外す依頼が先に処理される。
+  await packet(config, { ...base, request_id: `REQ-${'0'.repeat(32)}`, item_key: first!.key, action: 'exclude', reason: 'wrong-project' }, '');
+  const late = await packet(config, { ...base, request_id: `REQ-${'1'.repeat(32)}`, item_key: second!.key, action: 'resolve' }, '');
+  expect(await ingest(config)).toMatchObject({ accepted: 1, rejected: 1 });
+  expect((await readNowItems(vault, 'hub'))!.items.map(i => i.key)).toEqual([first!.key]);
+  expect(JSON.parse((await vault.read(`90_system/intake-errors/${hash(late.path)}.json`))!)).toMatchObject({ status: 'error', reason: { code: 'item-missing' }, code: expect.stringContaining('メモごとプロジェクトから外れた') });
+  expect(await ingest(config)).toMatchObject({ accepted: 0, rejected: 0, requestIds: [] });
 });
 
 test('本人が指定したプロジェクトでは「別のプロジェクトの話」でも帰属を変えず、項目だけを外す', async () => {

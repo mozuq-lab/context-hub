@@ -10,7 +10,7 @@ import {approve,reject} from './approvals.js';
 import { decideProject } from './project-proposals.js';
 import { setProjectStatus,projectStatusSchema } from './project-status.js';
 import { setProjectDefinition } from './project-definition.js';
-import { setItemResolution,itemActionSchema } from './item-resolutions.js';
+import { setItemResolution,itemActionSchema,ItemTargetError,itemTargetMessage } from './item-resolutions.js';
 import { setItemSchedule,scheduleIdSchema } from './item-schedules.js';
 import { dismissResolutionHint,hintDismissalIdSchema } from './resolution-hints.js';
 import { dismissGitDraft } from './git-drafts.js';
@@ -37,6 +37,9 @@ const intakeReasonSchema=z.discriminatedUnion('code',[
  z.object({code:z.literal('idea-changed')}).strict(),
  z.object({code:z.literal('project-merged'),project_id:projectIdSchema}).strict(),
  z.object({code:z.literal('project-merge-changed')}).strict(),
+ z.object({code:z.literal('item-missing')}).strict(),
+ z.object({code:z.literal('item-closed'),state:z.enum(['resolved','excluded'])}).strict(),
+ z.object({code:z.literal('item-open')}).strict(),
  z.object({code:z.literal('project-merge-refused'),cause:z.enum(['missing','same','already-merged','target-merged','has-sources','not-merged','target-mismatch']),project_id:projectIdSchema.optional()}).strict(),
 ]);
 export const intakeErrorSchema=z.object({schema_version:z.literal(1),path:z.string(),file_hash:z.string(),status:z.enum(['error','conflict']),code:z.string(),updated_at:z.string().datetime({offset:true}),reason:intakeReasonSchema.optional()}).strict();
@@ -50,6 +53,7 @@ export function intakeErrorMessage(record:z.infer<typeof intakeErrorSchema>):str
  if(record.reason?.code==='idea-missing')return 'アイデアが見つからないか、分類が取り消されています。同期して似ているアイデアの一覧を確認し直してください。';
  if(record.reason?.code==='idea-changed')return '確認した後にアイデアが作り直されています。同期して最新の内容を確認し、新しい依頼を送ってください。';
  if(record.reason?.code==='project-merged')return `このプロジェクトは${record.reason.project_id}に統合されています。同期してから、統合先で操作し直してください。`;
+ if(record.reason?.code==='item-missing'||record.reason?.code==='item-closed'||record.reason?.code==='item-open')return itemTargetMessage(record.reason);
  if(record.reason?.code==='project-merge-changed'||record.reason?.code==='project-merge-refused')return projectMergeReasonMessage(record.reason);
  return record.code;
 }
@@ -166,7 +170,9 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   }catch(error){
    // Writerの混雑でロックを取れなかった回は、依頼の誤りではないため記録せず保留にする（停止回復記録があれば次回に続ける）。
    if(error instanceof LockTimeoutError){outcome.deferred++;continue;}
-   const conflict=error instanceof Error&&(error.message==='conflict'||error.message==='event-conflict');await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof ProjectMergeError||error instanceof ProjectMergedError?error.reason:undefined);}
+   // NOWの項目の状態による拒否は、codeにも本人向けの文を入れる（理由を知らない版のアプリはcodeをそのまま示すため）。
+   const conflict=error instanceof Error&&(error.message==='conflict'||error.message==='event-conflict');
+   await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':error instanceof ItemTargetError?itemTargetMessage(error.reason):'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof ProjectMergeError||error instanceof ProjectMergedError||error instanceof ItemTargetError?error.reason:undefined);}
  }
  return outcome;
 }

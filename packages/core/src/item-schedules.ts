@@ -3,7 +3,7 @@ import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { readInputs } from './capture.js';
 import { assertNotMerged, projectIdSchema, readProjects } from './projects.js';
-import { activeResolutions, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection } from './item-resolutions.js';
+import { ItemTargetError, activeResolutions, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection } from './item-resolutions.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -151,7 +151,7 @@ export async function setItemSchedule(config: HubConfig, request: ItemScheduleRe
     const clearing = r.due === null && r.reviewAfter === null, { byKey, orphaned } = effectiveSchedules(records, r.projectId, list, resolved);
     const item = list.find(i => i.key === r.itemKey), orphan = orphaned.find(o => o.item_key === r.itemKey);
     // NOWから外れて付け直しを促している日付は、外すことだけを受け付ける。
-    if (!item && !(clearing && orphan)) throw new Error('NOWに該当する項目がありません。最新のNOWで確認してください');
+    if (!item && !(clearing && orphan)) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
     const current = item ? byKey.get(r.itemKey) : orphan;
     if (!clearing && resolved.has(r.itemKey)) throw new Error('解決済み・完了の項目には日付を付けられません');
     if (clearing && !current) throw new Error('この項目に外す日付はありません');
