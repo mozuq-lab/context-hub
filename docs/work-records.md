@@ -18,7 +18,25 @@ node packages/core/dist/cli.js --config "<設定ファイル>" item reopen <proj
 
 [Mac・Androidアプリ](https://github.com/mozuq-lab/context-hub-flutter-client)の対応版では、NOWの項目から`operation: item-resolution`の受付ファイルとして依頼し、次の`cycle`（または`ingest`）で反映します。報告ごとに`90_system/item-resolutions/RES-*.json`を残し、項目ごとに最後の記録（解決または再開）を有効とします。記録の作成後、NOWの再生成前に停止しても、同じ受付IDで再送すると再生成だけを行います。
 
-AIは完了・解決を判断しません。AIに解決報告の受付ファイルを代作させないでください。
+AIは完了・解決を判断しません（下の「片付いたかも」は候補を示すだけです）。AIに解決報告の受付ファイルを代作させないでください。
+
+### 片付いたかも（AIが見つける完了・解決の候補）
+
+完了・解決の報告は忘れがちです。後から書いたメモに「〜を直した」「〜に決めた」とあるのに、NOWに古い項目が残り続けないよう、整理のときにAIが片付いた可能性のある項目を探します。AIが見つけるのは候補だけで、完了・解決にするのは本人の報告だけです。
+
+- 対象は、本人がプロジェクトを指定したメモ・作業要約（アプリやCLIでプロジェクトを選んだもの）だけです。AIが推定しただけの帰属では探しません。
+- 整理のとき、そのプロジェクトの片付いていない「次の一手」「未解決」（最新30件、1件300文字まで）を、引用データとしてモデルへ渡します。モデルは、メモが「済んだ」「解決した」「不要になった」と明確に述べている項目を、メモの原文の引用付きで最大5件返します。予定や推測だけでは返しません。
+- コードは、渡した項目への参照であること、引用が最新の原文にそのまま含まれることを確かめ、合わないものは捨てます（整理全体は失敗にしません）。結果は処理記録（`90_system/receipts/`）の`resolution_hints`に残ります。
+- NOWの「片付いたかも（AI推定・本人の確認待ち）」と、項目一覧（`90_system/now-items/`）の各項目の`hints`に表示します。HOMEの「次の一手」では「（片付いたかも・要確認）」と印を付けます。項目は元の欄に残したままです。
+- 次の場合は示しません: 項目が完了・解決済みのとき、根拠のメモに未反映の訂正があるとき、本人が「違う」と見送ったとき、本人が「未解決に戻す」をした時点より前の整理から出た候補。
+
+確定はこれまでどおり`item resolve`（アプリでは完了・解決の報告）です。違う場合は、そのメモからの候補だけを見送ります。見送りは`90_system/hint-dismissals/HDM-*.json`に残り、同じメモから同じ項目へは再び示しません。別のメモがその項目に触れたときは改めて示します。アプリの対応版は`operation: item-hint-dismiss`（`project_id`・`item_key`・`input_id`）の受付ファイルで依頼します。
+
+```sh
+node packages/core/dist/cli.js --config "<設定ファイル>" item list <project-id>   # maybe_done に候補と引用
+node packages/core/dist/cli.js --config "<設定ファイル>" item resolve <project-id> <key> --confirm
+node packages/core/dist/cli.js --config "<設定ファイル>" item dismiss-hint <project-id> <key> <IN-ID> --confirm
+```
 
 ### HOMEの「次の一手」
 

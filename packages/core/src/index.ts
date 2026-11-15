@@ -21,6 +21,7 @@ export * from './cycle.js';
 export * from './project-status.js';
 export * from './project-definition.js';
 export * from './item-resolutions.js';
+export * from './resolution-hints.js';
 export * from './git-drafts.js';
 export * from './digest.js';
 export * from './conflicts.js';
