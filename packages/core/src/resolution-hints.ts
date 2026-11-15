@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { readInputs } from './capture.js';
-import { projectIdSchema, readProjects } from './projects.js';
+import { assertNotMerged, projectIdSchema, readProjects } from './projects.js';
 import { itemKeySchema } from './item-resolutions.js';
 import type { HubConfig } from './types.js';
 
@@ -48,7 +48,8 @@ export async function dismissResolutionHint(config: HubConfig, request: HintDism
   // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
   const { rebuildNowLocked, readReceipts } = await import('./views.js');
   return vault.withLock(async () => {
-    if (!(await readProjects(config)).some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
+    const projects = await readProjects(config);
+    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
     const records = await readHintDismissals(vault);
     const rebuild = async () => { await rebuildNowLocked(vault, config, r.projectId, await readInputs(config), await readReceipts(config)); };
     const result = (id: string, deduped: boolean): HintDismissResult => ({ projectId: r.projectId, itemKey: r.itemKey, hintInputId: r.inputId, dismissalId: id, deduped });
@@ -60,6 +61,8 @@ export async function dismissResolutionHint(config: HubConfig, request: HintDism
         return result(previous.id, true);
       }
     }
+    // 統合済みのプロジェクトの項目は統合先のNOWにある（キーも統合先のものになる）。
+    assertNotMerged(projects, r.projectId);
     // 別の経路で既に見送っていれば、新しい記録は作らない。
     const same = records.find(x => dismissalKey(x.project_id, x.item_key, x.input_id) === dismissalKey(r.projectId, r.itemKey, r.inputId));
     if (same) { await rebuild(); return result(same.id, true); }

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Vault } from './storage.js';
-import { readProjects } from './projects.js';
+import { readProjects, mergeTargets } from './projects.js';
 import { readReceipts, associatedProjects, dateLabel, generatedMarkdown, writeGeneratedLocked } from './views.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { buildReviewIndex } from './candidate-review.js';
@@ -60,10 +60,13 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     '- 失敗・競合の詳細は[HOME](HOME.md)を参照してください。', '',
   ];
 
-  const active: string[] = [], quiet: string[] = [], inactive: string[] = [];
+  const active: string[] = [], quiet: string[] = [], inactive: string[] = [], merged = mergeTargets(projects);
   for (const project of [...projects].sort((a, b) => a.id.localeCompare(b.id))) {
     const lifecycle = lifecycleOf(project), last = await lastEvidenceAt(vault, project.id);
     const nowPath = `10_projects/${project.id}/NOW.md`, target = await vault.read(nowPath) !== undefined ? nowPath : `10_projects/${project.id}/project.md`;
+    // 統合済みのプロジェクトは統合先だけを示す（入力は統合先のものとして集計している）。
+    const mergedInto = merged.get(project.id);
+    if (mergedInto) { inactive.push(`- [${plain(project.title)}](10_projects/${project.id}/project.md) — 統合済み（統合先: ${plain(projects.find(p => p.id === mergedInto)?.title ?? mergedInto)}）`); continue; }
     const head = `[${plain(project.title)}](${target}) — ${projectStatusLabels[lifecycle]}${last ? ` / 最終根拠: ${label(last)}（${daysSince(last, now)}日前）` : ' / 最終根拠なし'}`;
     if (lifecycle !== 'active') { inactive.push(`- ${head}`); continue; }
     const mine = units.filter(u => u.projects.includes(project.id) && u.unit.receipt?.result);
@@ -106,7 +109,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   }
   lines.push('## 動きのあったプロジェクト', active.join('\n\n') || 'この期間に新しい入力のあったプロジェクトはありません。', '');
   if (quiet.length) lines.push('## 動きのなかった進行中のプロジェクト', ...quiet, '');
-  if (inactive.length) lines.push('## 休止・完了', ...inactive, '');
+  if (inactive.length) lines.push(merged.size ? '## 休止・完了・統合済み' : '## 休止・完了', ...inactive, '');
   lines.push('## 確認待ちの候補');
   if (!pending.length) lines.push('確認待ちの候補はありません。');
   for (const c of [...pending].sort((a, b) => (Date.parse(a.generatedAt ?? '') || 0) - (Date.parse(b.generatedAt ?? '') || 0)))

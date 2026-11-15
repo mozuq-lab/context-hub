@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import {readPolicies,formatPolicies,rebuildPoliciesLocked,resolvePolicyProject} from './policies.js';
+import {readPolicies,formatPolicies,rebuildPoliciesLocked,resolvePolicyProject,policyProjectFor} from './policies.js';
 import {retireKnowledge} from './knowledge-retirement.js';
 import { Command, Option } from 'commander';
 import { open } from 'node:fs/promises';
@@ -11,8 +11,10 @@ import { ingest } from './intake.js';
 import { runCycle } from './cycle.js';
 import { rebuildDashboard } from './dashboard.js';
 import { rebuildDigest } from './digest.js';
+import { rebuildReferences } from './references.js';
 import { setProjectStatus,projectStatuses,lifecycleOf } from './project-status.js';
 import { setProjectDefinition,editDefinition,normalizeDefinition,definitionLimitMessage } from './project-definition.js';
+import { mergeProjects,unmergeProject,readProjectMerges } from './project-merges.js';
 import { readProjectCatalog } from './knowledge-scope.js';
 import { setItemResolution,readNowItems,readItemResolutions } from './item-resolutions.js';
 import { setItemSchedule,readItemSchedules,activeSchedules } from './item-schedules.js';
@@ -74,6 +76,23 @@ project.command('edit <id>').description('本人の確認でプロジェクト�
    let next;try{next=normalizeDefinition(edited);}catch{throw new Error(definitionLimitMessage);}
    // 同じ確認内容の再実行は、記録後・定義書込前の停止からの回復として扱う。
    const result=await setProjectDefinition(c,{projectId:id,expectedHash:opts.hash,...next,source:'cli',sourceEventId:`cli:${id}:${opts.hash}:${hash(JSON.stringify(next))}`});await rebuildDashboard(c);output({...result,definition:next});});
+// 同じ引数での再実行（途中で止まった操作の回復）には、最後の記録と同じ受付IDを使う。
+// 取り消した後にもう一度統合するときは定義が同じhashへ戻るため、最後の記録のIDを含めて別の操作にする。
+async function mergeEventId(c:HubConfig,action:'merge'|'unmerge',from:string,into:string,fromHash:string,intoHash:string):Promise<string>{
+ const last=(await readProjectMerges(new Vault(c))).filter(m=>m.from_id===from).at(-1);
+ if(last&&last.source==='cli'&&last.source_event_id&&last.action===action&&last.into_id===into&&last.from_before_hash===fromHash&&last.into_before_hash===intoHash)return last.source_event_id;
+ return `cli:${action}:${hash(JSON.stringify([from,into,fromHash,intoHash,last?.id??'none']))}`;
+}
+project.command('merge <from>').description('同じものを指すプロジェクトを、本人の確認で統合先へまとめる（統合元の入力・完了報告・日付は統合先のものとして読み替える。原文と記録は動かさない）')
+  .requiredOption('--into <id>','統合先のプロジェクト').requiredOption('--hash <sha256>','project listで確認した統合元のproject.mdのハッシュ').requiredOption('--into-hash <sha256>','project listで確認した統合先のproject.mdのハッシュ').requiredOption('--confirm','2つの定義を確認した本人による統合')
+  // 同じ確認内容の再実行は、記録後・定義書込前の停止からの回復として扱う。
+  .action(async(id,opts)=>{const c=await config();const result=await mergeProjects(c,{fromId:id,intoId:opts.into,fromHash:opts.hash,intoHash:opts.intoHash,source:'cli',sourceEventId:await mergeEventId(c,'merge',id,opts.into,opts.hash,opts.intoHash)});await rebuildDashboard(c);output(result);});
+project.command('unmerge <from>').description('統合を取り消し、統合元を統合前の状態へ戻す（統合で統合先へ足した別名・キーワードのうち残っているものを外す）')
+  .requiredOption('--hash <sha256>','project listで確認した統合元のproject.mdのハッシュ').requiredOption('--into-hash <sha256>','project listで確認した統合先のproject.mdのハッシュ').requiredOption('--confirm','2つの定義を確認した本人による取り消し')
+  .action(async(id,opts)=>{const c=await config(),from=(await readProjects(c)).find(p=>p.id===id);if(!from)throw new Error('プロジェクトが見つかりません');
+   // 統合先は定義から読む。取り消しの途中で止まった後の再実行では定義から消えているので、最後の統合の記録から求める。
+   const into=from.merged_into??(await readProjectMerges(new Vault(c))).filter(m=>m.from_id===id).at(-1)?.into_id;if(!into)throw new Error('このプロジェクトは統合されていません');
+   const result=await unmergeProject(c,{fromId:id,intoId:into,fromHash:opts.hash,intoHash:opts.intoHash,source:'cli',sourceEventId:await mergeEventId(c,'unmerge',id,into,opts.hash,opts.intoHash)});await rebuildDashboard(c);output(result);});
 project.command('candidates').action(async()=>output(await listProjectCandidates(await config())));
 for(const action of ['approve','reject'] as const)project.command(`${action} <id>`).requiredOption('--hash <sha256>','確認した候補のハッシュ').requiredOption('--token <token>','候補の確認トークン').requiredOption('--confirm','候補詳細を読んだ人の明示確認').action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`})));
 const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決または未解決へ戻す');
@@ -92,6 +111,7 @@ const due=opts.clear?null:pick(opts.due,current?.due??null),reviewAfter=opts.cle
 const last=records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.due===due&&last.review_after===reviewAfter&&last.source_event_id?last.source_event_id:`cli:${key}:schedule:${due??'-'}:${reviewAfter??'-'}:${last?.id??'none'}`;
 const result=await setItemSchedule(c,{projectId:id,itemKey:key,due,reviewAfter,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,due,review_after:reviewAfter});});
 program.command('history [project]').description('プロジェクトの経緯HISTORY.mdを根拠と処理記録から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildHistories(await config(),id?{projectId:id}:{})));
+program.command('references [project]').description('プロジェクトの資料REFERENCES.md（AIが参考資料に分類したメモとURLの一覧）を整理結果から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildReferences(await config(),id?{projectId:id}:{})));
 const git=program.command('git').description('設定したローカルリポジトリのコミット履歴から作業記録の下書きを作る（既定は無効）');
 git.command('collect').description('下書きを作ってHOMEを更新').action(async()=>{const c=await config();if(!c.git.enabled)throw new Error('設定のgit.enabledが無効です');const result=await collectGitDrafts(c);await rebuildDashboard(c);output(result);if(result.errors.length)process.exitCode=1;});
 git.command('drafts').description('下書きの一覧').option('--all','入力済み・見送り済みも表示').action(async opts=>output((await readGitDrafts(await config())).filter(d=>opts.all||d.status==='pending').map(d=>({id:d.id,hash:d.hash,status:d.status,project:d.project_id,repo:d.repo,commits:d.commits.length,text:d.text,inputId:d.inputId??null}))));
@@ -122,7 +142,7 @@ program.command('pending').action(async()=>output(await pending(await config()))
 program.command('resume <project>').action(async id=>output(await resume(await config(),id)));
 program.command('context <project>').option('--max-chars <n>','最大文字数',positive).action(async(id,opts)=>output(await context(await config(),id,opts.maxChars)));
 program.command('bundle <ids...>').description(`選んだ記録（IN・IDEA・KNWのID、NOWはプロジェクトID。最大${bundleMaxIds}件）を、出典・訂正の注意・方針付きの1つの資料にする`).option('--max-chars <n>','最大文字数',positive).action(async(ids,opts)=>output(await bundle(await config(),ids,opts.maxChars)));
-program.command('policies').description('同期版の有効方針を読取専用で取得').option('--project <id>','ContextHubプロジェクト').option('--cwd <path>','対応付ける作業フォルダー').option('--json','JSON出力').action(async opts=>{const c=await config(),id=opts.project??(opts.cwd?await resolvePolicyProject(c,opts.cwd):undefined),b=await readPolicies(c,id);output(opts.json?b:formatPolicies(b));});
+program.command('policies').description('同期版の有効方針を読取専用で取得').option('--project <id>','ContextHubプロジェクト').option('--cwd <path>','対応付ける作業フォルダー').option('--json','JSON出力').action(async opts=>{const c=await config(),id=opts.project?await policyProjectFor(c,opts.project):(opts.cwd?await resolvePolicyProject(c,opts.cwd):undefined),b=await readPolicies(c,id);output(opts.json?b:formatPolicies(b));});
 program.command('retire <id>').requiredOption('--hash <sha256>','確認した正式知識のハッシュ').requiredOption('--confirm','本人による適用停止').action(async(id,opts)=>output(await retireKnowledge(await config(),id,opts.hash)));
 program.command('candidates').action(async()=>output(await listCandidates(await config())));
 program.command('approve <id>').requiredOption('--hash <sha256>','候補一覧で確認した内容ハッシュ').requiredOption('--scope <scope>','global または project').option('--project <id>','採用先ContextHubプロジェクト').option('--project-hash <sha256>','確認したproject.mdのハッシュ').action(async(id,opts)=>output(await approve(await config(),id,opts.hash,opts.scope==='project'?{scope:'project',projectId:opts.project,projectHash:opts.projectHash}:{scope:opts.scope})));
