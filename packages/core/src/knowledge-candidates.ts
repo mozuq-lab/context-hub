@@ -50,7 +50,8 @@ export async function readKnowledgeCandidate(config:HubConfig,id:string):Promise
      const t=parseMarkdown(target).meta;
      item.reflected=t.id===`KNW-${id.slice(4)}`&&t.approval_id===decision.id&&t.approved_hash===decision.candidate_hash&&t.approved_candidate===id;
     }
-    if(!item.reflected)item.warnings.push('承認記録はありますが、知識への反映を確認できません。');
+    if(target!==undefined&&!isGeneratedIntact(target))item.warnings.push('採用した知識のファイルが手で変更されているため、方針から外しています。手での変更を戻すか、ファイルを削除すると承認記録から作り直します。');
+    else if(!item.reflected)item.warnings.push('承認記録はありますが、知識への反映を確認できません。');
    }else item.reflected=true;
   }else{const existing=await readKnowledge(vault,`KNW-${id.slice(4)}`);
     await depend(retirementPath(`KNW-${id.slice(4)}`));

@@ -1,5 +1,6 @@
 import { listText } from './markdown-text.js';
 import {rebuildPoliciesLocked,readPolicies} from './policies.js';
+import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions } from './item-resolutions.js';
 import { effectiveSchedules,readItemSchedules,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
@@ -55,7 +56,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n\n## プロジェクト定義の不正（${definitionIssues.length}件）\n次のプロジェクト定義を読めないため、整理・HOMEの一覧・方針の更新を止めています。端末からのメモは受け付けて記録し、失われません（プロジェクトへの関連付けは定義を直すまで待ちます）。括弧内の項目を直してから、次のcycleを待つか \`ctx doctor\` で確認してください。\n${definitionIssues.map(i=>`- [${plain(i.path)}](<${i.path}>): ${plain(projectIssueFields(i))}`).join('\n')}\n\n名前（title）は1〜200文字、別名（aliases）とキーワード（keywords）は1件100文字までの文字列を50件まで、状態（status）は文字列で書きます。\n`;
    return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
   }
-  await rebuildPoliciesLocked(config,vault);
+  const modifiedKnowledge=await rebuildPoliciesLocked(config,vault);
   const projects=await readProjects(config),review=await buildReviewIndex(config),effective=await readEffectiveInputs(config),receipts=await readReceipts(config),acks=await readIntakeReceipts(config);
   await writeReviewIndexLocked(vault,review);
   const candidates=review.items,pending=candidates.filter(c=>c.status==='pending'),attention=candidates.filter(c=>c.status==='stale'||c.status==='unavailable'),history=candidates.filter(c=>c.status==='approved'||c.status==='rejected');
@@ -141,6 +142,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    if(g.kind==='now')errors.push(`- [NOWの更新が止まっています](${g.latest}): ${plain(g.title??g.projectId??g.target)} — NOW.mdの自動領域が手で変更されています（${g.stoppedAt?dateLabel(g.stoppedAt,config.timezone)+'の生成から':''}更新なし${count}）。アプリの「生成版に戻す」か\`ctx conflict resolve\`で戻せます。手で変えた行はメモとして残ります`);
    else errors.push(`- [生成物の競合](${g.latest}): ${plain(g.target)}${count?` / ${count.slice(1)}`:''}${g.resolvable?' — `ctx conflict resolve`で作り直せます':''}`);
   }
+  if(modifiedKnowledge.length)errors.push(`- ${plain(modifiedKnowledgeWarning(modifiedKnowledge))}`);
   for(const issue of mergeIssues(projects))errors.push(`- ${plain(issue)}（project.mdのmerged_intoを直すか外してください）`);
   for(const path of draftRecords.problems)errors.push(`- [作業記録の下書きの記録が不正です](${path})`);
   errors.push(...nextProblems);
