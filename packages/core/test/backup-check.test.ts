@@ -61,7 +61,7 @@ test('バックアップを展開して確かめ、復元できた結果を記�
   await capture(config, { source: 'cli', kind: 'memo', occurredAt: new Date().toISOString(), text: 'バックアップの後のメモ' });
   const work = await tempDir();
   const { check, restoredTo } = await verifyBackup(config, { workDir: work });
-  expect(check).toMatchObject({ status: 'ok', archive: 'vault-20261110-033000.tar.gz', restored: { inputs: 2, projects: 1, receipts: 2 }, live: { inputs: 3, projects: 1 }, issues: [] });
+  expect(check).toMatchObject({ status: 'ok', archive: 'vault-20261110-033000.tar.gz', restored: { inputs: 2, projects: 1, receipts: 2 }, live: { inputs: 3, projects: 1 }, verify_max_age_days: 7, issues: [] });
   expect(check.restored!.files).toBeGreaterThan(5);
   expect(restoredTo).toBeUndefined();
   expect(await readdir(work)).toEqual([]);
@@ -192,7 +192,7 @@ test('展開は通常ファイルとディレクトリだけを展開先の中�
 
 test('確認結果は新しい30件と、最後に復元できた1件を残す', async () => {
   const { config, vault, backups } = await fixture();
-  const template: BackupCheck = { schema_version: 1, id: '', archive: 'vault-20261001-033000.tar.gz', archive_created_at: old, archive_bytes: 10, checked_at: old, status: 'failed', restored: null, live: { inputs: 2, projects: 1 }, issues: ['アーカイブが途中で終わっています'], notes: [] };
+  const template: BackupCheck = { schema_version: 1, id: '', archive: 'vault-20261001-033000.tar.gz', archive_created_at: old, archive_bytes: 10, checked_at: old, status: 'failed', restored: null, verify_max_age_days: 7, live: { inputs: 2, projects: 1 }, issues: ['アーカイブが途中で終わっています'], notes: [] };
   const id = (i: number) => `BKC-000000000000000000000000${String(i).padStart(2, '0')}`;
   const write = (r: BackupCheck) => vault.write(`90_system/backup-checks/${r.id}.json`, JSON.stringify(r));
   await write({ ...template, id: id(0), status: 'ok', issues: [], restored: { files: 9, inputs: 2, projects: 1, receipts: 2 } });

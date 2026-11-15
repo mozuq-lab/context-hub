@@ -28,6 +28,8 @@ export const backupCheckSchema = z.object({
   status: z.enum(['ok', 'failed']),
   // 展開できた範囲の件数。展開の前に失敗した場合はnull。
   restored: counts.nullable(), live: z.object({ inputs: z.number().int().min(0), projects: z.number().int().min(0) }).strict(),
+  // 確認したときの設定（backup.verifyMaxAgeDays）。設定を読めないアプリが、同じ目安で復元点の古さを知らせるために残す。
+  verify_max_age_days: z.number().int().min(1).max(3650),
   // 復元できないと判断した理由。値・本文は含めない。
   issues: z.array(z.string().max(300)).max(50),
   // 判断には使わない参考（復元先でのdoctorの指摘、読み飛ばした付加メタデータなど）。
@@ -284,7 +286,7 @@ export async function verifyBackup(config: HubConfig, options: BackupVerifyOptio
   } finally { if (!options.keep) await rm(work, { recursive: true, force: true }); }
   const check: BackupCheck = backupCheckSchema.parse({
     schema_version: 1, id: `BKC-${ulid()}`, archive: basename(archive), archive_created_at: new Date(info.mtimeMs).toISOString(), archive_bytes: info.size, checked_at: now.toISOString(),
-    status: issues.length ? 'failed' : 'ok', restored, live: { inputs: liveInputs.length, projects: liveProjects.length }, issues, notes,
+    status: issues.length ? 'failed' : 'ok', restored, live: { inputs: liveInputs.length, projects: liveProjects.length }, verify_max_age_days: backupSettings(config).verifyMaxAgeDays, issues, notes,
   });
   await vault.withLock(async () => {
     if (!await vault.create(backupCheckPath(check.id), JSON.stringify(check, null, 2) + '\n')) throw new Error('確認結果の記録が競合しました');
