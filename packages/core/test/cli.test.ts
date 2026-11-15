@@ -1,6 +1,6 @@
 import {afterEach,expect,test} from 'vitest';
-import {spawn} from 'node:child_process';
-import {mkdtemp,rm,readFile,writeFile,readdir} from 'node:fs/promises';
+import {spawn,spawnSync} from 'node:child_process';
+import {mkdtemp,mkdir,rm,readFile,writeFile,readdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {defaultConfig} from '../src/config.js';
@@ -68,3 +68,41 @@ test('CLIで期日を付けると保たれ、片方だけ変えられ、--clear�
  const history=await cli(config,['history','hub']);expect(history.code).toBe(0);expect(JSON.parse(history.out)).toEqual([{projectId:'hub',path:'10_projects/hub/HISTORY.md',written:false}]);
  expect(await readFile(join(root,'vault/10_projects/hub/HISTORY.md'),'utf8')).toContain('# 集約ツールの経緯');
 },20000);
+test('CLIで項目を誤りとして外すと、完了とは別の欄へ移り、未解決へ戻せる',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ expect((await cli(config,['project','add','hub','--title','集約ツール'])).code).toBe(0);
+ expect((await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-30T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n- [確認済み] 名前を決める\n')).code).toBe(0);
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ type Item={key:string;text:string;resolved:unknown;excluded?:{reason:string;note?:string}};
+ const list=async()=>JSON.parse((await cli(config,['item','list','hub'])).out) as Item[];
+ const key=(await list()).find(i=>i.text==='利用者に見せる')!.key;
+ // 理由のない依頼と、知らない理由は記録しない。
+ expect((await cli(config,['item','exclude','hub',key,'--confirm'])).code).not.toBe(0);
+ expect((await cli(config,['item','exclude','hub',key,'--reason','unknown','--confirm'])).code).not.toBe(0);
+ const excluded=await cli(config,['item','exclude','hub',key,'--reason','outdated','--note','先月で終わった話','--confirm']);expect(excluded.code).toBe(0);
+ const now=()=>readFile(join(root,'vault/10_projects/hub/NOW.md'),'utf8');
+ expect(await now()).toContain('# 誤りとして外した項目（本人報告）');expect(await now()).toContain('理由: もう古い（先月で終わった話）');
+ expect(await readFile(join(root,'vault/HOME.md'),'utf8')).not.toContain('  - 利用者に見せる');
+ const item=(await list()).find(i=>i.key===key)!;expect(item.resolved).toBeNull();expect(item.excluded).toMatchObject({reason:'outdated',note:'先月で終わった話'});
+ expect((await cli(config,['item','reopen','hub',key,'--confirm'])).code).toBe(0);
+ expect(await now()).not.toContain('# 誤りとして外した項目（本人報告）');expect((await list()).find(i=>i.key===key)!.excluded).toBeUndefined();
+},20000);
+test('CLIでバックアップを確かめると結果を記録し、復元できないときは失敗で終わる',async()=>{
+ const{root,config}=await setup();const backups=join(root,'backups');await mkdir(backups);
+ const settings=JSON.parse(await readFile(config,'utf8'));settings.backup={dir:backups,verifyMaxAgeDays:7};await writeFile(config,JSON.stringify(settings));
+ await cli(config,['init']);expect((await cli(config,['add','--occurred-at','2026-10-30T00:00:00Z'],'バックアップを確かめるメモ\n')).code).toBe(0);
+ // バックアップがまだない間は、確かめられないことを失敗として返す。
+ const none=await cli(config,['backup','verify']);expect(none.code).not.toBe(0);
+ const archive=join(backups,'vault-20261101-033000.tar.gz');
+ expect(spawnSync('tar',['-czf',archive,'-C',join(root,'vault'),'.']).status).toBe(0);
+ const verified=await cli(config,['backup','verify']);expect(verified.code).toBe(0);
+ const result=JSON.parse(verified.out) as {check:{status:string;archive:string;restored:{inputs:number}}};
+ expect(result.check).toMatchObject({status:'ok',archive:'vault-20261101-033000.tar.gz',restored:{inputs:1}});
+ expect(await readFile(join(root,'vault/HOME.md'),'utf8')).toContain('最後に確かめた復元点: ');
+ const status=JSON.parse((await cli(config,['backup','status'])).out) as {restore_point:{archive:string}|null;warnings:string[]};
+ expect(status.restore_point?.archive).toBe('vault-20261101-033000.tar.gz');expect(status.warnings).toEqual([]);
+ // 途中で切れたアーカイブは復元できないと記録し、終了コードで知らせる。確かめた復元点は残す。
+ const broken=join(backups,'vault-20261102-033000.tar.gz');await writeFile(broken,(await readFile(archive)).subarray(0,200));
+ const failed=await cli(config,['backup','verify']);expect(failed.code).toBe(1);expect(JSON.parse(failed.out).check.status).toBe('failed');
+ expect(JSON.parse((await cli(config,['backup','status'])).out).restore_point.archive).toBe('vault-20261101-033000.tar.gz');
+},30000);
