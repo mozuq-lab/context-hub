@@ -63,11 +63,11 @@ test('耐久JSON書き込みが既存内容を置換し、並行した更新ロ�
 
 const caseAlias=p=>join(dirname(p),basename(p).toUpperCase());
 async function hasCaseAlias(p){try{return await realpath(caseAlias(p))===await realpath(p);}catch(e){if(e.code==='ENOENT')return false;throw e;}}
-test.each([
+test.for([
  ['installDir','vaultPath'],['installDir','repository'],['installDir','previousRuntimePath'],
  ['workspacePath','vaultPath'],['workspacePath','repository'],['workspacePath','previousRuntimePath'],['workspacePath','installDir'],
  ['vaultPath','repository'],['vaultPath','previousRuntimePath'],
-])('既存祖先の大小文字aliasでも%sを%s内へ置けない',async(child,parent,ctx)=>{
+])('既存祖先の大小文字aliasでも%sを%s内へ置けない',async([child,parent],ctx)=>{
  const f=await fixture(),paths={...f.config,vaultPath:f.vault,repository:f.repository,previousRuntimePath:join(f.root,'legacy checkout')};
  await mkdir(paths.previousRuntimePath);await mkdir(f.config.installDir);
  if(!await hasCaseAlias(paths[parent]))ctx.skip();
@@ -77,7 +77,7 @@ test.each([
  await writeFile(f.config.hubConfigPath,JSON.stringify(hub));await writeFile(f.file,JSON.stringify(f.config));
  await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/外|重な|包含/);
 });
-test.each(['deployment','hub','syncPlist','backupPlist','backupVerifyPlist','openclawConfig','gatewayPlist'])('Vaultの大小文字alias内の制御ファイル%sを拒否する',async(kind,ctx)=>{
+test.for(['deployment','hub','syncPlist','backupPlist','backupVerifyPlist','openclawConfig','gatewayPlist'])('Vaultの大小文字alias内の制御ファイル%sを拒否する',async(kind,ctx)=>{
  const f=await fixture();if(!await hasCaseAlias(f.vault))ctx.skip();
  const canonical=join(f.vault,'control.json'),alias=join(caseAlias(f.vault),'control.json');let file=f.file;
  if(kind==='deployment')file=alias;
@@ -117,7 +117,7 @@ test('statePath配下の運用先とその外にある状態・ログは許可�
  expect(await readFile(f.config.hubConfigPath,'utf8')).toBe(JSON.stringify(hub));
  expect(await readFile(f.file,'utf8')).toBe(JSON.stringify(f.config));
 });
-test.each(['statePath','logging.dir'])('未作成のruntime・updatesの大小文字alias内にも%sを置けない',async(kind,ctx)=>{
+test.for(['statePath','logging.dir'])('未作成のruntime・updatesの大小文字alias内にも%sを置けない',async(kind,ctx)=>{
  const f=await fixture();if(!await hasCaseAlias(f.root))ctx.skip();
  for(const target of ['RUNTIME/state','UPDATES/fixture/CANDIDATE/state','UPDATES/fixture/PREVIOUS-RUNTIME/state']){
   const hub={vaultPath:f.vault,statePath:join(f.root,'state'),logging:{dir:join(f.root,'logs')}};

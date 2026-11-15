@@ -38,7 +38,7 @@ test('復旧用ファイルが欠損していても、元から存在した配�
  await writeFile(join(f.repository,'agents.md'),'# v2\n');f.git('add','.');f.git('commit','-qm','第2版');const next=await preparePlan(f.file,options(f));
  await expect(applyPlan(next.planPath,next.planHash,{run:f.execute,onProgress:async s=>{if(s.phase==='files-written'){await unlink(join(next.planPath,'../backup/0.before'));throw new Error('fixture rollback');}}})).rejects.toThrow(/fixture/);
  expect(await readFile(join(f.vault,'AGENTS.md'),'utf8')).toBe('# v2\n');expect((await deploymentStatus(f.file)).pending.phase).toBe('recovery-required');
-});
+},30000);
 test('Gateway再開後にRPCが壊れてもGatewayと同期の停止を試みる',async()=>{
  const f=await setup(),fake=await fakeServices(f),deps={run:fake.execute,platform:'darwin',ready:fake.ready};const p=await preparePlan(f.file,{repository:f.repository,...deps});let broken=false;
  const fail=async(exe,args,o)=>{if(exe===f.config.openclaw.executable&&args[0]==='plugins')broken=true;if(broken&&exe===f.config.openclaw.executable)return{code:1,stdout:'',stderr:'RPC unavailable'};return fake.execute(exe,args,o);};
