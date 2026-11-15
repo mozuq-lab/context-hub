@@ -68,7 +68,7 @@ npm run deploy -- status --config "<deployment.jsonの絶対パス>"
 
 現在のcommit、管理対象の変更（`drift`）、保持対象、未完了操作をJSONで返します。未完了または変更があれば終了コード1です。未導入の`commit: null`は終了コード0です。
 
-新Writerを再開する前の通常エラーでは、確認できる範囲だけ元へ戻します。Gateway等を再開した後の失敗は、旧コードやVaultを自動復元せず、Writerを止めた復旧待ち状態を残します。設定・バックアップ・journalを保存先で確認してください。
+新Writerを再開する前の通常エラーでは、確認できる範囲だけ元へ戻します。Gateway等を再開した後の失敗は、旧コードやVaultを自動復元せず、対象サービスすべての停止を試みて復旧待ち状態を残します。`status`の`pending.stopResults`で各停止の確認結果を返します。未確認の対象は停止済みと判断せず、設定・バックアップ・journalを保存先で確認してください。バックアップにはHub設定・deployment設定・OpenClaw設定・指定したplistも含まれます。
 
 強制終了などで途中に止まった場合は、まず`status`を確認します。全Writer停止と所有PIDの終了を確認したうえで、共通Vaultロックの残骸は既存の`ctx doctor --unlock`で回収します。その後、同じplanとhashでapplyを再実行します。更新専用ロックは同じplan・死亡PID・journalの一致が確認できる場合だけ回収します。別の変更や再開済みWriterがある場合は自動再開しません。ロックを手で削除して処理を強行しないでください。
 

@@ -22,10 +22,11 @@ export async function loadConfig(file,repository){
  }
  const hub=await readJson(config.hubConfigPath);if(!hub||typeof hub.vaultPath!=='string')throw new Error('Hub設定にvaultPathが必要です');
  config.vaultPath=path(expand(hub.vaultPath));config.statePath=path(expand(hub.statePath??join(homedir(),'Library/Application Support/context-hub')));
- if(overlaps(config.installDir,repository)||overlaps(config.installDir,config.vaultPath)||config.workspacePath&&overlaps(config.installDir,config.workspacePath))throw new Error('運用先はVault・取得元・workspaceの外へ分離してください');
+ const codeRoots=[repository,config.previousRuntimePath].filter(Boolean);
+ if(codeRoots.some(p=>overlaps(config.installDir,p)||overlaps(config.vaultPath,p))||overlaps(config.installDir,config.vaultPath)||config.workspacePath&&[...codeRoots,config.vaultPath,config.installDir].some(p=>overlaps(p,config.workspacePath)))throw new Error('運用先・workspace・Vaultは現在と旧checkoutの外へ分離してください');
  const controls=[file,config.hubConfigPath,...Object.values(config.launchd).filter(Boolean),...(c.openclaw?[config.openclaw.configPath,config.openclaw.gatewayPlist]:[])];
  if(new Set(controls).size!==controls.length)throw new Error('設定の管理対象パスが重なっています');
- for(const p of controls){if(within(config.vaultPath,p)||within(repository,p)||within(config.installDir,p))throw new Error('設定・制御ファイルはVault・取得元・運用先の外へ置いてください');await safePath(p,{owned:true});}
+ for(const p of controls){if([config.vaultPath,config.installDir,...codeRoots,...(config.workspacePath?[config.workspacePath]:[])].some(root=>within(root,p)))throw new Error('設定・制御ファイルはVault・workspace・取得元・運用先の外へ置いてください');await safePath(p,{owned:true});}
  for(const p of [config.installDir,config.vaultPath,config.workspacePath,config.previousRuntimePath].filter(Boolean))await safePath(p,{owned:true});
  return config;
 }

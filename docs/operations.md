@@ -75,7 +75,7 @@ node packages/core/dist/cli.js --config "<設定ファイル>" conflict resolve 
 
 ## 停止と再開
 
-導入時に登録したジョブID・サービス・プロファイルを記録します。定期ジョブの状態は、導入版の`openclaw automations get <job-id>`で確認し、停止は同じIDのdisableを使います。取得や状態確認のためにモデルを実行する必要はありません。
+導入時に登録したジョブID・サービス・プロファイルを記録します。定期ジョブの状態は、導入版の`openclaw automations show <job-id>`で確認し、停止は同じIDのdisableを使います。取得や状態確認のためにモデルを実行する必要はありません。
 
 SyncthingがKeepAliveで管理されている場合、GUIの終了だけでは再起動されることがあります。登録元のサービス管理から停止し、同じプロファイルの親子プロセスがすべて終了してから再開します。起動済みの同じプロファイルを別の方法でも起動しません。
 

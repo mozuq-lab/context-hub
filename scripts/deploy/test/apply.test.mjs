@@ -1,5 +1,5 @@
 import {afterEach,expect,test} from 'vitest';
-import {writeFile,readFile,access} from 'node:fs/promises';
+import {writeFile,readFile,access,unlink,lstat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
@@ -27,6 +27,26 @@ test('未確認plan・plan後の配布物変更・候補改変は本番書き込
  await expect(applyPlan(p.planPath,'wrong',{run:f.execute})).rejects.toThrow(/確認/);
  await writeFile(join(f.vault,'AGENTS.md'),'parallel edit');await expect(applyPlan(p.planPath,p.planHash,{run:f.execute})).rejects.toThrow(/変更/);
  expect(await readFile(join(f.vault,'AGENTS.md'),'utf8')).toBe('parallel edit');
+});
+test('停止中に入った独自変更をバックアップの後から上書きしない',async()=>{
+ const f=await setup(),p=await preparePlan(f.file,options(f));
+ await expect(applyPlan(p.planPath,p.planHash,{run:f.execute,onProgress:async s=>{if(s.phase==='stopped')await writeFile(join(f.vault,'AGENTS.md'),'late local edit');}})).rejects.toThrow(/変更/);
+ expect(await readFile(join(f.vault,'AGENTS.md'),'utf8')).toBe('late local edit');
+});
+test('復旧用ファイルが欠損していても、元から存在した配布物を削除しない',async()=>{
+ const f=await setup(),p=await preparePlan(f.file,options(f));await applyPlan(p.planPath,p.planHash,{run:f.execute});
+ await writeFile(join(f.repository,'agents.md'),'# v2\n');f.git('add','.');f.git('commit','-qm','第2版');const next=await preparePlan(f.file,options(f));
+ await expect(applyPlan(next.planPath,next.planHash,{run:f.execute,onProgress:async s=>{if(s.phase==='files-written'){await unlink(join(next.planPath,'../backup/0.before'));throw new Error('fixture rollback');}}})).rejects.toThrow(/fixture/);
+ expect(await readFile(join(f.vault,'AGENTS.md'),'utf8')).toBe('# v2\n');expect((await deploymentStatus(f.file)).pending.phase).toBe('recovery-required');
+});
+test('Gateway再開後にRPCが壊れてもGatewayと同期の停止を試みる',async()=>{
+ const f=await setup(),fake=await fakeServices(f),deps={run:fake.execute,platform:'darwin',ready:fake.ready};const p=await preparePlan(f.file,{repository:f.repository,...deps});let broken=false;
+ const fail=async(exe,args,o)=>{if(exe===f.config.openclaw.executable&&args[0]==='plugins')broken=true;if(broken&&exe===f.config.openclaw.executable)return{code:1,stdout:'',stderr:'RPC unavailable'};return fake.execute(exe,args,o);};
+ await expect(applyPlan(p.planPath,p.planHash,{...deps,run:fail})).rejects.toThrow(/失敗/);expect([...fake.serviceState.values()]).toEqual([false,false]);expect((await deploymentStatus(f.file)).pending.phase).toBe('recovery-required');
+});
+test('通常更新でもHub設定とdeployment設定を利用者専用で退避する',async()=>{
+ const f=await setup(),p=await preparePlan(f.file,options(f)),r=await applyPlan(p.planPath,p.planHash,{run:f.execute}),backup=join(r.backup,'..');
+ expect(await readFile(join(backup,'hub-config.json'),'utf8')).toBe(await readFile(f.config.hubConfigPath,'utf8'));expect(await readFile(join(backup,'deployment.json'),'utf8')).toBe(await readFile(f.file,'utf8'));expect((await lstat(r.backup)).mode&0o077).toBe(0);
 });
 test('同じcommitで新しくplanを作っても、再配置やサービス停止を行わない',async()=>{
  const f=await setup(),p=await preparePlan(f.file,options(f));await applyPlan(p.planPath,p.planHash,{run:f.execute});

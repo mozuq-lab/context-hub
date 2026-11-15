@@ -59,31 +59,41 @@ export async function inventory(root){
 export const treeHash=async root=>sha(JSON.stringify(await inventory(root)));
 export async function run(executable,args,{cwd,env,timeout=60000,logFile,capture=true}={}){
  return new Promise((done,reject)=>{
-  const child=spawn(executable,args,{cwd,env:env??process.env,shell:false,stdio:['ignore','pipe','pipe']});let stdout='',stderr='',size=0;
-  const timer=setTimeout(()=>child.kill('SIGTERM'),timeout);
+  const grouped=process.platform!=='win32',child=spawn(executable,args,{cwd,env:env??process.env,shell:false,detached:grouped,stdio:['ignore','pipe','pipe']});let stdout='',stderr='',size=0,finished=false,expired=false,forceTimer,deadline;
+  function kill(signal){try{process.kill(grouped?-child.pid:child.pid,signal);}catch{}}
+  async function finish(result,error){if(finished)return;finished=true;clearTimeout(timer);clearTimeout(forceTimer);clearTimeout(deadline);try{if(logFile)await atomicWrite(logFile,stdout+stderr);if(error)reject(error);else done(result);}catch(e){reject(e);}}
+  function stop(){if(expired)return;expired=true;kill('SIGTERM');forceTimer=setTimeout(()=>kill('SIGKILL'),1000);deadline=setTimeout(()=>{child.stdout.destroy();child.stderr.destroy();finish({code:1,stdout,stderr,signal:'SIGKILL'});},2000);}
+  const timer=setTimeout(stop,timeout);
   for(const [stream,key] of [[child.stdout,'stdout'],[child.stderr,'stderr']])stream.on('data',b=>{
-   if(!capture)return;size+=b.length;if(size>32*1024*1024){child.kill('SIGTERM');return;}
+   if(!capture)return;size+=b.length;if(size>32*1024*1024){stop();return;}
    if(key==='stdout')stdout+=b.toString();else stderr+=b.toString();
   });
-  child.on('error',()=>{clearTimeout(timer);reject(new Error('外部コマンドを起動できませんでした'));});
-  child.on('close',async(code,signal)=>{
-   clearTimeout(timer);
-   try{if(logFile)await atomicWrite(logFile,stdout+stderr);done({code:code??1,stdout,stderr,signal});}catch(e){reject(e);}
-  });
+  child.on('error',()=>finish(null,new Error('外部コマンドを起動できませんでした')));
+  child.on('close',(code,signal)=>finish({code:expired?1:code??1,stdout,stderr,signal}));
  });
 }
 export async function checked(executor,exe,args,options){const r=await executor(exe,args,options);if(r.code!==0)throw new Error('外部コマンドの検証または実行に失敗しました。保存したログを確認してください');return r;}
 export async function withUpdateLock(root,planId,fn,{resume=false}={}){
- await privateDir(root);const lock=join(root,'.deploy.lock'),token=randomUUID();
+ await privateDir(root);const lock=join(root,'.deploy.lock'),reaper=join(root,'.deploy.reap'),token=randomUUID();
+ if(await exists(reaper))throw new Error('更新ロックの回収が実行中か、回収記録の確認が必要です');
  try{await mkdir(lock,{mode:0o700});}
  catch(e){
   if(e.code!=='EEXIST')throw e;
-  await safePath(lock,{owned:true});const owner=await readJson(join(lock,'owner.json')),state=await readJson(join(root,'deployment-state.json'));
-  let dead=false;if(Number.isSafeInteger(owner?.pid)&&owner.pid>0){try{process.kill(owner.pid,0);}catch(e){dead=e.code==='ESRCH';}}
-  if(!resume||!dead||owner.planId!==planId||state?.planId!==planId||state.writersResumed)throw new Error('別の更新が実行中か、更新ロックの確認が必要です');
-  const retired=join(root,`.deploy-retired-${token}`);await rename(lock,retired);await unlink(join(retired,'owner.json'));await rmdir(retired);await mkdir(lock,{mode:0o700});
+  if(!resume)throw new Error('別の更新が実行中か、更新ロックの確認が必要です');
+  try{await mkdir(reaper,{mode:0o700});}catch{throw new Error('更新ロックの回収が実行中です');}
+  try{
+   await writeJson(join(reaper,'owner.json'),{pid:process.pid,token});
+   await safePath(lock,{owned:true});const st=await lstat(lock),owner=await readJson(join(lock,'owner.json')),state=await readJson(join(root,'deployment-state.json'));
+   let dead=false;if(Number.isSafeInteger(owner?.pid)&&owner.pid>0){try{process.kill(owner.pid,0);}catch(e){dead=e.code==='ESRCH';}}
+   if(!dead||typeof owner.token!=='string'||owner.planId!==planId||state?.planId!==planId||state.writersResumed)throw new Error('別の更新が実行中か、更新ロックの確認が必要です');
+   const now=await lstat(lock),latest=await readJson(join(lock,'owner.json'));
+   if(st.ino!==now.ino||st.dev!==now.dev||JSON.stringify(latest)!==JSON.stringify(owner))throw new Error('回収中に更新ロックが変わりました');
+   await unlink(join(lock,'owner.json'));await rmdir(lock);await mkdir(lock,{mode:0o700});
+   await writeJson(join(lock,'owner.json'),{pid:process.pid,token,planId});
+  }finally{const owner=await readJson(join(reaper,'owner.json'));if(owner?.token===token){await unlink(join(reaper,'owner.json'));await rmdir(reaper);}}
  }
  await writeJson(join(lock,'owner.json'),{pid:process.pid,token,planId});
+ if(await exists(reaper)){const owner=await readJson(join(lock,'owner.json'));if(owner?.token===token){await unlink(join(lock,'owner.json'));await rmdir(lock);}throw new Error('更新ロックの回収が実行中です');}
  try{return await fn();}finally{
   const owner=await readJson(join(lock,'owner.json'));
   if(owner?.token===token){await unlink(join(lock,'owner.json'));await rmdir(lock);await syncDir(root);}

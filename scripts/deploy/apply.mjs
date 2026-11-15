@@ -1,10 +1,10 @@
 import {join,dirname,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {unlink} from 'node:fs/promises';
+import {unlink,chmod} from 'node:fs/promises';
 import {loadConfig} from './config.mjs';
 import {sha,exists,readJson,readBytes,fileHash,treeHash,writeJson,atomicWrite,privateDir,durableRename,withUpdateLock,checked,run,archiveHash,safePath} from './common.mjs';
 import {releaseAt,releaseName,coreDoctor} from './prepare.mjs';
-import {inspectServices,stopServices,resumeServices,verifyServices,jobHash} from './services.mjs';
+import {inspectServices,stopServices,haltServices,resumeServices,verifyServices,jobHash} from './services.mjs';
 
 async function matches(path,expected){if(await fileHash(path)!==expected)throw new Error('確認後に管理対象が変更されています。planを作り直してください');}
 async function core(root,c){
@@ -63,7 +63,7 @@ export async function applyPlan(planPath,confirmation,deps={}){
    await vault.withLock(()=>vault.withLock(async()=>{
     for(const [i,a]of [...p.changes,...p.controlChanges].entries()){
      const h=await fileHash(a.path);if(h===a.beforeHash)continue;if(h!==a.afterHash)throw new Error('復旧対象に別の変更があります');
-     const bytes=a.beforeHash===null?undefined:await readBytes(join(folder,'backup',`${i}.before`));if(bytes!==undefined&&sha(bytes)!==a.beforeHash)throw new Error('復旧ファイルのhashが一致しません');
+     const bytes=a.beforeHash===null?undefined:await readBytes(join(folder,'backup',`${i}.before`));if(a.beforeHash!==null&&(bytes===undefined||sha(bytes)!==a.beforeHash))throw new Error('復旧ファイルが欠損しているかhashが一致しません');
      if(a.scope==='vault'){if(bytes===undefined)await vault.remove(a.relative);else await vault.write(a.relative,bytes.toString('utf8'));}
      else if(bytes===undefined)await unlink(a.path);else await atomicWrite(a.path,bytes);
     }
@@ -76,12 +76,16 @@ export async function applyPlan(planPath,confirmation,deps={}){
    await phase('stopping');await stopServices(c,p.snapshot,{...deps,jobPaused:state.jobPaused,onJobPaused:async()=>{state.jobPaused=true;await writeJson(statePath,state);}});await phase('stopped');
    const codeRoot=await exists(candidate)?candidate:runtime,{vault}=await core(codeRoot,c);
    await vault.withLock(()=>vault.withLock(async()=>{
+    await validateTargets(resuming);
     await privateDir(join(folder,'backup'));
     if(!state.backedUp){
-     for(const [i,a]of [...p.changes,...p.controlChanges].entries()){const b=await readBytes(a.path);if(b!==undefined)await atomicWrite(join(folder,'backup',`${i}.before`),b);}
+     for(const [i,a]of [...p.changes,...p.controlChanges].entries()){const b=await readBytes(a.path);if((b===undefined?null:sha(b))!==a.beforeHash)throw new Error('バックアップ前に管理対象が変更されています');if(b!==undefined)await atomicWrite(join(folder,'backup',`${i}.before`),b);}
+     const settings=[['deployment.json',c.file],['hub-config.json',c.hubConfigPath],...(c.openclaw?[['openclaw.json',c.openclaw.configPath]]:[]),...p.snapshot.agents.map(a=>[`${a.role}.plist`,a.path])],index=[];
+     for(const [name,path]of settings){const b=await readBytes(path);if(b===undefined)throw new Error('設定のバックアップ元がありません');await atomicWrite(join(folder,'backup',name),b);index.push({path,file:name,hash:sha(b)});}
+     await writeJson(join(folder,'backup/settings-index.json'),index);await writeJson(join(folder,'backup/services.json'),p.snapshot);
      const archive=join(folder,'backup/vault.tar.gz'),temp=`${archive}.tmp`;
      await checked(deps.run??run,'tar',['--exclude=.ctx-tmp-*','--exclude=*.tmp','-czf',temp,'-C',c.vaultPath,'.'],{env:{...process.env,COPYFILE_DISABLE:'1'},timeout:600000,capture:false});
-     await checked(deps.run??run,'tar',['-tzf',temp],{timeout:600000,capture:false});await durableRename(temp,archive);state.archiveHash=await archiveHash(archive);state.backedUp=true;
+     await checked(deps.run??run,'tar',['-tzf',temp],{timeout:600000,capture:false});await chmod(temp,0o600);await durableRename(temp,archive);state.archiveHash=await archiveHash(archive);state.backedUp=true;
     }else if(await archiveHash(join(folder,'backup/vault.tar.gz'))!==state.archiveHash)throw new Error('バックアップのhashが一致しません');
     await phase('swapping');
     if(state.hadRuntime&&!await exists(previous))await durableRename(runtime,previous);
@@ -91,8 +95,8 @@ export async function applyPlan(planPath,confirmation,deps={}){
      await durableRename(candidate,runtime);
     }
     await phase('installed');
-    for(const a of p.changes){const text=(await readBytes(join(runtime,a.source))).toString('utf8');if(a.scope==='vault')await vault.write(a.relative,text);else await atomicWrite(a.path,text);}
-    for(const a of p.controlChanges)await atomicWrite(a.path,await readBytes(join(folder,a.afterFile)));
+    for(const a of p.changes){const h=await fileHash(a.path);if(h!==a.beforeHash&&!(resuming&&h===a.afterHash))throw new Error('書き込み前に配布物が変更されています');const text=(await readBytes(join(runtime,a.source))).toString('utf8');if(a.scope==='vault')await vault.write(a.relative,text);else await atomicWrite(a.path,text);}
+    for(const a of p.controlChanges){const h=await fileHash(a.path);if(h!==a.beforeHash&&!(resuming&&h===a.afterHash))throw new Error('書き込み前に設定が変更されています');await atomicWrite(a.path,await readBytes(join(folder,a.afterFile)));}
     await phase('files-written');
    }),'organize');
    await coreDoctor(runtime,c,{...deps,logFile:join(folder,'doctor-after.log')});
@@ -102,7 +106,7 @@ export async function applyPlan(planPath,confirmation,deps={}){
    await phase('completed');return{commit:p.commit,unchanged:false,backup:join(folder,'backup/vault.tar.gz')};
   }catch(e){
    try{
-    if(state.writersResumed){await stopServices(c,p.snapshot,{...deps,jobPaused:state.jobPaused});await phase('recovery-required');}
+    if(state.writersResumed){state.stopResults=await haltServices(c,p.snapshot,deps);await phase('recovery-required');}
     else await restore();
    }catch{state.phase='recovery-required';await writeJson(statePath,state);}
    throw e;

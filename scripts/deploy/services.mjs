@@ -110,6 +110,14 @@ export async function stopServices(c,s,deps={}){
  for(const a of s.agents.filter(a=>a.role==='gateway'))await setLoaded(a,false,deps);
  for(const a of s.agents)if((await loaded(a.label,deps)).loaded)throw new Error('サービスの停止を確認できません');
 }
+export async function haltServices(c,s,deps={}){
+ const results=[];
+ if(s.job){try{await command(c,['automations','disable',c.openclaw.automationId,'--json'],deps);results.push({role:'automation',confirmed:true});}catch{results.push({role:'automation',confirmed:false});}}
+ for(const a of [...s.agents.filter(a=>a.role!=='gateway'),...s.agents.filter(a=>a.role==='gateway')]){
+  try{await setLoaded(a,false,deps);results.push({role:a.role,confirmed:!(await loaded(a.label,deps)).loaded});}catch{results.push({role:a.role,confirmed:false});}
+ }
+ return results;
+}
 export async function resumeServices(c,s,deps={},options={}){
  for(const a of s.agents.filter(a=>a.role==='gateway'))await setLoaded(a,a.loaded,deps);
  if(s.agents.some(a=>a.role==='gateway'&&a.running))await waitReady(c,deps);
