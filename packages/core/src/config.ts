@@ -19,6 +19,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
     logging: { dir: join(expandPath(statePath), 'logs'), retentionDays: 14 },
     git: { enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 },
     privacy: { redactSecrets: true, patterns: [] },
+    backup: { dir: null, verifyMaxAgeDays: 7 },
   };
 }
 const positive = z.number().int().min(1).max(1_000_000);
@@ -37,20 +38,23 @@ const configSchema = z.object({
     maxCommits: positive.max(200), lookbackDays: positive.max(366) }).strict().refine(g => new Set(g.repos.map(r => expandPath(r.path))).size === g.repos.length, '同じリポジトリを重ねて設定できません').default({ enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 }),
   // 既定で有効。追加の規則は読み込み時に正規表現として組み立てられることを確かめる。
   privacy: z.object({ redactSecrets: z.boolean(), patterns: z.array(z.object({ label: z.string().min(1).max(40).regex(/^[^\]\r\n]+$/), pattern: z.string().min(1).max(500).refine(v => { try { new RegExp(v, 'gu'); return true; } catch { return false; } }, '正規表現が不正です') }).strict()).max(50) }).strict().default({ redactSecrets: true, patterns: [] }),
+  // 既定では未設定。バックアップ先を書くと、ctx backup verify が最新のアーカイブを確かめ、HOMEが復元点の古さを知らせる。
+  backup: z.object({ dir: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です').nullable(), verifyMaxAgeDays: positive.max(3650) }).strict().default({ dir: null, verifyMaxAgeDays: 7 }),
 }).strict();
 export function validateConfig(value: unknown): HubConfig {
   const c = configSchema.parse(value);
   c.vaultPath = expandPath(c.vaultPath); c.statePath = expandPath(c.statePath); c.logging.dir = expandPath(c.logging.dir);
   c.git = { ...c.git, repos: c.git.repos.map(r => ({ ...r, path: expandPath(r.path) })) };
-  for (const outside of [c.statePath, c.logging.dir]) {
+  if (c.backup.dir !== null) c.backup = { ...c.backup, dir: expandPath(c.backup.dir) };
+  for (const outside of [c.statePath, c.logging.dir, ...(c.backup.dir !== null ? [c.backup.dir] : [])]) {
     const rel = relative(c.vaultPath, outside);
-    if (!rel || (!rel.startsWith('..' + '/') && rel !== '..' && !isAbsolute(rel))) throw new Error('ローカル状態・ログはVaultの外へ設定してください');
+    if (!rel || (!rel.startsWith('..' + '/') && rel !== '..' && !isAbsolute(rel))) throw new Error('ローカル状態・ログ・バックアップ先はVaultの外へ設定してください');
   }
   return c;
 }
 /** 設定ファイルへ上書きする値。入れ子は部分指定でよい。 */
-export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'privacy'>> & {
-  capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; privacy?: Partial<HubConfig['privacy']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
+export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'privacy' | 'backup'>> & {
+  backup?: Partial<NonNullable<HubConfig['backup']>>; capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; privacy?: Partial<HubConfig['privacy']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
   organize?: Partial<Omit<HubConfig['organize'], 'llm'>> & { llm?: Partial<HubConfig['organize']['llm']> };
 };
 export async function loadConfig(path?: string, overrides: ConfigOverrides = {}): Promise<HubConfig> {
@@ -71,6 +75,7 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
     logging: { ...defaults.logging, ...raw.logging, ...overrides.logging },
     git: { ...defaults.git, ...raw.git, ...overrides.git },
     privacy: { ...defaults.privacy, ...raw.privacy, ...overrides.privacy },
+    backup: { ...defaults.backup, ...raw.backup, ...overrides.backup },
   };
   try { return validateConfig(c); } catch { throw new Error('設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }
 }
