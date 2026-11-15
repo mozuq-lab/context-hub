@@ -40,7 +40,7 @@ export async function collectPolicyStateDetailed(vault:Vault):Promise<{state:Pol
  for(const path of paths){
   const id=path.split('/').at(-1)!.slice(0,-3);
   if(!isGeneratedIntact(raws.get(path)!)){if(modified.has(id))throw new Error('知識IDの保存先が重複しています');modified.add(id);continue;}
-  const k=await readKnowledge(vault,id);if(!k||k.raw!==raws.get(path)||!isGeneratedIntact(k.raw))throw new Error('知識の整合性を確認できません');records.set(id,k);
+  const k=await readKnowledge(vault,id,paths);if(!k||k.raw!==raws.get(path)||!isGeneratedIntact(k.raw))throw new Error('知識の整合性を確認できません');records.set(id,k);
  }
  for(const id of modified)if(records.has(id))throw new Error('知識IDの保存先が重複しています');
  const approved=new Set<string>();

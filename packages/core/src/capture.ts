@@ -1,7 +1,7 @@
 import { ulid } from 'ulid';
 import { logOperation } from './logger.js';
 import { z } from 'zod';
-import { Vault, hash, markdown, parseMarkdown } from './storage.js';
+import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
 import { readProjects, projectIdSchema } from './projects.js';
 import type { CaptureRequest, CaptureResult, HubConfig, Input } from './types.js';
 export const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -18,13 +18,21 @@ export function parseInput(path: string, content: string): Input {
   if (!path.endsWith(`_${input.id}.md`)) throw new Error('入力IDとファイル名が一致しません');
   return input;
 }
+/** 原文を1回だけ読み、解釈と原文のハッシュを組にして返す。Writerロックの1区間では読み直さない。 */
+export async function readInputRecords(config: HubConfig): Promise<{ input: Input; rawHash: string }[]> {
+  return readOncePerLock(config, 'inputs', ['00_inbox'], async () => {
+    const vault = new Vault(config), result: { input: Input; rawHash: string }[] = [];
+    for (const path of await vault.files('00_inbox')) {
+      if (!isInputPath(path)) continue;
+      const raw = (await vault.read(path))!;
+      result.push({ input: parseInput(path, raw), rawHash: hash(raw) });
+    }
+    return result.sort((a,b) => Date.parse(a.input.occurred_at)-Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id));
+  });
+}
+const isInputPath = (path: string) => path.endsWith('.md') && !path.includes('.sync-conflict-');
 export async function readInputs(config: HubConfig): Promise<Input[]> {
-  const vault = new Vault(config), result: Input[] = [];
-  for (const path of await vault.files('00_inbox')) {
-    if (!path.endsWith('.md') || path.includes('.sync-conflict-')) continue;
-    result.push(parseInput(path, (await vault.read(path))!));
-  }
-  return result.sort((a,b) => Date.parse(a.occurred_at)-Date.parse(b.occurred_at) || a.id.localeCompare(b.id));
+  return (await readInputRecords(config)).map(r => r.input);
 }
 export function eventMarker(source: string, eventId: string): string { return `90_system/receipts/events/${hash(source)}/${hash(eventId)}`; }
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
@@ -36,13 +44,23 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     tool: request.tool, meta: request.meta, origin: request.kind === 'work-summary' ? 'ai-self-report' : 'user-note' });
   {
     const marker = eventMarker(meta.source, meta.source_event_id), existing = await vault.read(marker);
-    const inputs = await readInputs(config);
+    // 再送の判定は、先にイベント記録を見て、その原文1件だけを読む（通常の経路で全原文を読まない）。
+    const inbox = (await vault.files('00_inbox')).filter(isInputPath);
+    if (existing !== undefined) {
+      const id = existing.trim(), path = inputIdSchema.safeParse(id).success ? inbox.find(p => p.endsWith(`_${id}.md`)) : undefined;
+      const found = path === undefined ? undefined : parseInput(path, (await vault.read(path))!);
+      if (!found || found.source !== meta.source || found.source_event_id !== meta.source_event_id) throw new Error('イベント記録と原文が一致しません。doctorで確認してください');
+      return { inputId: found.id, deduped: true, path: found.path, receivedAt: found.received_at };
+    }
+    // イベント記録がなく、すべての原文にイベント記録がある（件数が一致する）なら、このイベントの原文はまだない。
+    // 件数が違うとき（原文の保存後・記録の作成前に停止した場合など）だけ全原文を調べ、再送で記録を回復する。
+    const markers = (await vault.files('90_system/receipts/events')).filter(p => !p.includes('.sync-conflict-'));
+    const inputs = markers.length === inbox.length ? [] : await readInputs(config);
     const matching = inputs.filter(x => x.source === meta.source && x.source_event_id === meta.source_event_id);
     if (matching.length > 1) throw new Error('イベントが重複しています。doctorで確認してください');
-    if (existing && (!matching.length || existing.trim() !== matching[0].id)) throw new Error('イベント記録と原文が一致しません。doctorで確認してください');
     if (matching.length) {
       const found = matching[0];
-      if (!existing) await vault.create(marker, `${found.id}\n`);
+      await vault.create(marker, `${found.id}\n`);
       return { inputId: found.id, deduped: true, path: found.path, receivedAt: found.received_at };
     }
     if (request.project && !(await readProjects(config)).some(p => p.id === request.project)) throw new Error('指定プロジェクトがありません。先にproject addを実行してください');

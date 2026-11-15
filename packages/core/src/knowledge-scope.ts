@@ -17,8 +17,9 @@ export function targetFromMeta(meta:Record<string,unknown>):AdoptionTarget|undef
  if(meta.scope===undefined)return;
  return adoptionTargetSchema.parse(meta.scope==='project'?{scope:meta.scope,projectId:meta.project_id,projectHash:meta.project_hash}:{scope:meta.scope});
 }
-export async function readKnowledge(vault:Vault,id:string):Promise<KnowledgeRecord|undefined>{
- knowledgeIdSchema.parse(id);const paths=(await knowledgePaths(vault)).filter(p=>p.endsWith(`/${id}.md`));
+/** 知識を1件読む。複数件を読むときは、knowledgePathsで1回だけ求めた一覧をallPathsに渡す（IDごとに10_projects全体を走査しない）。 */
+export async function readKnowledge(vault:Vault,id:string,allPaths?:string[]):Promise<KnowledgeRecord|undefined>{
+ knowledgeIdSchema.parse(id);const paths=(allPaths??await knowledgePaths(vault)).filter(p=>p.endsWith(`/${id}.md`));
  if(paths.length>1)throw new Error('知識IDの保存先が重複しています');if(!paths.length)return;
  const path=paths[0]!,bytes=await vault.readBytes(path,1_048_576);if(bytes===undefined)throw new Error('知識の同期が不足しています');
  const raw=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes),{meta,text}=parseMarkdown(raw),target=targetFromMeta(meta);

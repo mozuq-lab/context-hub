@@ -105,7 +105,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];inputs
   for(const dir of ['20_ideas','90_system/candidates','30_knowledge','90_system/project-candidates'])try{
     for(const path of await vault.files(dir))if(path.endsWith('.md')&&!isGeneratedIntact((await vault.read(path))!))issues.push(`生成物の手動変更・形式不正: ${path}`);
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
-  try{for(const path of await knowledgePaths(vault)){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
+  try{const paths=await knowledgePaths(vault);for(const path of paths){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id,paths);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
   issues.push(...await policyRootProblems(config));
   try{await readPolicies(config);}catch{issues.push(definitionsBroken?afterDefinitions('方針の同期・集約を確認できません'):'方針manifest・正本・停止記録の同期または集約が未完了です');}
   try{await readIdeaLinks(vault);}catch(error){issues.push(error instanceof Error?error.message:'アイデアの束ねの記録が不正です');}

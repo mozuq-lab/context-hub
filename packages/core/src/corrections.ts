@@ -1,7 +1,6 @@
 import { ulid } from 'ulid';
-import { isDeepStrictEqual } from 'node:util';
-import { eventMarker, inputIdSchema, inputSchema, parseInput, readInputs } from './capture.js';
-import { Vault, hash, markdown,parseMarkdown } from './storage.js';
+import { eventMarker, inputIdSchema, inputSchema, readInputRecords, readInputs } from './capture.js';
+import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
 import { readProjects } from './projects.js';
 import { readReceipts,rebuildNowLocked } from './views.js';
 import type { CaptureRequest, CaptureResult, HubConfig, Input } from './types.js';
@@ -17,24 +16,24 @@ export class CorrectionTargetError extends Error {
 }
 export interface CorrectionChain { root: Input; revisions: Input[]; latest: Input; evidenceHash: string }
 export async function readCorrectionChains(config: HubConfig): Promise<CorrectionChain[]> {
-  const inputs = await readInputs(config), byId = new Map(inputs.map(i => [i.id, i])), children = new Map<string, Input>();
+  return readOncePerLock(config, 'correction-chains', ['00_inbox'], () => buildCorrectionChains(config));
+}
+async function buildCorrectionChains(config: HubConfig): Promise<CorrectionChain[]> {
+  // 根拠のハッシュは、解釈したのと同じ読み取りの原文から求める（同じファイルを2回読まない）。
+  const records = await readInputRecords(config), inputs = records.map(r => r.input), rawHashes = new Map(records.map(r => [r.input.id, r.rawHash]));
+  const byId = new Map(inputs.map(i => [i.id, i])), children = new Map<string, Input>();
   if (byId.size !== inputs.length) throw new Error('入力IDが重複しています');
   for (const input of inputs.filter(i => i.kind === 'correction')) {
     const target = input.corrects_input_id!;
     if (!byId.has(target) || children.has(target) || target === input.id) throw new Error('訂正履歴に参照不明・分岐があります');
     children.set(target,input);
   }
-  const vault = new Vault(config), seen = new Set<string>(), chains: CorrectionChain[] = [];
+  const seen = new Set<string>(), chains: CorrectionChain[] = [];
   for (const root of inputs.filter(i => i.kind !== 'correction')) {
     const revisions: Input[] = []; let latest = root;
     while (children.has(latest.id)) { latest = children.get(latest.id)!; if (seen.has(latest.id)) throw new Error('訂正履歴が循環しています'); seen.add(latest.id); revisions.push(latest); }
     if (revisions.length > 32 || [root,...revisions].reduce((n,i) => n+i.text.length,0) > config.capture.maxInputChars*4) throw new Error('訂正履歴が上限を超えています');
-    const evidence: string[] = [];
-    for (const input of [root,...revisions]) {
-      const raw = await vault.read(input.path);
-      if (raw === undefined || !isDeepStrictEqual(parseInput(input.path,raw),input)) throw new Error('入力の訂正根拠が読み取り中に変更されました');
-      evidence.push(`${input.id}:${hash(raw)}`);
-    }
+    const evidence = [root,...revisions].map(input => `${input.id}:${rawHashes.get(input.id)!}`);
     chains.push({ root,revisions,latest,evidenceHash:hash(evidence.join('\n')) });
   }
   if (seen.size !== inputs.filter(i => i.kind === 'correction').length) throw new Error('訂正履歴が循環しています');

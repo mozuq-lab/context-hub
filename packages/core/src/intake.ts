@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { readdir,lstat } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { Vault,hash,LockTimeoutError } from './storage.js';
-import { capture,readInputs,inputIdSchema } from './capture.js';
+import { capture,parseInput,inputIdSchema } from './capture.js';
 import { correctInput,CorrectionTargetError } from './corrections.js';
 import {approve,reject} from './approvals.js';
 import { decideProject } from './project-proposals.js';
@@ -137,7 +137,8 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    let result:z.infer<typeof intakeReceiptSchema>['result'];
    if(packet.operation==='capture'){
     result=await capture(config,{source:packet.source,sourceEventId:id,text:packet.text,kind:packet.kind,occurredAt:packet.occurred_at,project:packet.project,tool:packet.tool,meta:packet.meta});
-    const inputId=result.inputId,saved=(await readInputs(config)).find(i=>i.id===inputId);
+    // 保存された原文1件だけを読み、依頼と一致するかを確かめる。
+    const inputId=result.inputId,stored=await vault.read(result.path),saved=stored===undefined?undefined:parseInput(result.path,stored);if(saved&&saved.id!==inputId)throw new Error('event-conflict');
     if(!saved||saved.text!==packet.text||saved.kind!==packet.kind||saved.occurred_at!==packet.occurred_at||saved.project!==packet.project||saved.tool!==packet.tool||!isDeepStrictEqual(saved.meta,packet.meta))throw new Error('event-conflict');
    }else if(packet.operation==='correct')result=await correctInput(config,packet.target_id,{source:packet.source,sourceEventId:id,text:packet.text,occurredAt:packet.occurred_at});
    else if(packet.operation==='knowledge-retire')result=await retireKnowledge(config,packet.target_id,packet.target_hash);

@@ -3,10 +3,34 @@ import { constants as osConstants } from 'node:os';
 import { mkdir, lstat, realpath, readdir, open, rename, link, unlink, rmdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { parse, stringify } from 'yaml';
 import type { HubConfig } from './types.js';
 
 export const VAULT_DIRS = ['00_inbox', '10_projects', '20_ideas', '30_knowledge', '90_system/candidates', '90_system/receipts/events', '90_system/approvals', '90_system/conflicts'];
+/**
+ * Writerロックの1区間だけ有効な読み取りの使い回し。00_inboxの全件などを、1区間で何度も読み直さないために使う。
+ * 区間内のVault経由の書き込み・削除で、依存する場所の値を捨てる。区間の外（ロックなし）では使い回さない。
+ * 値は呼び出しごとに複製して返す（呼び出し側が変えても他へ影響しない）。
+ */
+const lockSection = new AsyncLocalStorage<{ vault: string; memo: Map<string, { deps: string[]; value: Promise<unknown> }> }>();
+export async function readOncePerLock<T>(config: HubConfig, key: string, deps: string[], load: () => Promise<T>): Promise<T> {
+  const section = lockSection.getStore();
+  if (!section || section.vault !== resolve(config.vaultPath)) return load();
+  let entry = section.memo.get(key);
+  if (!entry) {
+    const value = load();
+    entry = { deps, value };
+    section.memo.set(key, entry);
+    value.catch(() => { if (section.memo.get(key)?.value === value) section.memo.delete(key); });
+  }
+  return structuredClone(await entry.value) as T;
+}
+function forgetReads(vaultPath: string, rel: string): void {
+  const section = lockSection.getStore();
+  if (!section || section.vault !== resolve(vaultPath)) return;
+  for (const [key, entry] of section.memo) if (entry.deps.some(dep => rel === dep || rel.startsWith(`${dep}/`))) section.memo.delete(key);
+}
 export function hash(text: string): string { return createHash('sha256').update(text).digest('hex'); }
 export function markdown(meta: Record<string, unknown>, text: string): string { return `---\n${stringify(meta)}---\n${text}`; }
 export function parseMarkdown(content: string): { meta: Record<string, unknown>; text: string } {
@@ -194,6 +218,10 @@ export class Vault {
     } finally { await handle.close(); }
   }
   private async atomic(rel: string, text: string, exclusive: boolean): Promise<boolean> {
+    forgetReads(this.config.vaultPath, rel);
+    try { return await this.atomicWrite(rel, text, exclusive); } finally { forgetReads(this.config.vaultPath, rel); }
+  }
+  private async atomicWrite(rel: string, text: string, exclusive: boolean): Promise<boolean> {
     const target = await this.path(rel, true), temp = join(dirname(target), `.ctx-tmp-${randomUUID()}`);
     const handle = await open(temp, 'wx', 0o600);
     try { await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle.close(); }
@@ -211,6 +239,7 @@ export class Vault {
   async create(rel: string, text: string): Promise<boolean> { return this.atomic(rel, text, true); }
   /** 1ファイルを削除する。無い場合はfalse。Writerロック内で、退避の片付けなど記録を残した操作からだけ使う。 */
   async remove(rel: string): Promise<boolean> {
+    forgetReads(this.config.vaultPath, rel);
     const target = await this.path(rel);
     try { await unlink(target); } catch (error) { if (missing(error)) return false; throw error; }
     await syncDirectory(dirname(target)); return true;
@@ -251,7 +280,7 @@ export class Vault {
       }
     }
     heldLocks.set(lock, token);
-    try { return await fn(); }
+    try { return await (scope === 'writer' ? lockSection.run({ vault: resolve(this.config.vaultPath), memo: new Map() }, fn) : fn()); }
     finally {
       heldLocks.delete(lock);
       const { owner } = await readLockOwner(lock);

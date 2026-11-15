@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
-import { Vault, hash } from './storage.js';
+import { Vault, hash, readOncePerLock } from './storage.js';
 import { readInputs } from './capture.js';
 import { assertNotMerged, inspectProjects, mergeTargets, projectIdSchema, readProjects } from './projects.js';
 import type { HubConfig } from './types.js';
@@ -120,6 +120,11 @@ export async function settleItemRecords<T extends { project_id: string; item_key
 }
 /** rawを指定すると、統合の読み替えをせず記録のままを返す（同じ受付IDの再送の照合に使う）。 */
 export async function readItemResolutions(vault: Vault, options: { raw?: boolean } = {}): Promise<ItemResolution[]> {
+  // NOWの作り直しでは直接・外す記録・統合の読み替えの3か所から読むため、Writerロックの1区間では1回だけ読む。
+  const result = await readOncePerLock(vault.config, 'item-resolutions', [resolutionDir], () => loadItemResolutions(vault));
+  return options.raw ? result : settleItemRecords(vault, result);
+}
+async function loadItemResolutions(vault: Vault): Promise<ItemResolution[]> {
   const result: ItemResolution[] = [];
   for (const path of await vault.files(resolutionDir)) {
     if (!/^90_system\/item-resolutions\/RES-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
@@ -128,8 +133,7 @@ export async function readItemResolutions(vault: Vault, options: { raw?: boolean
     if (path !== `${resolutionDir}/${record.id}.json`) throw new Error(`解決記録とパスが一致しません: ${path}`);
     result.push(record);
   }
-  result.sort((a, b) => a.id.localeCompare(b.id));
-  return options.raw ? result : settleItemRecords(vault, result);
+  return result.sort((a, b) => a.id.localeCompare(b.id));
 }
 /** 項目ごとに最後の記録だけを有効にする。最後が解決・誤りとして外すなら欄から外れたまま、再開なら未解決へ戻す。 */
 export function activeResolutions(records: ItemResolution[], projectId?: string): Map<string, ItemResolution> {
