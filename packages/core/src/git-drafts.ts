@@ -2,10 +2,11 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { execFile } from 'node:child_process';
 import { basename } from 'node:path';
-import { Vault, hash, parseMarkdown } from './storage.js';
+import { Vault, hash } from './storage.js';
 import { capture, readInputs } from './capture.js';
 import { mergeTargets, projectIdSchema, readProjects } from './projects.js';
 import { lifecycleOf } from './project-status.js';
+import { lastEvidenceAt } from './views.js';
 import type { HubConfig, Input } from './types.js';
 
 /**
@@ -94,12 +95,6 @@ function draftText(repo: string, commits: GitDraft['commits'], total: number, ti
   return { text: [head(n, total - n), '', ...included.map(line)].join('\n').slice(0, limit), included };
 }
 
-async function lastEvidence(vault: Vault, projectId: string): Promise<string | undefined> {
-  const raw = await vault.read(`10_projects/${projectId}/NOW.md`);
-  if (raw === undefined) return undefined;
-  try { const v = parseMarkdown(raw).meta.last_evidence_at; return typeof v === 'string' && Number.isFinite(Date.parse(v)) ? v : undefined; } catch { return undefined; }
-}
-
 export interface CollectOutcome { created: string[]; skipped: { projectId: string; repo: string; reason: string }[]; errors: { projectId: string; repo: string; error: string }[] }
 /**
  * 進行中のプロジェクトに設定したリポジトリごとに、まだ下書きにしていないコミットから下書きを1件作る。
@@ -120,7 +115,7 @@ export async function collectGitDrafts(config: HubConfig, options: { now?: Date;
     const mine = mineOf(await readGitDrafts(config), entry.path, entry.projectId);
     if (mine.some(d => d.status === 'pending')) { outcome.skipped.push({ projectId: entry.projectId, repo, reason: '未確認の下書きがあります' }); continue; }
     // 前回の下書きの最新コミット以降。なければ最後の根拠以降。日時で読むときは遡りの上限日数までにする。
-    const floor = now.getTime() - config.git.lookbackDays * 86_400_000, evidence = await lastEvidence(vault, entry.projectId);
+    const floor = now.getTime() - config.git.lookbackDays * 86_400_000, evidence = await lastEvidenceAt(vault, entry.projectId);
     const covered = mine.flatMap(d => d.commits).sort((a, b) => Date.parse(a.committed_at) - Date.parse(b.committed_at)), last = covered.at(-1);
     const since = Math.max(floor, last ? Date.parse(last.committed_at) : evidence ? Date.parse(evidence) : floor);
     let commits;

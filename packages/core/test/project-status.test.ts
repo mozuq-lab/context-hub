@@ -145,3 +145,10 @@ test('状態変更の受付記録は変更IDを必須にする', async () => {
   expect(intakeReceiptSchema.safeParse({ ...base, result: { projectId: 'garden', status: 'paused', changeId: 'PST-' + '0'.repeat(26), deduped: false } }).success).toBe(true);
   expect(intakeReceiptSchema.safeParse({ ...base, result: { inputId: 'IN-' + '0'.repeat(26), path: 'x', receivedAt: 'x', deduped: false } }).success).toBe(false);
 });
+test('状態の行がコロンの前に空白を置いた書き方でも、行を増やさずに置き換える',async()=>{
+ const{withStatus}=await import('../src/project-status.js'),{withMergeState}=await import('../src/project-merges.js');
+ const raw='---\nid: garden\ntitle: 菜園\naliases: []\nkeywords: []\nstatus : active # 手書き\n---\n本文\n';
+ for(const next of [withStatus(raw,'paused'),withMergeState(raw,{status:'paused'})]){
+  expect(next.match(/^status\s*:/gm)).toHaveLength(1);expect(parseMarkdown(next).meta.status).toBe('paused');expect(next.endsWith('---\n本文\n')).toBe(true);
+ }
+});

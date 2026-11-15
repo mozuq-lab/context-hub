@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { frontmatterParts, replaceKeyLine, withFrontmatterBody } from './frontmatter-lines.js';
 import { ulid } from 'ulid';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { assertNotMerged, inspectProjects, mergeTargets, projectIdSchema, projectSchema } from './projects.js';
@@ -44,11 +45,8 @@ export async function readProjectStatusChanges(vault: Vault): Promise<ProjectSta
 }
 /** 人が保守するfrontmatterのコメント・書式・改行を保つため、status行だけを置き換える。 */
 export function withStatus(raw: string, status: ProjectStatus): string {
-  const match = /^---(\r?\n)([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
-  if (!match) throw new Error('プロジェクト定義のfrontmatterを確認できません');
-  const eol = match[1], body = match[2], line = `status: ${status}`;
-  const next = /^status:.*$/m.test(body) ? body.replace(/^status:.*$/m, line) : `${body}${eol}${line}`;
-  const result = `---${eol}${next}${raw.slice(3 + eol.length + body.length)}`;
+  const parts = frontmatterParts(raw);
+  const result = withFrontmatterBody(parts, replaceKeyLine(parts.body.split(/\r?\n/), 'status', `status: ${status}`).join(parts.eol));
   if (projectSchema.parse(parseMarkdown(result).meta).status !== status) throw new Error('状態を書き換えられません');
   return result;
 }

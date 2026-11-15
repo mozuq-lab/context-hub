@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { stringify } from 'yaml';
 import { Vault, hash, parseMarkdown } from './storage.js';
+import { frontmatterParts, keyLine, replaceKeyLine, withFrontmatterBody } from './frontmatter-lines.js';
 import { readInputs } from './capture.js';
 import { projectIdSchema, projectSchema, readProjects } from './projects.js';
 import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, withDefinition } from './project-definition.js';
@@ -77,16 +78,12 @@ export async function readProjectMerges(vault: Vault): Promise<ProjectMerge[]> {
  * mergedIntoを省くと統合先の行を消す。
  */
 export function withMergeState(raw: string, state: { status: string; mergedInto?: string }): string {
-  const match = /^---(\r?\n)([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
-  if (!match) throw new Error('プロジェクト定義のfrontmatterを確認できません');
-  const eol = match[1]!, body = match[2]!, statusLine = stringify({ status: state.status }).trimEnd();
+  const parts = frontmatterParts(raw), statusLine = stringify({ status: state.status }).trimEnd();
   if (/[\r\n]/.test(statusLine)) throw new Error('状態を書き換えられません');
-  const lines = body.split(/\r?\n/).filter(line => !/^merged_into\s*:/.test(line));
-  const at = lines.findIndex(line => /^status\s*:/.test(line));
-  if (at >= 0) lines[at] = statusLine; else lines.push(statusLine);
+  const lines = replaceKeyLine(parts.body.split(/\r?\n/).filter(line => !keyLine('merged_into').test(line)), 'status', statusLine);
   // IDが数値や真偽値に読める場合（2026、trueなど）は引用符を付ける。
   if (state.mergedInto !== undefined) lines.push(stringify({ merged_into: state.mergedInto }).trimEnd());
-  const result = `---${eol}${lines.join(eol)}${raw.slice(3 + eol.length + body.length)}`;
+  const result = withFrontmatterBody(parts, lines.join(parts.eol));
   const parsed = projectSchema.parse(parseMarkdown(result).meta);
   if (parsed.status !== state.status || parsed.merged_into !== state.mergedInto) throw new Error('状態を書き換えられません');
   return result;

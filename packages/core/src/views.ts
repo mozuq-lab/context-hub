@@ -3,9 +3,8 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { readInputs } from './capture.js';
 import { readProjects, mergedSources, mergeTargets } from './projects.js';
-import { groundExtractedStatuses, organizeResultSchema } from './llm.js';
-import { groundExtractedHistory } from './llm.js';
-import { correctionNotice, effectiveFromInputs } from './effective-inputs.js';
+import { organizeResultSchema } from './llm.js';
+import { correctionNotice, effectiveFromInputs, groundedResult } from './effective-inputs.js';
 import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
@@ -114,9 +113,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const units = await effectiveUnits(config, inputs, receipts, projects);
   const evidence = units.flatMap((unit) => {
     const {chain,receipt}=unit, input=chain.root;
-    const index=[chain.root,...chain.revisions].findIndex(i=>i.id===receipt?.input_id);
-    const bound={...chain,revisions:chain.revisions.slice(0,Math.max(0,index)),latest:receipt?.input_id===input.id?input:chain.revisions[index-1]??input};
-    return receipt?.result && associatedProjects(input,receipt,config).includes(projectId) ? [{input,result:chain.revisions.length?groundExtractedHistory(bound,receipt.result):groundExtractedStatuses(input,receipt.result),notice:correctionNotice(unit)}] : [];
+    return receipt?.result && associatedProjects(input,receipt,config).includes(projectId) ? [{input,result:groundedResult(chain,receipt.input_id,receipt.result),notice:correctionNotice(unit)}] : [];
   }).sort((left, right) => Date.parse(left.input.occurred_at) - Date.parse(right.input.occurred_at) || left.input.id.localeCompare(right.input.id));
   const summaries = evidence.filter(({ input }) => input.kind === 'work-summary'); const latest = summaries.at(-1);
   const notices = new Map(evidence.map(e => [e.input.id, e.notice])), unitsById = new Map(units.map(u => [u.chain.root.id, u])), occurredAt = new Map(inputs.map(i => [i.id, i.occurred_at]));
@@ -229,6 +226,12 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   // 手で書き換えられたときに「どこを変えたか」を示せるよう、書いた自動領域を基準として残す（NOW.mdのgenerated_hashと対応）。
   await vault.write(nowBaselinePath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_hash: meta.generated_hash, auto }) + '\n');
   return { path: relative };
+}
+
+/** NOW.mdの最終根拠日時。未生成・解析不能なら未定（HOME・ふりかえり・作業記録の下書きで共通）。 */
+export async function lastEvidenceAt(vault: Vault, projectId: string): Promise<string | undefined> {
+  const raw = await vault.read(`10_projects/${projectId}/NOW.md`); if (raw === undefined) return undefined;
+  try { const value = parseMarkdown(raw).meta.last_evidence_at; return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined; } catch { return undefined; }
 }
 
 export async function rebuildNow(config: HubConfig, projectId: string): Promise<{ path: string; conflict?: string }> {

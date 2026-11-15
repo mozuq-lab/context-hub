@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { parse, parseDocument, isMap, isScalar, isSeq } from 'yaml';
 import { Vault, hash, parseMarkdown } from './storage.js';
+import { frontmatterParts, withFrontmatterBody } from './frontmatter-lines.js';
 import { assertNotMerged, projectIdSchema, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig } from './types.js';
@@ -73,9 +74,7 @@ const flowList = (values: readonly string[]) => `[${values.map(flowItem).join(',
  * 一覧の書き方（ブロック・フロー）とキー行のコメントを保ち、残る語の行はコメントごと元の行を使う。
  */
 export function withDefinition(raw: string, definition: ProjectDefinition): string {
-  const match = /^---(\r?\n)([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
-  if (!match) throw new Error('プロジェクト定義のfrontmatterを確認できません');
-  const eol = match[1], body = match[2];
+  const parts = frontmatterParts(raw), { eol, body } = parts;
   const doc = parseDocument(body);
   if (doc.errors.length || !isMap(doc.contents)) throw new Error('プロジェクト定義のfrontmatterを読めません');
   const edits: { start: number; end: number; text: string }[] = [], appended: string[] = [];
@@ -115,7 +114,7 @@ export function withDefinition(raw: string, definition: ProjectDefinition): stri
   let next = body;
   for (const e of edits.sort((x, y) => y.start - x.start)) next = next.slice(0, e.start) + e.text + next.slice(e.end);
   if (appended.length) next = `${next.replace(/\s*$/, '')}${eol}${appended.join(eol)}`;
-  const result = `---${eol}${next}${raw.slice(3 + eol.length + body.length)}`;
+  const result = withFrontmatterBody(parts, next);
   const parsed = projectSchema.parse(parseMarkdown(result).meta);
   if (!same({ title: parsed.title, aliases: parsed.aliases, keywords: parsed.keywords }, definition)) throw new Error('プロジェクト定義を書き換えられません');
   return result;

@@ -3,8 +3,7 @@ import { z } from 'zod';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { readProjects } from './projects.js';
 import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact, readReceipts } from './views.js';
-import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
-import { groundExtractedHistory, groundExtractedStatuses } from './llm.js';
+import { groundedResult, readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { lifecycleOf, projectStatusLabels, readProjectStatusChanges, type ProjectStatusChange } from './project-status.js';
 import { exclusionReasonLabels, readItemResolutions, readNowItems, type ItemResolution } from './item-resolutions.js';
 import { readProjectCreations } from './project-creations.js';
@@ -62,9 +61,7 @@ async function readSources(config: HubConfig, vault: Vault): Promise<HistorySour
 const confirmed = (items: { text: string; status: string }[]) => [...new Set(items.filter(i => i.status === 'confirmed').map(i => i.text))];
 /** NOWと同じく、原文の印と照合した確認済みだけを信じる（古い・手で変えた処理記録のモデルの申告をそのまま使わない）。 */
 function groundedCurrent(u: EffectiveInput): string[] {
-  const { chain, receipt } = u, input = chain.root, index = [chain.root, ...chain.revisions].findIndex(i => i.id === receipt!.input_id);
-  const bound = { ...chain, revisions: chain.revisions.slice(0, Math.max(0, index)), latest: receipt!.input_id === input.id ? input : chain.revisions[index - 1] ?? input };
-  return confirmed((chain.revisions.length ? groundExtractedHistory(bound, receipt!.result!) : groundExtractedStatuses(input, receipt!.result!)).extracted.current);
+  return confirmed(groundedResult(u.chain, u.receipt!.input_id, u.receipt!.result!).extracted.current);
 }
 const kindLabels: Record<string, string> = { knowledge: '知識', decision: '判断・方針', preference: '好み' };
 

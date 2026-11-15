@@ -95,3 +95,14 @@ test('期間内に届いた訂正を入力として数え、開始時点の解�
   expect(text).toMatch(/- 現在地の変化[^\n]*:\n {2}- 追加: 訂正後の状態\n {2}- 外れた: 旧い状態/);
   expect(text).toContain('期間内に訂正');
 });
+test('ふりかえりの現在地・次の一手も、NOWと同じく原文の印と照合した確認済みだけを示す', async () => {
+  const { config } = await workflowSetup(roots); await addProject(config, { id: 'hub', title: '集約ツール' });
+  const saved = await capture(config, { source: 'file', kind: 'work-summary', tool: 'codex', project: 'hub', occurredAt: '2026-10-30T00:00:00Z', receivedAt: '2026-10-30T00:00:00Z', text: '## 現在地\n- [提案] 公開済みと扱う\n- [確認済み] 試作が動いた\n## 次の一手\n- [未確認] 本番に出す' });
+  await organize(config, new MockLlm());
+  // 古い版が書いた（または手で変えた）処理記録が原文の提案・未確認を確認済みとしていても、ふりかえりで確認済みとして扱わない。
+  const { Vault } = await import('../src/storage.js'), vault = new Vault(config), path = `90_system/receipts/${saved.inputId}.json`, receipt = JSON.parse((await vault.read(path))!);
+  receipt.result.extracted = { current: [{ text: '公開済みと扱う', status: 'confirmed' }, { text: '試作が動いた', status: 'confirmed' }], next: [{ text: '本番に出す', status: 'confirmed' }], open: [] };
+  await vault.write(path, JSON.stringify(receipt, null, 2) + '\n');
+  const text = await buildDigest(config, { now, days: 7 });
+  expect(text).toContain('追加: 試作が動いた'); expect(text).not.toContain('追加: 公開済みと扱う'); expect(text).not.toContain('追加: 本番に出す');
+});

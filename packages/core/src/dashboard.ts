@@ -10,7 +10,7 @@ import { decodeIntake } from './intake-format.js';
 import { readProjects,inspectProjects,projectIssueFields,mergeTargets,mergeIssues } from './projects.js';
 import {buildReviewIndex,writeReviewIndexLocked,type ReviewCandidate} from './candidate-review.js';
 import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
-import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel } from './views.js';
+import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel,lastEvidenceAt } from './views.js';
 import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage } from './intake.js';
 import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
@@ -27,12 +27,6 @@ const clip=(s:string,n=120)=>{const a=Array.from(plain(s));return a.length>n?a.s
 const DAY=86_400_000;
 /** HOMEの「次の一手」に載せる、プロジェクトごとの上限。全件は各NOWとアプリで確認する。 */
 const NEXT_PER_PROJECT=3;
-/** NOW.mdの最終根拠日時。未生成・解析不能なら未定。 */
-export async function lastEvidenceAt(vault:Vault,projectId:string):Promise<string|undefined>{
- const raw=await vault.read(`10_projects/${projectId}/NOW.md`);if(raw===undefined)return undefined;
- try{const value=parseMarkdown(raw).meta.last_evidence_at;return typeof value==='string'&&Number.isFinite(Date.parse(value))?value:undefined;}catch{return undefined;}
-}
-/** HOMEに載せる、秘密情報らしい文字列を含むメモの上限。新しい順に載せる。 */
 const STATUS_ROWS=20;
 /** 通常の状態（受領済み・整理済み）の行は新しい順にSTATUS_ROWS件までにし、残りを件数の1行にまとめる。並びは元の順を保つ。 */
 function recentRoutine(rows:{row:string;routine:boolean;at:number}[],label:string):string[]{
@@ -40,6 +34,7 @@ function recentRoutine(rows:{row:string;routine:boolean;at:number}[],label:strin
  const shown=rows.filter((r,i)=>!r.routine||keep.has(i)).map(r=>r.row),omitted=rows.length-shown.length;
  return omitted?[...shown,`- ほかに${label}${omitted}件（古い順に省略しています）`]:shown;
 }
+/** HOMEに載せる、秘密情報らしい文字列を含むメモの上限。新しい順に載せる。 */
 const SECRET_ROWS=10;
 export function secretInputRows(config:HubConfig,inputs:Input[]):string{
  const settings=secretSettings(config);if(!settings.enabled)return'';
