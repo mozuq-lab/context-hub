@@ -10,10 +10,13 @@ node packages/core/dist/cli.js --config "<設定ファイル>" pending
 node packages/core/dist/cli.js --config "<設定ファイル>" find "<検索語>"
 node packages/core/dist/cli.js --config "<設定ファイル>" find --project "<project-id>" --kind memo,work-summary --since 2026-10-01
 node packages/core/dist/cli.js --config "<設定ファイル>" context "<project-id>" --max-chars 6000
+node packages/core/dist/cli.js --config "<設定ファイル>" bundle IN-... IDEA-... "<project-id>" --max-chars 12000
 node packages/core/dist/cli.js --config "<設定ファイル>" digest
 ```
 
 `find`は空白区切りの語をすべて含む記録を、一致数の多い順に最大50件返します。`--project`（帰属・関連するプロジェクト。AI推定の関連は「関連候補（AI推定、帰属未確定）」と表示）、`--kind`（`memo`・`work-summary`・`correction`・`idea`・`knowledge`・`now`のカンマ区切り）、`--since`・`--until`（`YYYY-MM-DD`は日本時間の日付、またはタイムゾーン付き日時）で絞り込めます。絞り込み条件があれば検索語は省略でき、その場合は新しい順に並べます。`--sort newest`で新しい順、`--limit`（1〜200）と`--offset`で続きを読めます。期間と新しい順は、原文は発生日時、NOWは最終根拠の日時、アイデアは元のメモの発生日時、知識は採用日時で判断します。共通の知識はプロジェクトで絞り込んだ結果に含めず、分類を取り消したアイデアは`--kind idea`に含めません。
+
+`context`は1つのプロジェクトのNOWと関連メモ最新10件を決まった形で出します。特定の記録だけを別のAIへ渡したいときは`bundle`を使います。`find`で表示されたID（原文の`IN-`、アイデアの`IDEA-`、知識の`KNW-`、NOWはプロジェクトID）を最大50件、渡したい順に並べます。原文は訂正があれば最新の訂正の本文と訂正の注意を出し、本人が指定したプロジェクトとAI推定の関連を分けて示します。NOWは自動領域だけを出します。先頭には共通方針と、記録が属するプロジェクト（本人指定・NOW・プロジェクト知識の所属）の方針を付けます。AI推定の関連だけのプロジェクトの方針は付けません。上限（既定は`retrieve.contextMaxChars`）に収まらない記録は本文の途中で切らずに丸ごと省き、末尾にIDを示します。Mac・Androidアプリの「文脈かご」も同じ考え方で記録を束ねます。
 
 原文や生成物を手動で書き換える前に、訂正履歴と競合を確認してください。生成物の競合は[生成版に戻す](#nowの更新が止まったとき生成物の競合)手順で片付け、退避ファイルを手で削除しないでください。同期による削除はほかの端末にも伝わるため、同期だけをバックアップとして扱いません。
 
