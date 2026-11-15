@@ -20,8 +20,11 @@ export interface SecretFinding { rule: string; label: string; start: number; end
 export const placeholder = (label: string): string => `[伏せ字:${label}]`;
 const PLACEHOLDER_HEAD = '[伏せ字:';
 
-/** 代入の形で値を伏せる鍵の名前。DB_PASSWORDやAWS_SECRET_ACCESS_KEYのように、前に語が付いた環境変数名も含める。 */
-const SECRET_KEYS = '(?:(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|signature|sig)(?![A-Za-z0-9])|パスワード|暗証番号|合言葉)';
+/**
+ * 代入の形で値を伏せる鍵の名前。英数字に続く位置では始めないため、DB_PASSWORDやAWS_SECRET_ACCESS_KEYのように
+ * 前に語が付いた環境変数名にも当たり、passwordlessのような語の途中には当たらない。
+ */
+const SECRET_KEYS = '(?:(?<![A-Za-z0-9])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|signature|sig)(?![A-Za-z0-9])|パスワード|暗証番号|合言葉)';
 // 既知の形式を先に並べる。重なった場合は先に見つかった（開始位置が早い、同じなら長い）一致を採る。
 export const builtinSecretRules: readonly SecretRule[] = [
   { id: 'private-key', label: '秘密鍵', pattern: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g },

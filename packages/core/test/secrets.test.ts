@@ -108,11 +108,14 @@ test('contextの抜粋で切れる位置にある値も、切る前に伏せる'
   expect(text).toContain('[伏せ字:APIキー]');
 });
 
-test('URLの資格情報の検出は長い入力でも時間がかからない', () => {
+test('URLの資格情報と鍵名の検出は長い入力でも時間がかからない', () => {
   const settings = secretSettings({ privacy: { redactSecrets: true, patterns: [] } });
   const started = performance.now();
   findSecrets('a'.repeat(50000) + '://', settings);
   findSecrets('a+'.repeat(25000), settings);
+  // 区切りでつないだ長い名前（a_a_a_…）でも、位置ごとに先まで読み直さない。
+  findSecrets('a_'.repeat(25000), settings);
+  expect(redactText(`${'a_'.repeat(2000)}password=hunter2pass`, settings).text.endsWith('password=[伏せ字:パスワード等]')).toBe(true);
   expect(performance.now() - started).toBeLessThan(2000);
 });
 
