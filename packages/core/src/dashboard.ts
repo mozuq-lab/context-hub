@@ -10,7 +10,9 @@ import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
 import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel } from './views.js';
 import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage } from './intake.js';
 import { listConflicts } from './conflicts.js';
-import type { HubConfig } from './types.js';
+import type { HubConfig, Input } from './types.js';
+import { describeFindings, findSecrets, secretSettings } from './secrets.js';
+import { rebuildIdeaIndexLocked, ideaSection } from './idea-links.js';
 // HTMLコメントの開始はNOWと同じく無害化し、以降の行が隠れないようにする。
 const plain=(s:string)=>s.replace(/[\r\n|]/g,' ').replaceAll('[','\\[').replaceAll(']','\\]').replaceAll('<!--','&lt;!--');
 const clip=(s:string,n=120)=>{const a=Array.from(plain(s));return a.length>n?a.slice(0,n).join('')+'…':a.join('');};
@@ -21,6 +23,16 @@ const NEXT_PER_PROJECT=3;
 export async function lastEvidenceAt(vault:Vault,projectId:string):Promise<string|undefined>{
  const raw=await vault.read(`10_projects/${projectId}/NOW.md`);if(raw===undefined)return undefined;
  try{const value=parseMarkdown(raw).meta.last_evidence_at;return typeof value==='string'&&Number.isFinite(Date.parse(value))?value:undefined;}catch{return undefined;}
+}
+/** HOMEに載せる、秘密情報らしい文字列を含むメモの上限。新しい順に載せる。 */
+const SECRET_ROWS=10;
+export function secretInputRows(config:HubConfig,inputs:Input[]):string{
+ const settings=secretSettings(config);if(!settings.enabled)return'';
+ const found=inputs.map(i=>({input:i,findings:findSecrets(i.text,settings)})).filter(x=>x.findings.length)
+  .sort((a,b)=>Date.parse(b.input.received_at)-Date.parse(a.input.received_at)||b.input.id.localeCompare(a.input.id));
+ if(!found.length)return'';
+ const rows=found.slice(0,SECRET_ROWS).map(x=>`- [${x.input.id}](${x.input.path}): ${plain(describeFindings(x.findings))}（${dateLabel(x.input.received_at,config.timezone)}受信）`);
+ return `\n\n## 秘密情報らしい文字列を含むメモ（${found.length}件）\nAPIキー・トークン・パスワードなどに見える文字列です。整理用のモデルと別AI向けのcontextへは伏せ字にして渡しています。原文は書き換えないため、同期先の端末とバックアップには残ります。本当に秘密の値なら、発行元で無効化・再発行してください。値はここに表示しません。${found.length>SECRET_ROWS?`新しい${SECRET_ROWS}件を載せます。全件は\`ctx doctor\`で確認できます。`:''}\n${rows.join('\n')}`;
 }
 export function daysSince(iso:string,now:Date):number{return Math.max(0,Math.floor((now.getTime()-Date.parse(iso))/DAY));}
 export async function rebuildDashboard(config:HubConfig,options:{now?:Date}={}):Promise<{path:string;conflict?:string}>{
@@ -80,7 +92,13 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    statuses.push(`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`);
   }
   for(const unit of effective){const latest=receipts.find(r=>r.input_id===unit.chain.latest.id);statuses.push(`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`);}
+  // 秘密情報らしい文字列を含むメモ。原文は変えずモデルへ渡す前に伏せているが、同期先の端末には原文のまま残る。
+  const secretRows=secretInputRows(config,effective.flatMap(u=>[u.chain.root,...u.chain.revisions]));
+  // 似ているアイデアの索引。束ねの記録が壊れていてもHOMEは作り、壊れた記録を示す。
+  let ideaText='',ideaProblem:string|undefined;
+  try{ideaText=ideaSection(await rebuildIdeaIndexLocked(config,vault,clock));}catch(error){ideaProblem=error instanceof Error?error.message:String(error);}
   const errors:string[]=[];
+  if(ideaProblem)errors.push(`- ${plain(ideaProblem)}（似ているアイデアの一覧を更新できません。\`ctx doctor\`で確認してください）`);
   for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){try{const e=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(e.status==='error'&&acks.some(a=>a.path===e.path))continue;errors.push(`- [${plain(e.path)}](${e.path}): ${e.status==='conflict'?'競合':'受付失敗'} / ${plain(intakeErrorMessage(e))} / 記録: [詳細](${path})`);}catch{errors.push(`- 受付エラー記録不正: ${plain(path)}`);}}
   // 退避は対象ごとにまとめる。NOWは手で変えた時点から更新が止まっているので、そのことと戻し方を示す。
   for(const g of await listConflicts(config)){
@@ -91,7 +109,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const path of draftRecords.problems)errors.push(`- [作業記録の下書きの記録が不正です](${path})`);
   errors.push(...nextProblems);
   for(const p of gitProblems)errors.push(`- 作業記録の下書き（${plain(p.projectId)} / ${plain(p.repo)}）: ${plain(p.error)}`);
-  const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n同期された時点の表示です。端末保存・Mac mini受領・整理完了はそれぞれ別の状態です。${reviewLink}\n\n${projectSections}${draftSection}\n\n## 確認待ち（${pending.length}件）\n${reviewRows(pending)}\n\n候補を開いて内容・理由・出典を確認し、QuickAddの承認／却下を実行してください。保留は閉じるだけです。AI候補は未承認です。\n\n## 要確認（${attention.length}件）\n${reviewRows(attention)}\n\n## 有効方針\n[共通方針](POLICY.md)。各プロジェクトのPOLICY.mdに対象方針を掲載します。参考知識は必要時に検索します。\n\n## 判断履歴\n${reviewRows(history)}\n\n## 受領と整理状況\n${statuses.join('\n')||'入力はありません。'}\n\n## 失敗と競合\n${errors.join('\n')||'記録された失敗・競合はありません。'}\n\n正式知識は根拠が訂正されても自動変更しません。根拠の訂正履歴と承認内容を確認してください。\n`;
+  const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n同期された時点の表示です。端末保存・Mac mini受領・整理完了はそれぞれ別の状態です。${reviewLink}\n\n${projectSections}${draftSection}\n\n## 確認待ち（${pending.length}件）\n${reviewRows(pending)}\n\n候補を開いて内容・理由・出典を確認し、QuickAddの承認／却下を実行してください。保留は閉じるだけです。AI候補は未承認です。\n\n## 要確認（${attention.length}件）\n${reviewRows(attention)}\n\n## 有効方針\n[共通方針](POLICY.md)。各プロジェクトのPOLICY.mdに対象方針を掲載します。参考知識は必要時に検索します。\n\n## 判断履歴\n${reviewRows(history)}${ideaText}${secretRows}\n\n## 受領と整理状況\n${statuses.join('\n')||'入力はありません。'}\n\n## 失敗と競合\n${errors.join('\n')||'記録された失敗・競合はありません。'}\n\n正式知識は根拠が訂正されても自動変更しません。根拠の訂正履歴と承認内容を確認してください。\n`;
   return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
  }
 }

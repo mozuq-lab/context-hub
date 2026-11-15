@@ -32,3 +32,5 @@ export * from './knowledge-scope.js';
 export * from './policies.js';
 export * from './knowledge-retirement.js';
 export * from './policy-context.js';
+export * from './secrets.js';
+export * from './idea-links.js';
