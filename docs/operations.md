@@ -37,7 +37,7 @@ node packages/core/dist/cli.js --config "<設定ファイル>" idea groups
 
 メモや作業要約に紛れたAPIキー・トークン・パスワード・秘密鍵らしい文字列は、整理用のモデルへ渡す前と、`context`・`bundle`（別AI向けの資料）の出力、DiscordのOpenClawツール（`/ctx_find`・`/ctx_recent`・`/ctx_pending`・`/ctx_resume`）の返信で`[伏せ字:APIキー]`のように置き換えます。モデルの応答に同じ形の文字列が残っていた場合も伏せてから検証します。既定で有効です。原文（`00_inbox/`）は書き換えないため、同期先の端末とバックアップには元の値が残ります。HOMEの「秘密情報らしい文字列を含むメモ」（新しい10件。値は出しません）と`doctor`の`secrets`で該当するメモを確認し、本当に秘密の値なら発行元で無効化・再発行してください。
 
-検出するのは、既知の形式（Anthropic・OpenAI・GitHub・GitLab・AWS・Google・Slack・StripeのキーやトークンとJWT、秘密鍵のブロック、`Bearer`の値、URLに埋め込んだパスワード）、`password=`・`pass:`・`DB_PASSWORD=`・`api_key:`・`パスワード：`のような代入の値（URLのクエリの`token=`・`sig=`も含む。値の途中の`,`・`;`は値に含めます）、「パスワードは hunter2…」のように「は」で続けた英数字・記号の値（数字か記号を含む6文字以上）、英大文字・小文字・数字を含む32文字以上の高エントロピーな文字列です。16進のハッシュやコミットID、ULID、UUID、ContextHubの記録ID、URLのパスの一部は伏せません。重なって見つかった箇所は1つの伏せ字にまとめます。設定で規則を追加したり、無効にしたりできます。
+検出するのは、既知の形式（Anthropic・OpenAI・GitHub・GitLab・AWS・Google・Slack・StripeのキーやトークンとJWT、秘密鍵のブロック、`Bearer`の値、URLに埋め込んだパスワード）、`password=`・`DB_PASSWORD=`・`api_key:`・`パスワード：`のような代入の値（URLのクエリの`token=`・`sig=`も含む。半角の`,`・`;`で値が終わります）、`pass:`・`pass=`の値と「パスワードは hunter2…」「パスワードは「hunter2」」のように「は」で続けた値（どちらも英数字・記号で、数字か記号を含む6文字以上。`First pass: refactoring`のような文は伏せません）、英大文字・小文字・数字を含む32文字以上の高エントロピーな文字列です。16進のハッシュやコミットID、ULID、UUID、ContextHubの記録ID、URLのパスの一部は伏せません。重なって見つかった箇所は1つの伏せ字にまとめます。設定で規則を追加したり、無効にしたりできます。
 
 ```json
 "privacy": {
