@@ -34,11 +34,14 @@ const key = (n: number) => String(n).repeat(64);
 
 test('モデルの候補は提示した参照名だけをキーへ対応付け、崩れた要素は整理全体を失敗にせず捨てる', () => {
   const items = [{ ref: 'i1', key: key(1), section: 'next' as const, text: 'A' }, { ref: 'i2', key: key(2), section: 'open' as const, text: 'B' }];
-  const raw = JSON.stringify({ ...base, resolution_hints: [{ item: 'i1', quote: 'Aは済んだ' }, { item: 'i9', quote: 'x' }, { item: 'i2' }, 'bad', { item: 'i1', quote: '重複' }, { item: 'i2', quote: '  ' }, { item: key(2), quote: 'キーの直接指定' }] });
+  const raw = JSON.stringify({ ...base, resolution_hints: [{ item: 'i1', quote: 'Aは済んだ' }, { item: 'i9', quote: 'x' }, { item: 'i2' }, 'bad', { item: 'i1', quote: '重複' }, { item: 'i2', quote: '  ' }, { item: 'i2', quote: '。' }, { item: 'i2', quote: '完了' }, { item: key(2), quote: 'キーの直接指定' }] });
   expect(validateOrganizeResult(raw, [], 4000, items).resolution_hints).toEqual([{ item_key: key(1), quote: 'Aは済んだ' }]);
   // 項目を見せていないときは、モデルが返しても候補にしない。
   expect(validateOrganizeResult(raw, [], 4000).resolution_hints).toBeUndefined();
   expect(validateOrganizeResult(JSON.stringify({ ...base, resolution_hints: null }), [], 4000, items).resolution_hints).toBeUndefined();
+  // 形の崩れた候補の欄は、整理全体を失敗にしない。
+  expect(validateOrganizeResult(JSON.stringify({ ...base, resolution_hints: { item: 'i1' } }), [], 4000, items).category).toBe('unclassified');
+  expect(validateOrganizeResult(JSON.stringify({ ...base, resolution_hints: Array(80).fill('x') }), [], 4000, items).resolution_hints).toBeUndefined();
   // 原文にそのまま含まれない引用は捨てる。
   const grounded = groundResolutionHints('昨日、Aは済んだ。', { ...base, resolution_hints: [{ item_key: key(1), quote: 'Aは済んだ' }, { item_key: key(2), quote: 'Bも終わった' }] });
   expect(grounded.resolution_hints).toEqual([{ item_key: key(1), quote: 'Aは済んだ' }]);
@@ -87,6 +90,7 @@ test('プロジェクトを指定していないメモや、項目と合わな�
 test('訂正で記述を取り消すと候補も消える', async () => {
   const { config, vault } = await fixture();
   const inputId = await memo(config, '解決: 未解決: 配布方法が決まっていない', 3);
+  expect(await nowText(vault)).toContain('- 未解決: 配布方法が決まっていない ← ');
   expect((await readNowItems(vault, 'hub'))!.items.find(i => i.section === 'open')!.hints).toHaveLength(1);
   await correctInput(config, inputId, { source: 'cli-correction', text: '配布方法はまだ決めていない', occurredAt: at(4) });
   // 訂正が未反映の間も、取り消された記述を候補として示さない。
@@ -118,10 +122,59 @@ test('「違う」は受付ファイルで見送り、同じメモから同じ�
   expect(await dismissResolutionHint(config, { projectId: 'hub', itemKey: target.key, inputId, source: 'cli' })).toMatchObject({ deduped: true });
   await expect(dismissResolutionHint(config, { projectId: 'hub', itemKey: target.key, inputId: 'IN-01JZ0000000000000000000000', source: 'flutter', sourceEventId: p.requestId })).rejects.toThrow('別の見送り');
   expect(await readHintDismissals(vault)).toHaveLength(1);
-  // 示されていない組は見送れない。
+  // 依頼の後に候補が消えていても（先に完了された等）、見送りは受け付けて記録する。
   const other = (await readNowItems(vault, 'hub'))!.items.find(i => i.text === '利用者に見せる')!;
-  await expect(dismissResolutionHint(config, { projectId: 'hub', itemKey: other.key, inputId, source: 'cli' })).rejects.toThrow('片付いたかも');
+  await setItemResolution(config, { projectId: 'hub', itemKey: other.key, action: 'resolve', source: 'cli' });
+  const late = await packet(config, { ...fields, item_key: other.key }, '');
+  expect((await ingest(config)).accepted).toBe(1);
+  expect((await readIntakeReceipts(config)).find(r => r.request_id === late.requestId)).toMatchObject({ result: { itemKey: other.key, deduped: false } });
+  expect(await readHintDismissals(vault)).toHaveLength(2);
   // 別のメモが同じ項目に触れたら、改めて示す。
   const second = await memo(config, '完了: 名前を決める', 5);
   expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === target.key)!.hints).toEqual([expect.objectContaining({ input_id: second })]);
+});
+
+test('次の一手を先に、未解決は根拠が新しい順に30件までモデルへ見せ、メモより後の根拠の項目は見せない', async () => {
+  const { config } = await fixture();
+  for (const day of [2, 3]) await capture(config, { source: 'file', kind: 'work-summary', project: 'hub', occurredAt: at(day), receivedAt: at(day), text: `## 次の一手\n- [確認済み] 利用者に見せる\n## 未解決\n${Array.from({ length: 20 }, (_, i) => `- 課題${day}-${i}`).join('\n')}` });
+  await organize(config, new MockLlm());
+  const prompts: string[] = [];
+  const llm = { complete: async (prompt: string, opts: Parameters<MockLlm['complete']>[1]) => { prompts.push(prompt); return new MockLlm().complete(prompt, opts); } };
+  await capture(config, { source: 'cli', kind: 'memo', project: 'hub', occurredAt: at(10), receivedAt: at(10), text: '完了: 利用者に見せる' });
+  await organize(config, llm);
+  const offered = JSON.parse(prompts[0]!.slice(prompts[0]!.indexOf('入力データ(JSON):\n') + '入力データ(JSON):\n'.length)).open_items as { section: string; text: string }[];
+  expect(offered).toHaveLength(30);
+  expect(offered[0]).toMatchObject({ section: 'next', text: '利用者に見せる' });
+  expect(offered[1]!.text).toContain('課題3-');
+  expect(offered.some(i => i.text.includes('課題2-'))).toBe(true);
+  // メモより後の作業要約で挙がった項目は見せない。
+  prompts.length = 0;
+  await capture(config, { source: 'file', kind: 'work-summary', project: 'hub', occurredAt: at(20), receivedAt: at(20), text: '## 次の一手\n- [確認済み] 新しい作業' });
+  await organize(config, new MockLlm());
+  await capture(config, { source: 'cli', kind: 'memo', project: 'hub', occurredAt: at(15), receivedAt: at(15), text: '完了: 新しい作業' });
+  await organize(config, llm);
+  const later = JSON.parse(prompts[0]!.slice(prompts[0]!.indexOf('入力データ(JSON):\n') + '入力データ(JSON):\n'.length)).open_items as { text: string }[] | undefined;
+  expect((later ?? []).some(i => i.text === '新しい作業')).toBe(false);
+});
+
+test('項目を足してプロンプトが上限を超えたら、項目なしで整理し直す', async () => {
+  const { config, vault } = await fixture();
+  const { PromptTooLargeError } = await import('../src/infer.js');
+  const llm = { complete: async (prompt: string, opts: Parameters<MockLlm['complete']>[1]) => { if (prompt.includes('"open_items"')) throw new PromptTooLargeError(); return new MockLlm().complete(prompt, opts); } };
+  const r = await capture(config, { source: 'cli', kind: 'memo', project: 'hub', occurredAt: at(3), receivedAt: at(3), text: '完了: 利用者に見せる' });
+  expect((await organize(config, llm)).processed).toBe(1);
+  const receipt = JSON.parse((await vault.read(`90_system/receipts/${r.inputId}.json`))!);
+  expect(receipt).toMatchObject({ status: 'organized', error: null });
+  expect(receipt.result.resolution_hints).toBeUndefined();
+});
+
+test('未解決に戻した後に整理したメモからは、改めて示す', async () => {
+  const { config, vault } = await fixture();
+  await memo(config, '完了: 利用者に見せる', 3);
+  const target = (await readNowItems(vault, 'hub'))!.items.find(i => i.text === '利用者に見せる')!;
+  await setItemResolution(config, { projectId: 'hub', itemKey: target.key, action: 'resolve', source: 'cli' });
+  await setItemResolution(config, { projectId: 'hub', itemKey: target.key, action: 'reopen', source: 'cli' });
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === target.key)!.hints).toBeUndefined();
+  const again = await memo(config, '今度こそ\n完了: 利用者に見せる', 4);
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === target.key)!.hints).toEqual([expect.objectContaining({ input_id: again })]);
 });

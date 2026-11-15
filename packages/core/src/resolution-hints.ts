@@ -3,7 +3,7 @@ import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { readInputs } from './capture.js';
 import { projectIdSchema, readProjects } from './projects.js';
-import { itemKeySchema, readNowItems } from './item-resolutions.js';
+import { itemKeySchema } from './item-resolutions.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -40,7 +40,7 @@ export interface HintDismissResult { projectId: string; itemKey: string; hintInp
 const requestSchema = z.object({ projectId: projectIdSchema, itemKey: itemKeySchema, inputId: inputIdSchema, source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional() }).strict();
 
 /**
- * 直近に生成したNOW項目の一覧で、指定のメモから示されている「片付いたかも」だけを見送る。
+ * 指定のメモから示された（または示される）「片付いたかも」を見送る。候補が既に消えていても受け付ける。
  * 記録を先に作り、NOWの再生成前に停止した場合は同じ受付IDの再送で再生成だけを行う。
  */
 export async function dismissResolutionHint(config: HubConfig, request: HintDismissRequest): Promise<HintDismissResult> {
@@ -63,9 +63,8 @@ export async function dismissResolutionHint(config: HubConfig, request: HintDism
     // 別の経路で既に見送っていれば、新しい記録は作らない。
     const same = records.find(x => dismissalKey(x.project_id, x.item_key, x.input_id) === dismissalKey(r.projectId, r.itemKey, r.inputId));
     if (same) { await rebuild(); return result(same.id, true); }
-    const item = (await readNowItems(vault, r.projectId))?.items.find(i => i.key === r.itemKey);
-    if (!item) throw new Error('NOWに該当する項目がありません。最新のNOWで確認してください');
-    if (!item.hints?.some(h => h.input_id === r.inputId)) throw new Error('このメモからの「片付いたかも」はありません。最新のNOWで確認してください');
+    // 依頼の後に項目が完了・解決された、メモが訂正された、などで候補が既に消えていても見送りは害がないため記録して受け付ける。
+    // 記録が残れば、同じメモから同じ項目へ再び示すこともない。
     const record: HintDismissal = {
       schema_version: 1, id: `HDM-${ulid()}`, project_id: r.projectId, item_key: r.itemKey, input_id: r.inputId,
       source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),

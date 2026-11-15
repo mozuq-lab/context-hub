@@ -137,6 +137,8 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     for (const hint of receipt.result?.resolution_hints ?? []) {
       const item = items.get(hint.item_key);
       if (!item || item.resolution || item.input_id === chain.root.id || dismissed.has(dismissalKey(projectId, hint.item_key, chain.root.id))) continue;
+      // このメモより後の根拠で改めて挙がった項目は、このメモでは片付いていない。
+      if (Date.parse(chain.root.occurred_at) < Date.parse(inputs.find(i => i.id === item.input_id)?.occurred_at ?? chain.root.occurred_at)) continue;
       if (Date.parse(receipt.organized_at) <= (reopenedAt.get(hint.item_key) ?? Number.NEGATIVE_INFINITY)) continue;
       if ((item.hints ??= []).some(h => h.input_id === chain.root.id) || item.hints.length >= 20) continue;
       item.hints.push({ input_id: chain.root.id, quote: hint.quote, at: receipt.organized_at });
@@ -145,7 +147,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   }
   for (const item of items.values()) if (item.hints && !item.hints.length) delete item.hints;
   hinted.sort((a, b) => Date.parse(b.input.occurred_at) - Date.parse(a.input.occurred_at) || a.input.id.localeCompare(b.input.id));
-  const hintRows = hinted.map(({ item, input, quote }) => `- ${item.section === 'next' ? '次の一手' : '未解決'}: ${item.label}${plain(item.text)} ← 「${plain(quote)}」 ${ref(input)}`);
+  const hintRows = hinted.map(({ item, input, quote }) => `- ${item.label || (item.section === 'next' ? '次の一手: ' : '未解決: ')}${plain(item.text)} ← 「${plain(quote)}」 ${ref(input)}`);
   const fallback = '- 不明（根拠となる入力がありません）';
   const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? '- 残っている次の一手はありません（完了報告済み）' : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? '- 残っている未解決はありません（解決報告済み）' : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}`;
   const relative = `10_projects/${projectId}/NOW.md`; const existing = await vault.read(relative);

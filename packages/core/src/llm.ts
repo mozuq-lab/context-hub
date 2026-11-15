@@ -20,7 +20,7 @@ export const RESOLUTION_QUOTE_CHARS = 200;
 export const resolutionHintSchema = z.object({ item_key: z.string().regex(/^[a-f0-9]{64}$/), quote: z.string().min(1).max(RESOLUTION_QUOTE_CHARS) }).strict();
 export const organizeResultSchema = z.object({ ...organizeResultShape, resolution_hints: z.array(resolutionHintSchema).max(RESOLUTION_HINTS_MAX).optional() }).strict();
 // モデルの出力。片付いたかもしれない項目は補助情報なので、形の崩れた要素は整理全体を失敗にせず捨てる。
-const modelResultSchema = z.object({ ...organizeResultShape, resolution_hints: z.array(z.unknown()).max(50).nullable().optional() }).strict();
+const modelResultSchema = z.object({ ...organizeResultShape, resolution_hints: z.unknown().optional() }).strict();
 const modelHintSchema = z.object({ item: z.string().max(20), quote: z.string() });
 
 /** 整理のときにモデルへ見せる、本人が指定したプロジェクトの片付いていない項目。refはプロンプト内だけの短い参照名。 */
@@ -40,16 +40,19 @@ export function validateOrganizeResult(raw: string, projectIds: string[], maxOut
   const { resolution_hints: rawHints, ...result } = parsed;
   // 提示した項目の参照名だけをキーへ対応付ける。提示していない参照・重複・空の引用は捨てる。
   const byRef = new Map(openItems.map((item) => [item.ref, item.key])), hints: ResolutionHint[] = [];
-  for (const entry of rawHints ?? []) {
+  for (const entry of Array.isArray(rawHints) ? rawHints.slice(0, 50) : []) {
     const hint = modelHintSchema.safeParse(entry);
     if (!hint.success) continue;
     const key = byRef.get(hint.data.item.trim()), quote = hint.data.quote.trim();
-    if (!key || !quote || quote.length > RESOLUTION_QUOTE_CHARS || hints.some((h) => h.item_key === key)) continue;
+    if (!key || quote.length > RESOLUTION_QUOTE_CHARS || !meaningfulQuote(quote) || hints.some((h) => h.item_key === key)) continue;
     hints.push({ item_key: key, quote });
     if (hints.length === RESOLUTION_HINTS_MAX) break;
   }
   return hints.length ? { ...result, resolution_hints: hints } : result;
 }
+/** 根拠として読める長さの引用か。句読点や1〜2文字の語だけでは根拠にしない。 */
+function meaningfulQuote(quote: string): boolean { return (quote.match(/[\p{L}\p{N}]/gu)?.length ?? 0) >= RESOLUTION_QUOTE_MIN_LETTERS; }
+export const RESOLUTION_QUOTE_MIN_LETTERS = 4;
 /** 引用が最新の原文にそのまま含まれる候補だけを残す。訂正で取り消された文や、モデルの言い換えを根拠にしない。 */
 export function groundResolutionHints(text: string, result: OrganizeResult): OrganizeResult {
   const { resolution_hints: hints, ...rest } = result;
@@ -131,7 +134,7 @@ export function buildOrganizePrompt(input: Input, projects: Project[], retry = f
     ] : []),
     `必須キー: ${JSON.stringify(contract)}`,
     ...(retry ? ['前回の応答は形式不正。上記契約を満たすJSONを一度だけ再生成する。'] : []),
-  ].join('\n') + dataMarker + JSON.stringify({ metadata: { id: input.id, kind: chain?.root.kind ?? input.kind, source: input.source, occurred_at: chain?.root.occurred_at ?? input.occurred_at, project: chain?.root.project ?? input.project ?? null, tool: input.tool ?? null, origin: input.origin }, existing_projects: projects.map(({ id, title, aliases, keywords }) => ({ id, title, aliases, keywords })), source_text: input.text, ...(chain?.revisions.length ? { original_input:chain.root, correction_history:chain.revisions } : {}), ...(openItems.length ? { open_items: openItems.map(({ ref, section, text }) => ({ ref, section, text })) } : {}) });
+  ].join('\n') + dataMarker + JSON.stringify({ metadata: { id: input.id, kind: chain?.root.kind ?? input.kind, source: input.source, occurred_at: chain?.root.occurred_at ?? input.occurred_at, project: chain?.root.project ?? input.project ?? null, tool: input.tool ?? null, origin: input.origin }, existing_projects: projects.map(({ id, title, aliases, keywords }) => ({ id, title, aliases, keywords })), ...(openItems.length ? { open_items: openItems.map(({ ref, section, text }) => ({ ref, section, text })) } : {}), source_text: input.text, ...(chain?.revisions.length ? { original_input:chain.root, correction_history:chain.revisions } : {}) });
 }
 
 export class MockLlm implements LlmClient {
