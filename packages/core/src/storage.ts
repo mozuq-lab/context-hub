@@ -239,7 +239,11 @@ export class Vault {
   async create(rel: string, text: string): Promise<boolean> { return this.atomic(rel, text, true); }
   /** 1ファイルを削除する。無い場合はfalse。Writerロック内で、退避の片付けなど記録を残した操作からだけ使う。 */
   async remove(rel: string): Promise<boolean> {
+    // 書き込みと同じく、削除の前後で読み取りの使い回しを捨てる（削除の途中に読んだ値を残さない）。
     forgetReads(this.config.vaultPath, rel);
+    try { return await this.removeFile(rel); } finally { forgetReads(this.config.vaultPath, rel); }
+  }
+  private async removeFile(rel: string): Promise<boolean> {
     const target = await this.path(rel);
     try { await unlink(target); } catch (error) { if (missing(error)) return false; throw error; }
     await syncDirectory(dirname(target)); return true;
