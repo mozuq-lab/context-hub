@@ -9,7 +9,7 @@ import { applyAssociations } from './associations.js';
 import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown } from './storage.js';
 import { activeResolutions, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
-import { activeSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
+import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
 import type { HubConfig, Input, Receipt } from './types.js';
 
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -97,15 +97,16 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
   const resolved = activeResolutions(await readItemResolutions(vault), projectId), items = new Map<string, NowItem>(), done: string[] = [];
-  // 本人が付けた期日・見直す日は行の末尾に示す（出典より後ろに置き、項目との照合に使う行頭は変えない）。解決済みの項目には付けない。
-  const scheduled = activeSchedules((await readItemSchedules(vault)).records, projectId);
+  // 本人が付けた期日・見直す日は行の末尾に示す（出典より後ろに置き、項目との照合に使う行頭は変えない）。
+  // 引き継ぎは項目がそろってから決まるため、行には項目キーの印を付けておき、最後に日付へ置き換える。
+  const mark = '\u0000';
   const entry = (section: ItemSection, text: string, input: Input, label = ''): string[] => {
-    const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key), schedule = resolution ? undefined : scheduled.get(key);
+    const key = itemKey(projectId, section, input.id, text), resolution = resolved.get(key);
     if (!items.has(key)) {
-      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null, schedule: schedule ? { id: schedule.id, due: schedule.due, review_after: schedule.review_after } : null });
+      items.set(key, { key, section, label, text, input_id: input.id, resolution: resolution ? { id: resolution.id, at: resolution.created_at, source: resolution.source } : null, schedule: null });
       if (resolution) done.push(`- ${section === 'next' ? '完了' : '解決'}: ${label}${plain(text)} ${ref(input)} — 本人報告 ${dateLabel(resolution.created_at, config.timezone)} ${resolution.id}`);
     }
-    return resolution ? [] : [row(text, input, label) + (schedule ? ` — ${scheduleLabel(schedule)}` : '')];
+    return resolution ? [] : [`${row(text, input, label)}${mark}${key}`];
   };
   const current = latest?.result.extracted.current.filter((item) => item.status === 'confirmed').map((item) => row(item.text, latest.input)) ?? [];
   const next = latest?.result.extracted.next.filter((item) => item.status === 'confirmed').flatMap((item) => entry('next', item.text, latest.input)) ?? [];
@@ -127,6 +128,10 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
       if (item.status === 'confirmed' && !latestTexts.has(item.text)) open.push(...entry('open', item.text, old.input, '過去の報告との差異（矛盾・時点差は未確認）: '));
     }
   }
+  const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
+  for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after }; }
+  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key); return s ? ` — ${scheduleLabel(s)}` : ''; }));
+  next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
   const fallback = '- 不明（根拠となる入力がありません）';
   const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? '- 残っている次の一手はありません（完了報告済み）' : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? '- 残っている未解決はありません（解決報告済み）' : '- 不明（未解決事項の確認が必要です）')}\n${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}`;
   const relative = `10_projects/${projectId}/NOW.md`; const existing = await vault.read(relative);

@@ -56,6 +56,25 @@ export function activeSchedules(records: ItemSchedule[], projectId?: string): Ma
   return latest;
 }
 
+/**
+ * 今のNOW項目に効く日付と、付け直しが必要な日付。
+ * 項目キーの記録を優先する。キーの記録がない項目は、NOWから外れた記録のうち同じ欄・同じ本文のもの（最新）を引き継ぐ。
+ * 作業要約が届くたびに次の一手の根拠（入力ID）が変わり、同じ本文でも別の項目になるため。
+ * 引き継ぎ先のない記録だけを付け直しの対象として返す。解決済み・完了の項目の記録は返さない。
+ */
+export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: { key: string; section: string; text: string; resolution: unknown }[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
+  const active = activeSchedules(records, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, ItemSchedule>();
+  const loose = [...active.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
+  const same = (r: ItemSchedule, i: { section: string; text: string }) => r.section === i.section && r.text === i.text;
+  for (const item of items) {
+    if (item.resolution) continue;
+    const direct = active.get(item.key), carried = loose.filter(r => same(r, item)).at(-1);
+    if (direct ?? carried) byKey.set(item.key, (direct ?? carried)!);
+  }
+  const orphaned = loose.filter(r => !items.some(i => !i.resolution && same(r, i)));
+  return { byKey, orphaned };
+}
+
 /** 設定のタイムゾーンでの今日（YYYY-MM-DD）。 */
 export function todayIn(timezone: string, now: Date = new Date()): string {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
@@ -105,20 +124,25 @@ export async function setItemSchedule(config: HubConfig, request: ItemScheduleRe
     if (r.sourceEventId) {
       const previous = records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
       if (previous) {
-        if (previous.project_id !== r.projectId || previous.item_key !== r.itemKey || previous.due !== r.due || previous.review_after !== r.reviewAfter) throw new Error('同じ受付IDで別の日付が記録されています');
+        // 引き継いだ日付を外した記録は、引き継ぎ元のキーで残る。
+        if (previous.project_id !== r.projectId || (previous.item_key !== r.itemKey && (r.due !== null || r.reviewAfter !== null)) || previous.due !== r.due || previous.review_after !== r.reviewAfter) throw new Error('同じ受付IDで別の日付が記録されています');
         await rebuild();
         return { projectId: r.projectId, itemKey: r.itemKey, scheduleId: previous.id, deduped: true };
       }
     }
-    const items = await readNowItems(vault, r.projectId);
-    const item = items?.items.find(i => i.key === r.itemKey);
-    if (!item) throw new Error('NOWに該当する項目がありません。最新のNOWで確認してください');
-    const clearing = r.due === null && r.reviewAfter === null, current = activeSchedules(records, r.projectId).get(r.itemKey);
-    if (!clearing && activeResolutions(await readItemResolutions(vault), r.projectId).has(r.itemKey)) throw new Error('解決済み・完了の項目には日付を付けられません');
+    const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
+    const clearing = r.due === null && r.reviewAfter === null, { byKey, orphaned } = effectiveSchedules(records, r.projectId, list, resolved);
+    const item = list.find(i => i.key === r.itemKey), orphan = orphaned.find(o => o.item_key === r.itemKey);
+    // NOWから外れて付け直しを促している日付は、外すことだけを受け付ける。
+    if (!item && !(clearing && orphan)) throw new Error('NOWに該当する項目がありません。最新のNOWで確認してください');
+    const current = item ? byKey.get(r.itemKey) : orphan;
+    if (!clearing && resolved.has(r.itemKey)) throw new Error('解決済み・完了の項目には日付を付けられません');
     if (clearing && !current) throw new Error('この項目に外す日付はありません');
     if (current && current.due === r.due && current.review_after === r.reviewAfter) throw new Error('この項目には既に同じ日付が付いています');
+    // 引き継いだ日付を外すときは、引き継ぎ元の記録を外す（項目のキーで外しても引き継ぎ元が残るため）。
+    const target = clearing && current && current.item_key !== r.itemKey ? current : item ?? orphan!;
     const record: ItemSchedule = {
-      schema_version: 1, id: `SCH-${ulid()}`, project_id: r.projectId, item_key: r.itemKey, section: item.section as ItemSection, text: item.text, input_id: item.input_id,
+      schema_version: 1, id: `SCH-${ulid()}`, project_id: r.projectId, item_key: 'item_key' in target ? target.item_key : target.key, section: target.section as ItemSection, text: target.text, input_id: target.input_id,
       due: r.due, review_after: r.reviewAfter, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),
     };
     if (!await vault.create(schedulePath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('日付の記録が競合しました');

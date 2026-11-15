@@ -3,6 +3,7 @@ import { Vault, hash, parseMarkdown } from './storage.js';
 import { readProjects } from './projects.js';
 import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact, readReceipts } from './views.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
+import { groundExtractedHistory, groundExtractedStatuses } from './llm.js';
 import { lifecycleOf, projectStatusLabels, readProjectStatusChanges, type ProjectStatusChange } from './project-status.js';
 import { readItemResolutions, readNowItems, type ItemResolution } from './item-resolutions.js';
 import { readProjectCreations } from './project-creations.js';
@@ -26,6 +27,7 @@ export const historyPath = (projectId: string) => `10_projects/${projectId}/HIST
 interface Event { at: string; order: number; line: string }
 interface HistorySources {
   config: HubConfig; projects: Project[]; units: EffectiveInput[]; receipts: Receipt[]; resolutions: ItemResolution[]; statuses: ProjectStatusChange[];
+  /** 読めなかった記録の種類。経緯からは省き、本文にその旨を書く（cycleとHOMEを止めない）。 */ problems: string[];
   creations: Awaited<ReturnType<typeof readProjectCreations>>; definitions: Awaited<ReturnType<typeof readProjectDefinitionChanges>>; knowledge: { projectId: string; id: string; kind: string; claim: string; approvedAt: string; retiredAt?: string }[];
 }
 
@@ -45,14 +47,22 @@ async function readSources(config: HubConfig, vault: Vault): Promise<HistorySour
       knowledge.push({ projectId: match[1]!, id: match[2]!, kind: typeof meta.kind === 'string' ? meta.kind : 'knowledge', claim, approvedAt: meta.approved_at, ...(retiredAt ? { retiredAt } : {}) });
     } catch { /* 読めない知識は方針の生成とdoctorで報告する。経緯からは省く。 */ }
   }
+  const problems: string[] = [];
+  const tolerant = async <T>(label: string, read: () => Promise<T[]>): Promise<T[]> => { try { return await read(); } catch { problems.push(label); return []; } };
   return {
     config, projects: await readProjects(config), units: await readEffectiveInputs(config), receipts: await readReceipts(config),
-    resolutions: await readItemResolutions(vault), statuses: await readProjectStatusChanges(vault), creations: await readProjectCreations(vault),
-    definitions: await readProjectDefinitionChanges(vault), knowledge,
+    resolutions: await tolerant('完了・解決の報告', () => readItemResolutions(vault)), statuses: await tolerant('状態の切り替え', () => readProjectStatusChanges(vault)),
+    creations: await tolerant('プロジェクトの作成', () => readProjectCreations(vault)), definitions: await tolerant('定義の変更', () => readProjectDefinitionChanges(vault)), knowledge, problems,
   };
 }
 
 const confirmed = (items: { text: string; status: string }[]) => [...new Set(items.filter(i => i.status === 'confirmed').map(i => i.text))];
+/** NOWと同じく、原文の印と照合した確認済みだけを信じる（古い・手で変えた処理記録のモデルの申告をそのまま使わない）。 */
+function groundedCurrent(u: EffectiveInput): string[] {
+  const { chain, receipt } = u, input = chain.root, index = [chain.root, ...chain.revisions].findIndex(i => i.id === receipt!.input_id);
+  const bound = { ...chain, revisions: chain.revisions.slice(0, Math.max(0, index)), latest: receipt!.input_id === input.id ? input : chain.revisions[index - 1] ?? input };
+  return confirmed((chain.revisions.length ? groundExtractedHistory(bound, receipt!.result!) : groundExtractedStatuses(input, receipt!.result!)).extracted.current);
+}
 const kindLabels: Record<string, string> = { knowledge: '知識', decision: '判断・方針', preference: '好み' };
 
 /** 経緯の本文。日時は設定のタイムゾーンで表示し、「何日前」のような生成時点に依存する表現は使わない。 */
@@ -67,12 +77,12 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
   }).sort((a, b) => Date.parse(a.chain.root.occurred_at) - Date.parse(b.chain.root.occurred_at) || a.chain.root.id.localeCompare(b.chain.root.id));
   const state = (u: EffectiveInput) => { const latest = sources.receipts.find(r => r.input_id === u.chain.latest.id); return latest?.status === 'organized' ? 'organized' : latest?.status === 'failed' ? 'failed' : 'waiting'; };
   const events: Event[] = [], inputsByMonth = new Map<string, EffectiveInput[]>();
-  for (const u of mine) { const key = month(u.chain.root.occurred_at); inputsByMonth.set(key, [...(inputsByMonth.get(key) ?? []), u]); }
+  for (const u of mine) { const key = month(u.chain.root.occurred_at); const list = inputsByMonth.get(key); if (list) list.push(u); else inputsByMonth.set(key, [u]); }
 
   // 現在地の移り変わり。NOWと同じく作業要約を発生日時の順に並べ、直前の作業要約と比べて変わったときだけ載せる。
   let previous: string[] | undefined;
   for (const u of mine.filter(u => u.chain.root.kind === 'work-summary' && u.receipt?.result)) {
-    const current = confirmed(u.receipt!.result!.extracted.current), input = u.chain.root;
+    const current = groundedCurrent(u), input = u.chain.root;
     if (previous === undefined) {
       if (current.length) events.push({ at: input.occurred_at, order: 1, line: `- ${day(input.occurred_at)} 現在地（最初の作業要約 ${ref(input)}）: ${current.slice(0, CHANGES_PER_SUMMARY).map(t => clip(t, 80)).join(' / ')}${current.length > CHANGES_PER_SUMMARY ? ` ほか${current.length - CHANGES_PER_SUMMARY}件` : ''}` });
       previous = current; continue;
@@ -113,7 +123,7 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
 
   // 月ごとにまとめる。入力の一覧は月の先頭に置き、ほかの出来事は日時の順に並べる。
   const months = new Map<string, Event[]>();
-  for (const e of events) { const key = e.order === -1 ? e.at.slice(0, 7) : month(e.at); months.set(key, [...(months.get(key) ?? []), e]); }
+  for (const e of events) { const key = e.order === -1 ? e.at.slice(0, 7) : month(e.at); const list = months.get(key); if (list) list.push(e); else months.set(key, [e]); }
   const lifecycle = lifecycleOf(project), firstAt = mine[0]?.chain.root.occurred_at, lastAt = mine.at(-1)?.chain.root.occurred_at;
   const resolvedCount = sources.resolutions.filter(r => r.project_id === id && r.action === 'resolve').length;
   const lines = [
@@ -123,6 +133,7 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
     `入力 ${mine.length}件 / 完了・解決の報告 ${resolvedCount}件 / 状態の切り替え ${sources.statuses.filter(s => s.project_id === id).length}件 / 採用した知識・方針 ${sources.knowledge.filter(k => k.projectId === id).length}件`, '',
     '根拠と処理記録から決定的に組み立てた一覧です。要約と抽出はAI生成・未検証です。判断の前にリンク先の原文と出典を確認してください。今の状態は[NOW](NOW.md)を参照してください。', '',
   ];
+  if (sources.problems.length) lines.push(`読めない記録があるため、次の出来事を省いています: ${sources.problems.join('・')}（\`ctx doctor\`で確認してください）`, '');
   if (!months.size) lines.push('まだ記録はありません。', '');
   for (const key of [...months.keys()].sort()) {
     const [y, m] = key.split('-');
@@ -135,9 +146,10 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
     let items: Awaited<ReturnType<typeof readNowItems>>;
     try { items = await readNowItems(vault, id); } catch { items = undefined; }
     const lastSummary = mine.filter(u => u.chain.root.kind === 'work-summary' && u.receipt?.result).at(-1);
-    const current = lastSummary ? confirmed(lastSummary.receipt!.result!.extracted.current) : [];
+    const current = lastSummary ? groundedCurrent(lastSummary) : [];
     const left = (section: 'next' | 'open') => items?.items.filter(i => i.section === section && i.resolution === null) ?? [];
-    lines.push(`## ${projectStatusLabels[lifecycle]}にした時点で残っているもの`);
+    // 切り替えた時点ではなく、今の記録で残っているもの（休止中に届いた入力や報告も反映する）。
+    lines.push(`## いま残っているもの（${projectStatusLabels[lifecycle]}）`);
     lines.push(`- 最後の現在地${lastSummary ? `（${ref(lastSummary.chain.root)}）` : ''}: ${current.length ? current.map(t => clip(t, 80)).join(' / ') : '不明'}`);
     for (const [section, title] of [['next', '次の一手'], ['open', '未解決']] as const) {
       const rest = left(section);

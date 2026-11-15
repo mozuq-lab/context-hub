@@ -68,7 +68,7 @@ test('期日と見直す日を付け、NOWの行末とHOMEの区分に出し、�
   const dated = await home(vault);
   const section = dated.slice(dated.indexOf('## 次の一手（進行中のプロジェクト）'), dated.indexOf('## 確認待ち'));
   expect(section).toMatch(new RegExp(`### 期限切れ（1件）\\n- 期日 ${addDays(today, -1)} — \\[集約ツール\\]\\(10_projects/hub/NOW.md\\) 次の一手: 利用者に見せる`));
-  expect(section).toMatch(new RegExp(`### 今日（1件）\\n- 期日 ${today} — \\[集約ツール\\][^\\n]+未解決: 未解決: 配布方法が決まっていない`));
+  expect(section).toMatch(new RegExp(`### 今日（1件）\\n- 期日 ${today} — \\[集約ツール\\][^\\n]+未解決: 配布方法が決まっていない`));
   expect(section).toMatch(/### 7日以内（1件）\n[^\n]+名前を決める/);
   // 前に出した項目と、見直す日まで休ませる項目は、プロジェクトごとの一覧に重ねて載せない。
   const perProject = section.slice(section.indexOf('### プロジェクトごと'));
@@ -93,18 +93,36 @@ test('期日と見直す日を付け、NOWの行末とHOMEの区分に出し、�
   expect(activeSchedules((await readItemSchedules(vault)).records).size).toBe(0);
 });
 
-test('解決済みの項目には付けず、NOWから外れた項目の日付は移さずに付け直しを促す', async () => {
+test('解決済みの項目には付けず、同じ本文の新しい項目へは引き継ぎ、外れた項目の日付は付け直しを促して外せる', async () => {
   const { config, vault, items } = await fixture();
-  await setItemResolution(config, { projectId: 'hub', itemKey: items[0]!.key, action: 'resolve', source: 'cli' });
-  await expect(setItemSchedule(config, { projectId: 'hub', itemKey: items[0]!.key, due: '2026-11-20', reviewAfter: null, source: 'cli' })).rejects.toThrow('解決済み');
-  await setItemSchedule(config, { projectId: 'hub', itemKey: items[1]!.key, due: '2026-12-20', reviewAfter: null, source: 'cli' });
-  // 新しい作業要約で次の一手が置き換わると、日付を付けた項目はNOWから外れる。
-  await capture(config, { source: 'file', kind: 'work-summary', project: 'hub', occurredAt: '2026-11-01T00:00:00Z', receivedAt: '2026-11-01T00:00:00Z', text: '## 次の一手\n- [確認済み] 名前を決め直す' });
+  const [show, name, write] = items as [typeof items[0], typeof items[0], typeof items[0]];
+  await setItemResolution(config, { projectId: 'hub', itemKey: name.key, action: 'resolve', source: 'cli' });
+  await expect(setItemSchedule(config, { projectId: 'hub', itemKey: name.key, due: '2026-11-20', reviewAfter: null, source: 'cli' })).rejects.toThrow('解決済み');
+  await setItemSchedule(config, { projectId: 'hub', itemKey: show.key, due: '2026-12-20', reviewAfter: null, source: 'cli' });
+  await setItemSchedule(config, { projectId: 'hub', itemKey: write.key, due: '2026-12-21', reviewAfter: null, source: 'cli' });
+  // 新しい作業要約で次の一手が置き換わる。「利用者に見せる」は同じ本文で再び報告され、「説明を書く」は消える。
+  await capture(config, { source: 'file', kind: 'work-summary', project: 'hub', occurredAt: '2026-11-01T00:00:00Z', receivedAt: '2026-11-01T00:00:00Z', text: '## 次の一手\n- [確認済み] 利用者に見せる\n- [確認済み] 名前を決め直す' });
   await organize(config, new MockLlm());
+  const current = (await readNowItems(vault, 'hub'))!.items, again = current.find(i => i.section === 'next' && i.text === '利用者に見せる')!;
+  expect(again.key).not.toBe(show.key);
+  expect(again.schedule).toMatchObject({ due: '2026-12-20' });
+  expect(await now(vault)).toContain('利用者に見せる [IN-');
+  expect(await now(vault)).toMatch(/利用者に見せる \[IN-[^\n]+ — 期日 2026-12-20/);
   await rebuildDashboard(config, { now: new Date('2026-11-15T03:00:00Z') });
-  const text = await home(vault);
-  expect(text).toMatch(/日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。1件）:\n- \[集約ツール\]\(10_projects\/hub\/NOW.md\): 名前を決める（期日 2026-12-20）/);
-  expect(await now(vault)).not.toContain('期日');
+  let text = await home(vault);
+  // 解決済みの項目と引き継いだ項目は付け直しに出さない。
+  expect(text).toMatch(/日付を付け直す項目（[^\n]*1件。[^\n]*）:\n- \[集約ツール\]\(10_projects\/hub\/NOW.md\): 説明を書く（期日 2026-12-21） \/ key [a-f0-9]{64}/);
+  expect(text).toContain('  - 利用者に見せる（期日 2026-12-20）');
+  // 付け直しを促す日付は外せる。引き継いだ日付を外すと、新しい項目からも外れる。
+  await expect(setItemSchedule(config, { projectId: 'hub', itemKey: write.key, due: '2026-12-22', reviewAfter: null, source: 'cli' })).rejects.toThrow('該当する項目がありません');
+  await setItemSchedule(config, { projectId: 'hub', itemKey: write.key, due: null, reviewAfter: null, source: 'cli' });
+  await setItemSchedule(config, { projectId: 'hub', itemKey: again.key, due: null, reviewAfter: null, source: 'cli' });
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === again.key)!.schedule).toBeNull();
+  await rebuildDashboard(config, { now: new Date('2026-11-15T03:00:00Z') });
+  text = await home(vault);
+  expect(text).not.toContain('日付を付け直す項目');
+  expect(text).not.toContain('期日');
+  expect(activeSchedules((await readItemSchedules(vault)).records).size).toBe(0);
 });
 
 test('受付ファイルの日付指定を反映し、同じ受付IDは重複させず、不正な記録はHOMEとdoctorで示す', async () => {

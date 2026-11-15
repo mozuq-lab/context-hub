@@ -1,7 +1,7 @@
 import {rebuildPoliciesLocked} from './policies.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
-import { readNowItems } from './item-resolutions.js';
-import { activeSchedules,readItemSchedules,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
+import { readNowItems,readItemResolutions,activeResolutions } from './item-resolutions.js';
+import { effectiveSchedules,readItemSchedules,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
 import { Vault,hash,parseMarkdown } from './storage.js';
 import { lifecycleOf,projectStatusLabels } from './project-status.js';
 import { decodeIntake } from './intake-format.js';
@@ -47,7 +47,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const listed:{row:string;at:number;group:'active'|'stale'|'inactive'}[]=[];
   const nextGroups:{at:number;id:string;rows:string[]}[]=[],nextProblems:string[]=[],nextUnread:string[]=[];
   // 本人が付けた期日・見直す日。期日が7日以内の項目はプロジェクトをまたいで前に出し、見直す日が先の項目はたたむ。
-  const today=todayIn(config.timezone,clock),schedules=await readItemSchedules(vault),scheduled=activeSchedules(schedules.records);
+  const today=todayIn(config.timezone,clock),schedules=await readItemSchedules(vault),resolutionRecords=schedules.records.length?await readItemResolutions(vault):[];
   const dated:{bucket:'overdue'|'today'|'week';due:string;id:string;row:string}[]=[],orphaned:string[]=[];let resting=0;
   for(const project of projects){
    const now=`10_projects/${project.id}/NOW.md`,target=await vault.read(now)!==undefined?now:`10_projects/${project.id}/project.md`;
@@ -61,15 +61,15 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     const list=await readNowItems(vault,project.id);
     // 旧版のNOWには項目一覧がない。次のcycleで作り直すまで「次の一手なし」と誤解させないよう分けて示す。
     if(!list){nextUnread.push(project.title);continue;}
-    const keys=new Set(list.items.map(i=>i.key)),front=new Set<string>();
+    const front=new Set<string>(),{byKey:scheduled,orphaned:loose}=effectiveSchedules(schedules.records,project.id,list.items,activeResolutions(resolutionRecords,project.id));
     for(const i of list.items){
      const schedule=i.resolution===null?scheduled.get(i.key):undefined;if(!schedule)continue;
      const {bucket,hidden}=scheduleBucket(schedule,today);
      if(hidden){resting++;front.add(i.key);}
-     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手':'未解決'}: ${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
+     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
     }
-    // NOWから外れた項目（本文が変わった、新しい報告で置き換わった）の日付は黙って移さず、付け直しを促す。
-    for(const s of scheduled.values())if(s.project_id===project.id&&!keys.has(s.item_key))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}）`);
+    // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
+    for(const s of loose)orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     const later=(key:string)=>{const s=scheduled.get(key);return s?`（${scheduleLabel(s)}）`:'';};
     if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${later(i.key)}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
@@ -84,7 +84,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const order={overdue:0,today:1,week:2} as const,datedRows=dated.sort((a,b)=>order[a.bucket]-order[b.bucket]||a.due.localeCompare(b.due)||a.id.localeCompare(b.id));
   const usesDates=dated.length>0||resting>0||orphaned.length>0;
   const datedPart=!usesDates?'':`期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
-  const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOWとアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件）:\n${orphaned.join('\n')}`:''}`;
+  const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOWとアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
   const nextSection=!listed.some(x=>x.group!=='inactive')?'':`\n\n## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
   const projectSections=`## プロジェクト一覧\n${rows.join('\n')||(listed.length?'進行中で最近動いたプロジェクトはありません。':'プロジェクトはまだありません。')}${nextSection}${staleRows.length?`\n\n## 停滞しているプロジェクト（${staleRows.length}件）\n最終根拠から${config.retrieve.staleDays}日を超えて新しい入力がない進行中のプロジェクトです。再開するか、休止・完了にするかを判断してください。\n${staleRows.join('\n')}`:''}${inactiveRows.length?`\n\n## 休止・完了（${inactiveRows.length}件）\n${inactiveRows.join('\n')}`:''}`;
   // 本人が設定したリポジトリのコミットから作った下書きのうち、未確認のもの。

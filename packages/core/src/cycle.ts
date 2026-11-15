@@ -9,7 +9,7 @@ import { readProjects,inspectProjects } from './projects.js';
 import { rebuildNow } from './views.js';
 import { Vault } from './storage.js';
 import type { HubConfig,LlmClient } from './types.js';
-export interface CycleResult { intake:IntakeRunResult; organize:OrganizeRunResult; dashboard?:{path:string;conflict?:string}; digest?:{path:string;conflict?:string}; history?:HistoryWrite[]; git?:CollectOutcome; dryRun:boolean }
+export interface CycleResult { intake:IntakeRunResult; organize:OrganizeRunResult; dashboard?:{path:string;conflict?:string}; digest?:{path:string;conflict?:string}; history?:HistoryWrite[]|{error:string}; git?:CollectOutcome; dryRun:boolean }
 export async function runCycle(config:HubConfig,llm:LlmClient,options:OrganizeOptions={}):Promise<CycleResult>{
  const intake=await ingest(config,{dryRun:options.dryRun});
  // 不正なプロジェクト定義があるときはモデルを呼ばず、HOMEに不正な箇所を示してから止める。
@@ -24,6 +24,10 @@ export async function runCycle(config:HubConfig,llm:LlmClient,options:OrganizeOp
  let git:CollectOutcome|undefined;
  if(config.git.enabled)try{git=await collectGitDrafts(config);}catch(error){git={created:[],skipped:[],errors:[{projectId:'*',repo:'*',error:error instanceof Error?error.message:String(error)}]};}
  // 経緯は本文が変わったプロジェクトだけ書き換える。HOMEが手で変えたHISTORY.mdを示せるよう、HOMEより先に作る。
- const digest=await rebuildDigest(config),history=(await rebuildHistories(config)).filter(h=>h.written||h.stopped),dashboard=await rebuildDashboard(config);
+ const digest=await rebuildDigest(config);
+ // 経緯は派生の読み物なので、作れなくてもHOMEの生成とcycleは止めない（失敗はcycleの結果とdoctorで示す）。
+ let history:HistoryWrite[]|{error:string};
+ try{history=(await rebuildHistories(config)).filter(h=>h.written||h.stopped);}catch(error){history={error:error instanceof Error?error.message:String(error)};}
+ const dashboard=await rebuildDashboard(config);
  return{intake,organize:organized,dashboard,digest,history,...(git?{git}:{}),dryRun:false};
 }
