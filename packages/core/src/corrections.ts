@@ -48,7 +48,10 @@ export async function correctInput(config: HubConfig, targetId: string, request:
     const chains = await readCorrectionChains(config), inputs = chains.flatMap(c => [c.root,...c.revisions]);
     const event = request.sourceEventId ? inputs.find(i => i.source === request.source && i.source_event_id === request.sourceEventId) : undefined;
     if (event && (event.kind !== 'correction' || event.corrects_input_id !== targetId || event.text !== request.text)) throw new Error('訂正イベントと内容が一致しません');
-    const previous = event ?? inputs.find(i => i.kind === 'correction' && i.corrects_input_id === targetId && i.text === request.text);
+    // 受付IDが一致しない同じ本文の訂正は、それが今も最新の訂正である間だけ再送と見なす。
+    // 後に訂正が続いていれば、古い対象への新しい訂正として下の検査で拒否する（古い本文へ黙って戻さない）。
+    const latestIds = new Set(chains.map(c => c.latest.id));
+    const previous = event ?? inputs.find(i => i.kind === 'correction' && i.corrects_input_id === targetId && i.text === request.text && latestIds.has(i.id));
     const refreshNow=async(root:Input)=>{
       const current=await readInputs(config),receipts=await readReceipts(config);
       for(const project of await readProjects(config)){

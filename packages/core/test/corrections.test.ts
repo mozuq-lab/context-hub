@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { defaultConfig } from '../src/config.js';
 import { Vault } from '../src/storage.js';
 import { capture, readInputs } from '../src/capture.js';
-import { correctInput, readCorrectionChains } from '../src/corrections.js';
+import { CorrectionTargetError, correctInput, readCorrectionChains } from '../src/corrections.js';
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 async function setup() { const root = await mkdtemp(join(tmpdir(),'ctx-correct-')); roots.push(root); const config = defaultConfig(join(root,'vault'),join(root,'state')); await new Vault(config).init(); return { config, vault: new Vault(config) }; }
@@ -25,7 +25,8 @@ test('同じ訂正の再送は後続訂正を巻き戻さない', async () => {
   const first = await correctInput(config,root.inputId,{ ...base, sourceEventId:'event-1', text:'訂正1' });
   const latest = await correctInput(config,first.inputId,{ ...base, text:'訂正2' });
   expect(await correctInput(config,root.inputId,{ ...base, sourceEventId:'event-1', text:'訂正1' })).toMatchObject({ inputId:first.inputId, deduped:true });
-  expect(await correctInput(config,root.inputId,{ ...base, text:'訂正1' })).toMatchObject({ inputId:first.inputId, deduped:true });
+  // 受付IDのない同じ本文は、後に訂正が続いていれば再送とは見なさず、古い対象として拒否する。
+  await expect(correctInput(config,root.inputId,{ ...base, text:'訂正1' })).rejects.toMatchObject({ reason:{ code:'stale-correction-target', latest_input_id:latest.inputId } });
   expect((await readCorrectionChains(config))[0].latest.id).toBe(latest.inputId);
   await expect(correctInput(config,root.inputId,{ ...base, sourceEventId:'event-1',text:'違う本文' })).rejects.toThrow();
 });
@@ -37,4 +38,18 @@ test('訂正件数と合計本文の上限を超える操作を拒否する', as
   const other = await capture(config,{ ...base,text:'x'.repeat(8000) }); let target=other;
   for (let i=0;i<3;i++) target=await correctInput(config,target.inputId,{ ...base,text:'y'.repeat(8000) });
   await expect(correctInput(config,target.inputId,{ ...base,text:'z' })).rejects.toThrow();
+});
+
+test('後に訂正が続いた古い対象への同じ本文の訂正は、別イベントなら重複ではなく古い対象として拒否する', async () => {
+  const { config } = await setup(); const a = await capture(config,{ ...base, text:'元' });
+  const b = await correctInput(config,a.inputId,{ ...base, sourceEventId:'e1', text:'X' });
+  const c = await correctInput(config,b.inputId,{ ...base, sourceEventId:'e2', text:'Y' });
+  const stale = await correctInput(config,a.inputId,{ source:'app', sourceEventId:'e3', text:'X', occurredAt:base.occurredAt }).then(() => undefined, (e: unknown) => e);
+  expect(stale).toBeInstanceOf(CorrectionTargetError);
+  expect((stale as CorrectionTargetError).reason).toEqual({ code:'stale-correction-target', latest_input_id:c.inputId });
+  // 同じイベントの再送は、後続の訂正があっても元の結果を返す。
+  expect(await correctInput(config,a.inputId,{ ...base, sourceEventId:'e1', text:'X' })).toMatchObject({ inputId:b.inputId, deduped:true });
+  // 受付IDのない再送は、それが最新の訂正である間だけ重複として扱う。
+  expect(await correctInput(config,b.inputId,{ ...base, text:'Y' })).toMatchObject({ inputId:c.inputId, deduped:true });
+  expect((await readCorrectionChains(config))[0].latest.id).toBe(c.inputId);
 });
