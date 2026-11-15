@@ -72,9 +72,16 @@ export function effectiveSchedules(records: ItemSchedule[], projectId: string, i
   const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
   const loose = [...active.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
   const same = (r: ItemSchedule, i: { section: string; text: string }) => r.section === i.section && r.text === i.text;
+  // 引き継ぎの候補は、NOWから外れた同じ欄・同じ本文の記録のうち、日付を外した記録も含めて最新のもの。
+  // 最新が日付を外した記録なら、それより前の古い日付を引き継がない（K1で付けK2で外した後、K3へ移った場合など）。
+  const latestPerKey = new Map<string, ItemSchedule>();
+  for (const r of records) if (r.project_id === projectId) { latestPerKey.delete(r.item_key); latestPerKey.set(r.item_key, r); }
+  const detached = [...latestPerKey.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
+  const isCleared = (r: ItemSchedule) => r.due === null && r.review_after === null;
   for (const item of items) {
     if (item.resolution) continue;
-    const direct = active.get(item.key), carried = own.has(item.key) ? undefined : loose.filter(r => same(r, item)).at(-1);
+    const latest = own.has(item.key) ? undefined : detached.filter(r => same(r, item)).at(-1);
+    const direct = active.get(item.key), carried = latest && !isCleared(latest) ? latest : undefined;
     if (direct ?? carried) byKey.set(item.key, (direct ?? carried)!);
   }
   const orphaned = loose.filter(r => !items.some(i => !i.resolution && same(r, i)));

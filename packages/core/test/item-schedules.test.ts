@@ -166,3 +166,17 @@ test('引き継いだ日付の項目に自分の日付を付けてから外す�
   expect((await readNowItems(vault, 'alpha'))!.items.find(i => i.key === k2.key)!.schedule).toBeNull();
   expect(await vault.read('10_projects/alpha/NOW.md')).not.toContain('2026-11-20');
 });
+test('日付を外した項目が次の作業要約で別の項目に移っても、外す前の古い日付を引き継がない（K1→K2→K3）', async () => {
+  const { effectiveSchedules } = await import('../src/item-schedules.js');
+  const rec = (n: number, key: string, due: string | null) => ({ schema_version: 1 as const, id: `SCH-0000000000000000000000000${n}`, project_id: 'p', item_key: key, section: 'next' as const, text: '見積もりを送る', input_id: `IN-0000000000000000000000000${n}`, due, review_after: null, source: 'cli', created_at: `2026-10-0${n}T00:00:00Z` });
+  const item = (key: string) => ({ key, section: 'next', text: '見積もりを送る', resolution: null });
+  // K1で期日を付け、次の作業要約で移ったK2で期日を外した。
+  const cleared = [rec(1, 'K1', '2026-10-10'), rec(2, 'K2', null)];
+  expect(effectiveSchedules(cleared as never, 'p', [item('K2')], new Set()).byKey.size).toBe(0);
+  // さらに次の作業要約でK3へ移っても、K1の期日は戻らない。
+  const moved = effectiveSchedules(cleared as never, 'p', [item('K3')], new Set());
+  expect(moved.byKey.size).toBe(0); expect(moved.orphaned).toEqual([]);
+  // 外した後に付け直した期日は、引き継ぐ。
+  const again = effectiveSchedules([...cleared, rec(3, 'K2', '2026-10-20')] as never, 'p', [item('K4')], new Set());
+  expect(again.byKey.get('K4')?.due).toBe('2026-10-20');
+});
