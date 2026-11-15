@@ -54,3 +54,15 @@ test('doctorはjournalと現在の入力原文の不一致を報告',async()=>{
  await vault.write(`90_system/receipts/pending/${saved.inputId}.json`,JSON.stringify({schema_version:1,input_id:saved.inputId,input_hash:'a'.repeat(64),status:'organized',attempts:1,organized_at:'2026-09-14T00:00:00Z',llm:{provider:'mock',model:'mock',prompt_version:1},result:{category:'unclassified',summary:'古い原文',project_candidates:[],next_action_suggestions:[],extracted:{current:[],next:[],open:[]},knowledge_candidate:null,new_project_hint:null},writes:[],error:null}));
  const report=await doctor(config);expect(report.issues.join(' ')).toContain('journal入力不一致');expect(report.issues.join(' ')).toContain(saved.inputId);
 });
+test('NOWやアイデアのfrontmatterが壊れていても、検索・束ねた資料・再開は止めず、読めない記録があることを示す',async()=>{
+ const{config}=await setup();const vault=new Vault(config);const{organize}=await import('../src/organize.js'),{MockLlm}=await import('../src/llm.js'),{rebuildNow}=await import('../src/views.js'),{bundle}=await import('../src/retrieve.js');
+ const memo=await capture(config,{source:'cli',project:'context-hub',occurredAt:'2026-10-01T00:00:00Z',text:'検索したいメモ'});
+ await organize(config,new MockLlm());await rebuildNow(config,'context-hub');
+ const raw=(await vault.read('10_projects/context-hub/NOW.md'))!;await vault.write('10_projects/context-hub/NOW.md',raw.replace(/^---\n/,'---\nbroken: [\n'));
+ await vault.write('20_ideas/IDEA-01M2DSFVQMH65989604KSVE1PV.md','---\nid: [\n---\n検索したい壊れたアイデア\n');
+ const found=await find(config,'検索');
+ expect(found).toContain(memo.inputId);expect(found).toContain('読めない記録が2件');expect(found).toContain('10_projects/context-hub/NOW.md');
+ expect(await resume(config,'context-hub')).toContain('NOW.mdを読めません');
+ const out=await bundle(config,[memo.inputId,'context-hub','IDEA-01M2DSFVQMH65989604KSVE1PV']);
+ expect(out).toContain('検索したいメモ');expect(out).toContain('NOW.mdを読めません');expect(out).toContain('読めない記録です');
+});

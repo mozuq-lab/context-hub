@@ -89,9 +89,13 @@ async function collectDocs(config: HubConfig) {
   }
   // atは表示用、whenは期間と新しい順の判定用。NOWは最終根拠、アイデアは元のメモの発生日時で判断し、再生成や整理の遅れに左右されないようにする。
   const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind,...(references.has(i.id)?{reference:true}:{})}));
+  // frontmatterを読めないファイル（手で壊したNOWやアイデアなど）は飛ばし、結果に件数とパスを示す。
+  const unreadable: string[] = [];
   for (const dir of ['20_ideas','30_knowledge','10_projects']) for(const path of await vault.files(dir)) {
     if (!path.endsWith('.md') || (dir === '10_projects' && !path.endsWith('/NOW.md') && !/^10_projects\/[^/]+\/knowledge\/KNW-[^/]+\.md$/.test(path))) continue;
-    const {meta,text} = parseMarkdown((await vault.read(path))!);
+    let parsed: { meta: Record<string, unknown>; text: string };
+    try { parsed = parseMarkdown((await vault.read(path))!); } catch { unreadable.push(path); continue; }
+    const {meta,text} = parsed;
     const kind: Doc['kind'] = dir === '20_ideas' ? 'idea' : path.endsWith('/NOW.md') ? 'now' : 'knowledge';
     const at=String(meta.generated_at ?? meta.approved_at ?? '');
     docs.push({path,text,id:String(meta.id ?? meta.project ?? path),at,when:String((kind==='now'?meta.last_evidence_at:kind==='idea'?meta.occurred_at:undefined) ?? at),retracted:meta.retracted===true,source:meta.verified === true ? '人の承認記録付き' : 'AI生成・未検証',ids:Array.isArray(meta.input_ids)?meta.input_ids.map(String):[],kind,...(dir === '10_projects' ? {owner:path.split('/')[1]} : {})});
@@ -104,8 +108,10 @@ async function collectDocs(config: HubConfig) {
     if (links.some(l => l?.estimated.has(project))) return 'estimated';
     return undefined;
   };
-  return { inputs, effective, docs, relation, assigned };
+  return { inputs, effective, docs, relation, assigned, unreadable };
 }
+/** 読めない記録の注意。CLIで本人が見る出力なのでパスを示す（多いときは先頭だけ）。 */
+const unreadableNotice = (paths: string[]) => paths.length ? `注意: 読めない記録が${paths.length}件あります（frontmatterの形式が不正なため除いています。ctx doctorで確認してください）: ${paths.slice(0, 10).join(', ')}${paths.length > 10 ? ' ほか' : ''}` : '';
 export async function find(config: HubConfig, query: string, options: FindOptions = {}): Promise<string> {
   const tokens = query.normalize('NFKC').toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
   const kinds = options.kinds?.length ? new Set(options.kinds) : undefined;
@@ -127,7 +133,8 @@ export async function find(config: HubConfig, query: string, options: FindOption
     if (!projects.some(p => p.id === scope)) return '見つかりません（プロジェクト未登録）';
     scope = resolveProject(projects, scope);
   }
-  const { inputs, effective, docs, relation } = await collectDocs(config);
+  const { inputs, effective, docs, relation, unreadable } = await collectDocs(config);
+  const broken = unreadableNotice(unreadable), withBroken = (text: string) => broken ? `${text}\n\n${broken}` : text;
   const time = (doc: Doc) => Date.parse(doc.when) || 0;
   const hits = docs.map(doc=>{
     const normalized = doc.text.normalize('NFKC').toLocaleLowerCase();
@@ -157,10 +164,10 @@ export async function find(config: HubConfig, query: string, options: FindOption
     const groupNotice=group?`束ねたアイデア: ${group.ideas.filter(id=>id!==doc.id).map(id=>`[${id}](20_ideas/${id}.md)`).join(', ')}\n  `:'';
     return `- [${doc.id}](${doc.path}) | ${displayTime(doc.at)} | ${doc.source}\n  出典: ${refs || '原文参照なし'}\n  ${relatedNotice}${groupNotice}${knowledgeNotice}${notices.join('\n  ')}\n  ${doc.text.slice(start,start+220).replace(/\r?\n/g,' ')}`;
   });
-  if (!lines.length) return offset > 0 && hits.length ? `見つかりません（該当${hits.length}件。開始位置が件数を超えています）` : '見つかりません';
+  if (!lines.length) return withBroken(offset > 0 && hits.length ? `見つかりません（該当${hits.length}件。開始位置が件数を超えています）` : '見つかりません');
   const more = offset + page.length < hits.length;
-  if (!options.pagingHint) return lines.join('\n\n');
-  return lines.join('\n\n') + (offset > 0 || more ? `\n\n該当${hits.length}件中 ${offset+1}〜${offset+page.length}件目${more ? `。続きは --offset ${offset+page.length}` : ''}` : '');
+  if (!options.pagingHint) return withBroken(lines.join('\n\n'));
+  return withBroken(lines.join('\n\n') + (offset > 0 || more ? `\n\n該当${hits.length}件中 ${offset+1}〜${offset+page.length}件目${more ? `。続きは --offset ${offset+page.length}` : ''}` : ''));
 }
 export async function resume(config: HubConfig, project: string): Promise<string> {
   projectIdSchema.parse(project);
@@ -173,7 +180,9 @@ export async function resume(config: HubConfig, project: string): Promise<string
   const path = `10_projects/${project}/NOW.md`, raw = await new Vault(config).read(path);
   const notices=(await readEffectiveInputs(config)).filter(e=>e.pendingCorrection&&(e.chain.root.project===project||(e.receipt&&associatedProjects(e.chain.root,e.receipt,config).includes(project)))).map(correctionNotice).join('\n');
   if (!raw) return `# ${definition.title}\n\n# 現在地\n不明（整理済みの根拠なし）\n\n# 次の一手\n不明\n\n# 未解決\n不明\n`;
-  const {meta,text} = parseMarkdown(raw), auto = /<!-- ctx:auto:start -->([\s\S]*?)<!-- ctx:auto:end -->/.exec(text);
+  let parsed: { meta: Record<string, unknown>; text: string };
+  try { parsed = parseMarkdown(raw); } catch { return '不明（NOW.mdを読めません。frontmatterの形式が不正です。doctorで確認してください）'; }
+  const {meta,text} = parsed, auto = /<!-- ctx:auto:start -->([\s\S]*?)<!-- ctx:auto:end -->/.exec(text);
   if (!auto) return '不明（NOW.mdの自動領域がありません。doctorで確認してください）';
   const storedHash = typeof meta.generated_hash==='string'?meta.generated_hash.replace(/^sha256:/,''):'';
   const intact = [hash(auto[1]),hash(auto[1].trim()),hash(auto[0])].includes(storedHash);
@@ -226,7 +235,7 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
   if (!wanted.length) throw new Error('記録のIDを1件以上指定してください');
   if (wanted.length > bundleMaxIds) throw new Error(`記録は${bundleMaxIds}件までにしてください`);
   if (!Number.isSafeInteger(maxChars) || maxChars < 200) throw new Error('文字数上限は200以上の整数にしてください');
-  const vault = new Vault(config), { effective, docs, assigned } = await collectDocs(config);
+  const vault = new Vault(config), { effective, docs, assigned, unreadable } = await collectDocs(config);
   const definitions = await readProjects(config), projects = new Map(definitions.map(p => [p.id,p.title]));
   const units = new Map<string,EffectiveInput>();
   for (const unit of effective) for (const input of [unit.chain.root,...unit.chain.revisions]) units.set(input.id,unit);
@@ -239,6 +248,8 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
     // NOWがまだないプロジェクトは、再開と同じく「不明」のNOWとして扱う。
     const doc = docs.find(d => d.id === id || d.path === id)
       ?? (projects.has(id) ? { path: `10_projects/${id}/NOW.md`, text: '', id, at: '', when: '', source: 'AI生成・未検証', ids: [], kind: 'now' as const, owner: id } : undefined);
+    // 読めない記録は、読めないことだけを示して続ける。
+    if (!doc && unreadable.some(p => p === id || p.endsWith(`/${id}.md`))) { if (!seen.has(id)) { seen.add(id); blocks.push({ id, text: `## ${id}\n読めない記録です（frontmatterの形式が不正です。ctx doctorで確認してください）。` }); } continue; }
     // 指定された文字列（パスを含みうる）はエラーに転記しない。
     if (!doc) throw new Error(`見つからない記録があります（${index + 1}件目）`);
     const unit = units.get(doc.id);
