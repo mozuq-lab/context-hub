@@ -2,7 +2,8 @@ import {projectIdSchema} from './projects.js';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve, join, relative, isAbsolute } from 'node:path';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
+import { issuePaths } from './error-message.js';
 import type { HubConfig } from './types.js';
 
 export function expandPath(value: string): string {
@@ -77,5 +78,6 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
     privacy: { ...defaults.privacy, ...raw.privacy, ...overrides.privacy },
     backup: { ...defaults.backup, ...raw.backup, ...overrides.backup },
   };
-  try { return validateConfig(c); } catch { throw new Error('設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }
+  // 値は秘密を含みうるので出さず、誤りのあるキーの場所だけを示す。
+  try { return validateConfig(c); } catch (error) { throw new Error(error instanceof ZodError ? `設定のキー・型・値を確認してください: ${issuePaths(error).join('、')}` : error instanceof Error && error.message.startsWith('ローカル状態') ? error.message : '設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }
 }
