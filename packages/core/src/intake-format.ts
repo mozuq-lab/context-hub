@@ -3,7 +3,7 @@ import { inputIdSchema } from './capture.js';
 import { projectIdSchema } from './projects.js';
 import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, PROJECT_TITLE_CHARS } from './project-definition.js';
 import { projectStatusSchema } from './project-status.js';
-import { itemActionSchema, itemKeySchema } from './item-resolutions.js';
+import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema } from './item-resolutions.js';
 import { scheduleDateSchema } from './item-schedules.js';
 import { parseMarkdown } from './storage.js';
 import { newProjectIdSchema, projectCreateFieldsSchema } from './project-creations.js';
@@ -24,7 +24,8 @@ const knowledgeApprove=z.union([
 const knowledgeReject=z.object({...knowledgeBase,operation:z.literal('knowledge-reject')}).strict();
 const knowledgeRetire=z.object({...base,operation:z.literal('knowledge-retire'),target_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 const projectStatus=z.object({...base,operation:z.literal('project-status'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),status:projectStatusSchema,confirmed:z.literal(true),text:z.string()}).strict();
-const itemResolution=z.object({...base,operation:z.literal('item-resolution'),project_id:projectIdSchema,item_key:itemKeySchema,action:itemActionSchema,confirmed:z.literal(true),text:z.string()}).strict();
+// 誤りとして外す（exclude）ときだけ理由が必須で、一言を添えられる。承認操作の本文は空のままにするため、一言はfrontmatterで送る。
+const itemResolution=z.object({...base,operation:z.literal('item-resolution'),project_id:projectIdSchema,item_key:itemKeySchema,action:itemActionSchema,reason:exclusionReasonSchema.optional(),note:exclusionNoteSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='exclude'?v.reason!==undefined:v.reason===undefined&&v.note===undefined,'理由は誤りとして外すときだけ指定します');
 // 期日と見直す日は変更後の全体を送る。両方nullは日付を外す依頼。
 const itemSchedule=z.object({...base,operation:z.literal('item-schedule'),project_id:projectIdSchema,item_key:itemKeySchema,due:scheduleDateSchema.nullable(),review_after:scheduleDateSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const itemHintDismiss=z.object({...base,operation:z.literal('item-hint-dismiss'),project_id:projectIdSchema,item_key:itemKeySchema,input_id:inputIdSchema,confirmed:z.literal(true),text:z.string()}).strict();
