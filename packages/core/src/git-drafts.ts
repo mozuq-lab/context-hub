@@ -70,7 +70,7 @@ const gitEnv = () => Object.fromEntries([...Object.entries(process.env).filter((
  * シェルを介さず固定引数でgit logだけを実行する。ページャ・fsmonitor・署名検証（外部プログラム）は使わない。
  * range（`<sha>..HEAD`）を優先し、使えなければsince以降を読む。古い順に返す。
  */
-export function gitLog(path: string, options: { since: string; after?: string; max: number }, timeoutMs = 10_000): Promise<{ sha: string; committed_at: string; subject: string }[]> {
+export function gitLog(path: string, options: { since: string; after?: string; /** 範囲で読むときも、これより古いコミットは読まない（遡りの上限日数）。 */ floor?: string; max: number }, timeoutMs = 10_000): Promise<{ sha: string; committed_at: string; subject: string }[]> {
   const run = (selector: string[]) => new Promise<string>((resolve, reject) => execFile('git', ['--no-pager', '-C', path, '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', 'log', '--no-merges', '--no-color', '--no-show-signature', ...selector, '-n', String(options.max), '--format=%H%x1f%cI%x1f%s', '--'],
     { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, env: gitEnv() }, (error, stdout) => error ? reject(error) : resolve(stdout)));
   const parse = (stdout: string) => stdout.split('\n').filter(Boolean).map(line => { const [sha, at, ...rest] = line.split('\u001f'); return { sha: sha ?? '', committed_at: at ?? '', subject: clean(rest.join(' ')) }; })
@@ -78,7 +78,8 @@ export function gitLog(path: string, options: { since: string; after?: string; m
   const bySince = () => run([`--since=${options.since}`]).then(parse, () => { throw new Error('コミット履歴を読み取れません'); });
   if (!options.after || !/^[a-f0-9]{40,64}$/.test(options.after)) return bySince();
   // 前回の下書きのコミットが履歴から消えた（rebase等）場合だけ、日時で読み直す。
-  return run([`${options.after}..HEAD`]).then(parse, bySince);
+  // 範囲だけでは遡りの上限日数が効かず、-nも新しい側から数えるため、上限日数も併せて指定する。
+  return run([`${options.after}..HEAD`, ...(options.floor ? [`--since=${options.floor}`] : [])]).then(parse, bySince);
 }
 
 /** 本文が入力の上限に収まるよう、古いコミットから順に入れる。入らなかった分は次の下書きに回す。 */
@@ -123,7 +124,7 @@ export async function collectGitDrafts(config: HubConfig, options: { now?: Date;
     const covered = mine.flatMap(d => d.commits).sort((a, b) => Date.parse(a.committed_at) - Date.parse(b.committed_at)), last = covered.at(-1);
     const since = Math.max(floor, last ? Date.parse(last.committed_at) : evidence ? Date.parse(evidence) : floor);
     let commits;
-    try { commits = await log(entry.path, { since: new Date(since).toISOString(), after: last?.sha, max: 1000 }); }
+    try { commits = await log(entry.path, { since: new Date(since).toISOString(), after: last?.sha, floor: new Date(floor).toISOString(), max: 1000 }); }
     catch (error) { outcome.errors.push({ projectId: entry.projectId, repo, error: error instanceof Error ? error.message : String(error) }); continue; }
     const seen = new Set(covered.map(c => c.sha));
     const fresh = commits.filter(c => !seen.has(c.sha) && Date.parse(c.committed_at) <= now.getTime());
