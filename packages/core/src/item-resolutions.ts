@@ -53,6 +53,38 @@ export function retargetItemRecord<T extends { project_id: string; item_key: str
   const target = targets.get(record.project_id);
   return target ? { ...record, project_id: target, item_key: itemKey(target, record.section, record.input_id, record.text) } : record;
 }
+/**
+ * 統合を取り消したプロジェクト（値）と、その統合先だったプロジェクト（キー）。いまも統合されている組は含めない。
+ * 統合の記録が読めなくても、項目の記録の読取は止めない（不正な記録はdoctorが示す）。
+ */
+async function formerMergeTargets(vault: Vault, targets: Map<string, string>): Promise<Map<string, Set<string>>> {
+  const former = new Map<string, Set<string>>();
+  for (const path of await vault.files('90_system/project-merges')) {
+    if (!/^90_system\/project-merges\/PMG-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
+    try {
+      const record = JSON.parse((await vault.read(path))!) as { action?: unknown; from_id?: unknown; into_id?: unknown };
+      if (record.action !== 'merge' || typeof record.from_id !== 'string' || typeof record.into_id !== 'string' || targets.get(record.from_id) === record.into_id) continue;
+      former.set(record.into_id, (former.get(record.into_id) ?? new Set()).add(record.from_id));
+    } catch { /* 読めない記録は使わない。 */ }
+  }
+  return former;
+}
+/**
+ * 項目の記録を、いまの統合の状態に合わせて読み替える。
+ * - 統合元のプロジェクトで付けた記録は、統合先の項目の記録として読む。
+ * - 統合を取り消した後は、統合していた間に統合先で付けた記録のうち、本人が統合元を指定した入力から出た項目のものを、
+ *   統合元の項目の記録として読む（根拠の入力が統合元へ戻るため）。
+ */
+export async function settleItemRecords<T extends { project_id: string; item_key: string; section: ItemSection; input_id: string; text: string }>(vault: Vault, records: T[]): Promise<T[]> {
+  const targets = await itemMergeTargets(vault), forward = targets.size ? records.map(r => retargetItemRecord(r, targets)) : records;
+  const former = await formerMergeTargets(vault, targets);
+  if (!forward.some(r => former.has(r.project_id))) return forward;
+  const owners = new Map((await readInputs(vault.config)).map(i => [i.id, i.project]));
+  return forward.map(r => {
+    const owner = owners.get(r.input_id), home = owner === undefined ? undefined : targets.get(owner) ?? owner;
+    return owner !== undefined && home !== undefined && home !== r.project_id && former.get(r.project_id)?.has(owner) ? { ...r, project_id: home, item_key: itemKey(home, r.section, r.input_id, r.text) } : r;
+  });
+}
 /** rawを指定すると、統合の読み替えをせず記録のままを返す（同じ受付IDの再送の照合に使う）。 */
 export async function readItemResolutions(vault: Vault, options: { raw?: boolean } = {}): Promise<ItemResolution[]> {
   const result: ItemResolution[] = [];
@@ -64,9 +96,7 @@ export async function readItemResolutions(vault: Vault, options: { raw?: boolean
     result.push(record);
   }
   result.sort((a, b) => a.id.localeCompare(b.id));
-  if (options.raw) return result;
-  const targets = await itemMergeTargets(vault);
-  return targets.size ? result.map(r => retargetItemRecord(r, targets)) : result;
+  return options.raw ? result : settleItemRecords(vault, result);
 }
 /** 項目ごとに最後の記録だけを有効にする。最後が解決なら解決済み、再開なら未解決へ戻す。 */
 export function activeResolutions(records: ItemResolution[], projectId?: string): Map<string, ItemResolution> {

@@ -227,13 +227,15 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
   if (wanted.length > bundleMaxIds) throw new Error(`記録は${bundleMaxIds}件までにしてください`);
   if (!Number.isSafeInteger(maxChars) || maxChars < 200) throw new Error('文字数上限は200以上の整数にしてください');
   const vault = new Vault(config), { effective, docs, assigned } = await collectDocs(config);
-  const projects = new Map((await readProjects(config)).map(p => [p.id,p.title]));
+  const definitions = await readProjects(config), projects = new Map(definitions.map(p => [p.id,p.title]));
   const units = new Map<string,EffectiveInput>();
   for (const unit of effective) for (const input of [unit.chain.root,...unit.chain.revisions]) units.set(input.id,unit);
   const blocks: { id:string; text:string }[] = [], seen = new Set<string>(), policyProjects = new Set<string>();
   // 別AIへ渡す資料なので、contextと同じく秘密情報らしい文字列は伏せる。本文は記録ごとに伏せる。
   const secrets = secretSettings(config), hideSecrets = (text: string) => redactText(text, secrets).text;
-  for (const [index, id] of wanted.entries()) {
+  for (const [index, given] of wanted.entries()) {
+    // 統合済みのプロジェクトのIDは、統合先のNOWと方針として扱う（統合元のNOWは根拠を持たない）。
+    const id = projects.has(given) ? resolveProject(definitions, given) : given;
     // NOWがまだないプロジェクトは、再開と同じく「不明」のNOWとして扱う。
     const doc = docs.find(d => d.id === id || d.path === id)
       ?? (projects.has(id) ? { path: `10_projects/${id}/NOW.md`, text: '', id, at: '', when: '', source: 'AI生成・未検証', ids: [], kind: 'now' as const, owner: id } : undefined);

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault, hash, parseMarkdown } from './storage.js';
-import { ProjectMergedError, projectIdSchema, projectSchema } from './projects.js';
+import { assertNotMerged, inspectProjects, mergeTargets, projectIdSchema, projectSchema } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig, Project } from './types.js';
 
@@ -15,7 +15,8 @@ export function lifecycleOf(project: Pick<Project, 'status'>): ProjectStatus {
 }
 /** AIへ帰属候補として渡すプロジェクト。休止・完了・統合済みは除き、人が明示したプロジェクトだけは状態にかかわらず残す。 */
 export function candidateProjects(projects: Project[], keep?: string): Project[] {
-  return projects.filter(p => (lifecycleOf(p) === 'active' && !p.merged_into) || p.id === keep);
+  const merged = mergeTargets(projects);
+  return projects.filter(p => (lifecycleOf(p) === 'active' && !merged.has(p.id)) || p.id === keep);
 }
 
 const changeIdSchema = z.string().regex(/^PST-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -75,7 +76,7 @@ export async function setProjectStatus(config: HubConfig, request: ProjectStatus
       }
     }
     // 統合済みのプロジェクトは統合先として読むため、状態だけを変えない（統合の取り消しで元の状態へ戻る）。
-    if (project.merged_into) throw new ProjectMergedError(project.merged_into);
+    if (project.merged_into) assertNotMerged((await inspectProjects(config)).projects, r.projectId);
     if (current !== r.expectedHash) throw new Error('プロジェクト定義が変更されています。再確認してください');
     if (project.status === r.status) throw new Error(`既に${projectStatusLabels[r.status]}です`);
     const next = withStatus(raw, r.status);

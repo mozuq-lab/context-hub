@@ -84,7 +84,8 @@ export function withMergeState(raw: string, state: { status: string; mergedInto?
   const lines = body.split(/\r?\n/).filter(line => !/^merged_into\s*:/.test(line));
   const at = lines.findIndex(line => /^status\s*:/.test(line));
   if (at >= 0) lines[at] = statusLine; else lines.push(statusLine);
-  if (state.mergedInto !== undefined) lines.push(`merged_into: ${state.mergedInto}`);
+  // IDが数値や真偽値に読める場合（2026、trueなど）は引用符を付ける。
+  if (state.mergedInto !== undefined) lines.push(stringify({ merged_into: state.mergedInto }).trimEnd());
   const result = `---${eol}${lines.join(eol)}${raw.slice(3 + eol.length + body.length)}`;
   const parsed = projectSchema.parse(parseMarkdown(result).meta);
   if (parsed.status !== state.status || parsed.merged_into !== state.mergedInto) throw new Error('状態を書き換えられません');
@@ -127,14 +128,17 @@ async function apply(config: HubConfig, action: ProjectMergeAction, request: Pro
     const finish = async () => {
       await rebuildPoliciesLocked(config, vault);
       const inputs = await readInputs(config), receipts = await readReceipts(config);
-      // 統合元にNOWがなければ、空のNOWを新しく作らない。
-      for (const id of [r.intoId, r.fromId]) if (id === r.intoId || await vault.read(`10_projects/${id}/NOW.md`) !== undefined) await rebuildNowLocked(vault, config, id, inputs, receipts);
+      // 統合元にNOWがなければ、空のNOWを新しく作らない。取り消しで統合元を指定した入力が戻るときは、NOWがなくても作る。
+      const returns = action === 'unmerge' && inputs.some(i => i.project === r.fromId);
+      for (const id of [r.intoId, r.fromId]) if (id === r.intoId || returns || await vault.read(`10_projects/${id}/NOW.md`) !== undefined) await rebuildNowLocked(vault, config, id, inputs, receipts);
     };
     const records = await readProjectMerges(vault);
     if (r.sourceEventId) {
       const previous = records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
       if (previous) {
         if (previous.action !== action || previous.from_id !== r.fromId || previous.into_id !== r.intoId || previous.from_before_hash !== r.fromHash || previous.into_before_hash !== r.intoHash) throw new Error('同じ受付IDで別の統合の操作が記録されています');
+        // この操作の後に同じ統合元の統合・取り消しがあれば、反映済みの古い操作の再送なので、定義には触れない。
+        if (records.some(x => x.from_id === previous.from_id && x.id > previous.id)) return resultOf(previous, true);
         // 記録後・定義の書き込み前に止まった場合は、記録した内容と同じ書き換えになるときだけ続きを行う。
         const pending: [string, string][] = [];
         for (const [path, current, before, after, next] of [
@@ -170,9 +174,14 @@ async function apply(config: HubConfig, action: ProjectMergeAction, request: Pro
       const merged = records.filter(x => x.from_id === r.fromId).at(-1), last = merged?.action === 'merge' && merged.into_id === r.intoId ? merged : undefined;
       const status = last?.from_status ?? 'active';
       // 統合の後に本人が外した語は戻さず、同じ統合先に統合されたままのほかのプロジェクトが持つ語は外さない。
+      // ほかのプロジェクトの統合で先に足されていた同じ語は、この統合の記録には載らない。統合先への統合で足した語の全体から、
+      // このプロジェクトが持つ語を外す対象にする（最後の1つを取り消したときに残さないため）。
       const siblings = projects.filter(p => p.merged_into === r.intoId && p.id !== r.fromId);
-      const kept = (term: string, field: 'aliases' | 'keywords') => siblings.some(p => (field === 'aliases' ? [p.title, ...p.aliases] : p.keywords).some(t => key(t) === key(term)));
-      const aliases = (last?.aliases ?? []).filter(t => into.aliases.includes(t) && !kept(t, 'aliases')), keywords = (last?.keywords ?? []).filter(t => into.keywords.includes(t) && !kept(t, 'keywords'));
+      const termsOf = (p: Project, field: 'aliases' | 'keywords') => field === 'aliases' ? [p.title, ...p.aliases] : p.keywords;
+      const has = (p: Project, term: string, field: 'aliases' | 'keywords') => termsOf(p, field).some(t => key(t) === key(term));
+      const added = (field: 'aliases' | 'keywords') => [...new Set(records.filter(x => x.action === 'merge' && x.into_id === r.intoId).flatMap(x => x[field]))];
+      const removable = (field: 'aliases' | 'keywords') => added(field).filter(t => into[field].includes(t) && ((last?.[field] ?? []).includes(t) || has(from, t, field)) && !siblings.some(p => has(p, t, field)));
+      const aliases = removable('aliases'), keywords = removable('keywords');
       nextFrom = withMergeState(rawFrom, { status });
       nextInto = withTerms(rawInto, into, aliases, keywords, 'unmerge');
       record = { ...base, from_status: status, aliases, keywords, from_after_hash: hash(nextFrom), into_after_hash: hash(nextInto), ...(last ? { merge_id: last.id } : {}) };

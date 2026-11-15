@@ -2,7 +2,7 @@ import {realpath,lstat} from 'node:fs/promises';
 import {relative,isAbsolute,dirname,join} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {Vault,hash} from './storage.js';
-import {projectIdSchema} from './projects.js';
+import {inspectProjects,mergeTargets,projectIdSchema} from './projects.js';
 import {reviewRead} from './knowledge-candidates.js';
 import {collectPolicyState,policyDocument,policyManifestSchema,policyRevision,assertPolicySnapshot,assertPolicySize,type PolicyEntry} from './policy-manifest.js';
 import type {HubConfig} from './types.js';
@@ -51,6 +51,11 @@ export async function assertAdoptionCapacity(vault:Vault,entry:{id:string;kind:'
  const next:PolicyEntry={id:entry.id,kind:entry.kind,claim:entry.claim,path:entry.path,approvalId:`APR-${entry.id.slice(4)}`};
  if(entry.target.scope==='global')state.global.push(next);else{const list=state.projects[entry.target.projectId];if(!list)throw new Error('採用先が未登録です');list.push(next);}assertPolicySize(state);
 }
+/** 方針を適用するプロジェクト。統合済みのプロジェクトは統合先の方針を使う（統合元だけの方針は適用しない）。定義を読めないときは読み替えない。 */
+export async function policyProjectFor(config:HubConfig,projectId:string|undefined):Promise<string|undefined>{
+ if(projectId===undefined)return undefined;
+ try{return mergeTargets((await inspectProjects(config)).projects).get(projectId)??projectId;}catch{return projectId;}
+}
 export async function resolvePolicyProject(config:HubConfig,cwd:string):Promise<string|undefined>{
  if(!isAbsolute(cwd))throw new Error('作業フォルダーは絶対パスで指定してください');const actual=await realpath(cwd),roots=new Map<string,string>();
  for(const item of config.policy.projectRoots){const root=await realpath(item.path),old=roots.get(root);if(old!==undefined&&old!==item.projectId)throw new Error('作業フォルダーのプロジェクト対応が重複しています');roots.set(root,item.projectId);}
@@ -60,5 +65,5 @@ export async function resolvePolicyProject(config:HubConfig,cwd:string):Promise<
  for(let cursor=actual;cursor!==root;cursor=dirname(cursor)){
   try{await lstat(join(cursor,'.git'));return;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
  }
- return projectId;
+ return policyProjectFor(config,projectId);
 }

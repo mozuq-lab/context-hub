@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Vault, hash, parseMarkdown } from './storage.js';
-import { readProjects } from './projects.js';
+import { mergeTargets, readProjects } from './projects.js';
 import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact } from './views.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { redactText, secretSettings } from './secrets.js';
@@ -11,7 +11,8 @@ import type { HubConfig, Input, Project } from './types.js';
  * モデルを使わずに新しい順へ並べる。URLは本文から文字列として取り出すだけで、取得・要約はしない。
  * NOWは「今」、経緯は流れを示すため、あとで読み返す記事・仕様・リポジトリなどを探す場所として使う。
  */
-const plain = (s: string) => s.replace(/[\r\n|]/g, ' ').replaceAll('[', '\\[').replaceAll(']', '\\]').replaceAll('<!--', '&lt;!--');
+// AIの要約と名前は1行の文字として載せる。リンク・HTML・コメントとして解釈される文字は無害にする。
+const plain = (s: string) => s.replace(/[\r\n|]/g, ' ').replaceAll('[', '\\[').replaceAll(']', '\\]').replaceAll('<', '&lt;');
 const clip = (s: string, n = 160) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
 export const referencesPath = (projectId: string) => `10_projects/${projectId}/REFERENCES.md`;
 /** 1件の資料から載せるURLの上限。超えた分は件数だけ示す。 */
@@ -23,8 +24,10 @@ export const REFERENCES_PER_PROJECT = 200;
 /** HOMEに載せる、プロジェクト未定の資料の上限。 */
 const UNASSIGNED_ROWS = 10;
 
-// 空白・引用符・山括弧・和文の括弧と句読点で切る。Markdownの `<URL>` を壊す文字は含めない。
-const URL_PATTERN = /https?:\/\/[^\s　<>"'`「」『』（）【】［］｛｝〈〉《》、。，；]+/g;
+// URLに使える半角の文字だけを取り出し、空白・引用符・山括弧と、和文などの半角でない文字で切る。
+// 和文はURLの直後に空白なしで続くことが多い（「https://example.com/specを読んだ」）。日本語を含むURLは、
+// ブラウザーからコピーした形（%で符号化した形）なら全体を取り出せる。Markdownの `<URL>` を壊す文字は含めない。
+const URL_PATTERN = /https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&()*+,;=%]+/g;
 /** 文末の句読点と、対応する開き括弧のない閉じ括弧を落とす（`[題](URL)` や「(URL)。」の形）。 */
 function trimUrl(url: string): string {
   let value = url;
@@ -46,8 +49,9 @@ export function extractUrls(text: string): { urls: string[]; skipped: number } {
   const urls: string[] = []; let skipped = 0;
   for (const match of text.matchAll(URL_PATTERN)) {
     const url = trimUrl(match[0]);
-    // 伏せ字（[伏せ字:種類]）を含むURLはそのままでは開けないので載せず、原文での確認に回す。
-    if (!/^https?:\/\/[^/?#]+/.test(url) || url.includes('[伏せ字:') || Array.from(url).length > REFERENCE_URL_CHARS) { skipped++; continue; }
+    // 伏せ字（[伏せ字:種類]）で途切れたURLはそのままでは開けないので載せず、原文での確認に回す。
+    const redacted = match[0].endsWith('[') && text.startsWith('伏せ字:', match.index + match[0].length);
+    if (!/^https?:\/\/[^/?#]+/.test(url) || redacted || url.length > REFERENCE_URL_CHARS) { skipped++; continue; }
     if (!urls.includes(url)) urls.push(url);
   }
   return { urls, skipped };
@@ -84,8 +88,8 @@ function entryLines(entry: ReferenceEntry, day: string, link: string, seen: Set<
   const lines = [`- ${day} ${clip(entry.summary) || '（要約なし）'} — [${entry.input.id}](${link})${flags.length ? ` / ${flags.join(' / ')}` : ''}`];
   // 同じURLは新しい資料にだけ載せる。
   const fresh = entry.urls.filter(u => !seen.has(u)), repeated = entry.urls.length - fresh.length;
+  // 上限を超えて載せなかったURLは、古い資料に同じURLがあればそちらに載せる。
   for (const url of fresh.slice(0, REFERENCE_URLS_PER_INPUT)) { seen.add(url); lines.push(`  - <${url}>`); }
-  for (const url of fresh.slice(REFERENCE_URLS_PER_INPUT)) seen.add(url);
   const notes = [
     fresh.length > REFERENCE_URLS_PER_INPUT ? `ほかURL ${fresh.length - REFERENCE_URLS_PER_INPUT}件` : '',
     repeated ? `新しい資料と同じURL ${repeated}件` : '',
@@ -96,7 +100,7 @@ function entryLines(entry: ReferenceEntry, day: string, link: string, seen: Set<
 }
 
 /** 資料棚の本文。日時は設定のタイムゾーンで表示し、生成時点に依存する表現は使わない。 */
-export function buildReferencesText(config: HubConfig, project: Project, all: ReferenceEntry[]): string {
+export function buildReferencesText(config: HubConfig, project: Project, all: ReferenceEntry[], mergedInto?: Project): string {
   const tz = config.timezone, id = project.id;
   const mine = all.filter(e => e.projects.includes(id)).map(e => ({ ...e, owned: e.input.project === id }));
   const shown = mine.slice(0, REFERENCES_PER_PROJECT), seen = new Set<string>();
@@ -107,7 +111,8 @@ export function buildReferencesText(config: HubConfig, project: Project, all: Re
     `資料 ${mine.length}件 / URL ${new Set(mine.flatMap(e => e.urls)).size}件`, '',
     '整理でAIが「参考資料」に分類したメモを、新しい順に並べた一覧です。分類と要約はAI生成・未検証です。URLは本文に書かれた文字列をそのまま載せており、取得・確認はしていません。開く前にリンク先を確かめてください。今の状態は[NOW](NOW.md)を参照してください。', '',
   ];
-  if (!mine.length) lines.push('まだ資料はありません。URLや「参考」と分かるメモを追加すると、次の整理でここに載ります。', '');
+  if (mergedInto) lines.push(`このプロジェクトは${plain(mergedInto.title)}（${mergedInto.id}）に統合済みです。資料は統合先の[REFERENCES.md](../${mergedInto.id}/REFERENCES.md)にまとめています（統合先に資料がなければ、まだ作られていません）。`, '');
+  else if (!mine.length) lines.push('まだ資料はありません。URLや「参考」と分かるメモを追加すると、次の整理でここに載ります。', '');
   let current: string | undefined;
   for (const entry of shown) {
     const key = month(entry.input.occurred_at);
@@ -139,12 +144,12 @@ export async function rebuildReferencesLocked(config: HubConfig, vault: Vault, o
   optionsSchema.parse(options);
   const projects = await readProjects(config), targets = options.projectId ? projects.filter(p => p.id === options.projectId) : projects;
   if (options.projectId && !targets.length) throw new Error('プロジェクトが見つかりません');
-  const entries = referenceEntries(config, await readEffectiveInputs(config)), result: ReferencesWrite[] = [];
+  const entries = referenceEntries(config, await readEffectiveInputs(config)), result: ReferencesWrite[] = [], merged = mergeTargets(projects);
   for (const project of targets) {
     const path = referencesPath(project.id), existing = await vault.read(path);
     if (existing !== undefined && !isGeneratedIntact(existing)) { result.push({ projectId: project.id, path, written: false, stopped: true }); continue; }
     if (existing === undefined && !entries.some(e => e.projects.includes(project.id))) { result.push({ projectId: project.id, path, written: false }); continue; }
-    const text = buildReferencesText(config, project, entries), sourceHash = `sha256:${hash(text)}`;
+    const text = buildReferencesText(config, project, entries, projects.find(p => p.id === merged.get(project.id))), sourceHash = `sha256:${hash(text)}`;
     let same = false;
     if (existing !== undefined) try { same = parseMarkdown(existing).meta.source_hash === sourceHash; } catch { same = false; }
     if (same) { result.push({ projectId: project.id, path, written: false }); continue; }
@@ -164,7 +169,7 @@ export async function rebuildReferences(config: HubConfig, options: { projectId?
 }
 /** テスト・CLI向け: 書き込まずに本文だけを組み立てる。 */
 export async function buildReferences(config: HubConfig, projectId: string): Promise<string> {
-  const project = (await readProjects(config)).find(p => p.id === projectId);
+  const projects = await readProjects(config), project = projects.find(p => p.id === projectId);
   if (!project) throw new Error('プロジェクトが見つかりません');
-  return buildReferencesText(config, project, referenceEntries(config, await readEffectiveInputs(config)));
+  return buildReferencesText(config, project, referenceEntries(config, await readEffectiveInputs(config)), projects.find(p => p.id === mergeTargets(projects).get(projectId)));
 }

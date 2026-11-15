@@ -33,6 +33,25 @@ test('本文のURLを文末の句読点や閉じ括弧を除いて取り出し�
   expect(extractUrls(`https://example.com/${'a'.repeat(600)}`)).toEqual({ urls: [], skipped: 1 });
   // 伏せ字を含むURLは開けないので載せない。
   expect(extractUrls('https://example.com/cb?token=[伏せ字:パスワード等]')).toEqual({ urls: [], skipped: 1 });
+  // 和文が空白なしで続いても、URLに取り込まない。
+  expect(extractUrls('仕様はhttps://example.com/specを読んだ。https://example.com/a・https://example.com/b').urls).toEqual(['https://example.com/spec', 'https://example.com/a', 'https://example.com/b']);
+  expect(extractUrls('https://ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC を見た').urls).toEqual(['https://ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC']);
+});
+
+test('上限を超えて載せなかったURLは古い資料に載せ、要約の山括弧はHTMLとして残さない', async () => {
+  const { config } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: '集約<b>ツール' });
+  const urls = Array.from({ length: 12 }, (_, i) => `https://example.com/p${i}`);
+  await capture(config, { source: 'cli', project: 'hub', ...at('2026-09-10T01:00:00Z'), text: `古い資料 ${urls[11]}` });
+  await capture(config, { source: 'cli', project: 'hub', ...at('2026-09-11T01:00:00Z'), text: `<img src=x> まとめ ${urls.join(' ')}` });
+  await organize(config, new MockLlm());
+  const text = await buildReferences(config, 'hub');
+  expect(text).toContain('ほかURL 2件');
+  expect(text).toMatch(/古い資料[^\n]*\n {2}- <https:\/\/example\.com\/p11>/);
+  expect(text).not.toContain('新しい資料と同じURL');
+  expect(text).toContain('# 集約&lt;b>ツールの資料');
+  expect(text).toContain('&lt;img src=x>');
+  expect(text).not.toContain('<img');
 });
 
 test('参考資料に分類されたメモを新しい順に月ごとへ並べ、同じURLは新しい資料にだけ載せる', async () => {

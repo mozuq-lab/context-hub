@@ -3,7 +3,7 @@ import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { readInputs } from './capture.js';
 import { assertNotMerged, projectIdSchema, readProjects } from './projects.js';
-import { activeResolutions, itemMergeTargets, itemSections, readItemResolutions, readNowItems, retargetItemRecord, type ItemSection } from './item-resolutions.js';
+import { activeResolutions, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection } from './item-resolutions.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -50,8 +50,7 @@ export async function readItemSchedules(vault: Vault, options: { raw?: boolean }
     } catch { problems.push(path); }
   }
   records.sort((a, b) => a.id.localeCompare(b.id));
-  const targets = options.raw ? new Map<string, string>() : await itemMergeTargets(vault);
-  return { records: targets.size ? records.map(r => retargetItemRecord(r, targets)) : records, problems };
+  return { records: options.raw ? records : await settleItemRecords(vault, records), problems };
 }
 /** 項目ごとに最後の記録だけを有効にする。最後の記録が日付を外したものなら含めない。 */
 export function activeSchedules(records: ItemSchedule[], projectId?: string): Map<string, ItemSchedule> {

@@ -54,6 +54,14 @@ async function classify(config: HubConfig, llm: LlmClient, input: Input, project
     try {
       // 「片付いたかも」の引用も、モデルが見たのと同じ伏せ字の本文で照合する。
       const result = groundResolutionHints(settings.enabled ? hide(input).text : input.text, groundExtractedHistory(grounding, validateOrganizeResult(completion.text, projects.map((project) => project.id), config.organize.llm.maxOutputChars, openItems)));
+      // 本人が統合済みのプロジェクトを指定した入力では、モデルが返した統合先を本人の指定したプロジェクトとして記録する。
+      // 読むときは統合先へ読み替えるので結果は同じで、統合を取り消したときに統合先の関連候補として残らない。
+      const named = chain.root.project ?? input.project;
+      if (named !== undefined && owner !== undefined && named !== owner) {
+        const byId = new Map<string, number>();
+        for (const c of result.project_candidates) { const id = c.id === owner ? named : c.id; byId.set(id, Math.max(byId.get(id) ?? 0, c.confidence)); }
+        result.project_candidates = [...byId].map(([id, confidence]) => ({ id, confidence }));
+      }
       return typeof completion.model === 'string' && completion.model ? { result, model: completion.model } : { result };
     }
     catch (error) { if (!(error instanceof InvalidOrganizeOutput) || attempt === 1) throw error; }

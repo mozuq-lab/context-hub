@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { parse, parseDocument, isMap, isScalar, isSeq } from 'yaml';
 import { Vault, hash, parseMarkdown } from './storage.js';
-import { ProjectMergedError, projectIdSchema, projectSchema, readProjects } from './projects.js';
+import { assertNotMerged, projectIdSchema, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig } from './types.js';
 
@@ -151,7 +151,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
   catch { throw new Error(definitionLimitMessage); }
   return vault.withLock(async () => {
     // ほかの定義が壊れているときは書き換えない。登録簿を読めず、方針の更新も止まるため。
-    await readProjects(config);
+    const projects = await readProjects(config);
     const raw = await vault.read(path);
     if (raw === undefined) throw new Error('プロジェクトが見つかりません');
     const project = projectSchema.parse(parseMarkdown(raw).meta);
@@ -169,7 +169,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
       }
     }
     // 統合済みのプロジェクトの名前・別名・キーワードは統合先へ足してある。統合先の定義を変えるか、統合を取り消してから変える。
-    if (project.merged_into) throw new ProjectMergedError(project.merged_into);
+    assertNotMerged(projects, r.projectId);
     if (current !== r.expectedHash) throw new Error('プロジェクト定義が変更されています。再確認してください');
     const changed = changedFields(before, after);
     if (!changed.length) throw new Error('名前・別名・キーワードに変更がありません');

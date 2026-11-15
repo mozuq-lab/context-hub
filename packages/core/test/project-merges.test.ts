@@ -1,5 +1,8 @@
 import { afterEach, expect, test } from 'vitest';
 import { rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import { workflowSetup, packet } from './workflow-fixtures.js';
 import { Vault, hash, parseMarkdown } from '../src/storage.js';
 import { addProject, mergeIssues, mergeTargets, mergedSources, readProjects, resolveProject, ProjectMergedError } from '../src/projects.js';
@@ -9,12 +12,14 @@ import { MockLlm } from '../src/llm.js';
 import { runCycle } from '../src/cycle.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { doctor } from '../src/doctor.js';
-import { find, resume } from '../src/retrieve.js';
+import { bundle, find, resume } from '../src/retrieve.js';
 import { buildHistory } from '../src/history.js';
 import { buildReferences } from '../src/references.js';
 import { ingest, readIntakeReceipts, intakeErrorSchema, intakeErrorMessage } from '../src/intake.js';
 import { readNowItems, setItemResolution, readItemResolutions } from '../src/item-resolutions.js';
 import { setItemSchedule } from '../src/item-schedules.js';
+import { policyProjectFor } from '../src/policies.js';
+import { validateAdoptionTarget } from '../src/knowledge-scope.js';
 import { setProjectStatus, candidateProjects } from '../src/project-status.js';
 import { setProjectDefinition } from '../src/project-definition.js';
 import { mergeProjects, unmergeProject, readProjectMerges, withMergeState, mergedTerms, ProjectMergeError } from '../src/project-merges.js';
@@ -185,6 +190,9 @@ test('同じ統合先に統合されたままのプロジェクトが持つ語�
   expect(parseMarkdown(await definition(vault, 'hub')).meta.aliases).toEqual(['まとめツール', '共通の別名', '道具箱']);
   await unmergeProject(config, { fromId: 'tool', intoId: 'hub', ...await hashes(vault, 'tool', 'hub'), source: 'cli' });
   expect(parseMarkdown(await definition(vault, 'hub')).meta.aliases).toEqual(['共通の別名', '道具箱']);
+  // 最後の1つを取り消したら、先の統合で足されていた同じ語も外す。
+  await unmergeProject(config, { fromId: 'kit', intoId: 'hub', ...await hashes(vault, 'kit', 'hub'), source: 'cli' });
+  expect(parseMarkdown(await definition(vault, 'hub')).meta.aliases).toEqual([]);
 });
 
 test('確認したハッシュが違う・統合先が統合済み・ほかの統合元がある場合は統合せず、理由を示す', async () => {
@@ -280,4 +288,138 @@ test('手で書いた統合先の不整合はHOMEとdoctorに示し、そのプ�
   expect(await vault.read('HOME.md')).toContain('統合先のプロジェクトが見つかりません: 10_projects/tool/project.md（merged\\_into: gone）'.replace('\\_', '_'));
   expect((await doctor(config)).issues).toContain('統合先のプロジェクトが見つかりません: 10_projects/tool/project.md（merged_into: gone）');
   expect(await find(config, '', { project: 'tool', kinds: ['work-summary'] })).not.toBe('見つかりません');
+  // 統合として扱わないので、AIの帰属候補に残り、項目・状態・方針の採用も止めない。
+  const projects = await readProjects(config);
+  expect(candidateProjects(projects).map(p => p.id)).toEqual(['hub', 'tool']);
+  const item = (await readNowItems(vault, 'tool'))!.items.find(i => i.section === 'open')!;
+  await expect(setItemResolution(config, { projectId: 'tool', itemKey: item.key, action: 'resolve', source: 'cli' })).resolves.toMatchObject({ deduped: false });
+  const current = hash(await definition(vault, 'tool'));
+  await expect(validateAdoptionTarget(vault, { scope: 'project', projectId: 'tool', projectHash: current })).resolves.toMatchObject({ projectId: 'tool' });
+  await expect(setProjectStatus(config, { projectId: 'tool', status: 'paused', expectedHash: current, source: 'cli' })).resolves.toMatchObject({ status: 'paused' });
 });
+
+test('統合済みのプロジェクトは、束ねた資料・方針・採用先でも統合先として扱う', async () => {
+  const { config, vault } = await fixture();
+  await merge(config, vault);
+  const text = await bundle(config, ['tool']);
+  expect(text).toContain('プロジェクト: 集約ツール（hub）');
+  expect(text).not.toContain('プロジェクト: まとめツール（tool）');
+  expect(await policyProjectFor(config, 'tool')).toBe('hub');
+  expect(await policyProjectFor(config, 'hub')).toBe('hub');
+  expect(await policyProjectFor(config, undefined)).toBeUndefined();
+  // 統合元の資料棚は統合先を案内し、統合先の資料棚に統合元の資料が並ぶ。
+  expect(await buildReferences(config, 'tool')).toContain('このプロジェクトは集約ツール（hub）に統合済みです。資料は統合先の[REFERENCES.md](../hub/REFERENCES.md)にまとめています');
+  expect(await buildReferences(config, 'hub')).not.toContain('統合済みです');
+  await expect(validateAdoptionTarget(vault, { scope: 'project', projectId: 'tool', projectHash: hash(await definition(vault, 'tool')) })).rejects.toMatchObject({ reason: { code: 'project-merged', project_id: 'hub' } });
+});
+
+test('統合している間に統合先で付けた完了報告と日付は、取り消すと統合元の項目へ戻して読む', async () => {
+  const { config, vault } = await fixture();
+  await merge(config, vault);
+  const merged = (await readNowItems(vault, 'hub'))!.items;
+  const solved = merged.find(i => i.text === '配布方法が決まっていない')!, dated = merged.find(i => i.text === '名前が決まっていない')!;
+  await setItemResolution(config, { projectId: 'hub', itemKey: solved.key, action: 'resolve', source: 'cli' });
+  await setItemSchedule(config, { projectId: 'hub', itemKey: dated.key, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+  // 統合先だけの項目に付けた日付は、取り消しても統合先に残る。
+  await capture(config, { source: 'cli', project: 'hub', ...at('2026-10-06T01:00:00Z'), text: 'hubだけの疑問はどうする？' });
+  await organize(config, new MockLlm());
+  const own = (await readNowItems(vault, 'hub'))!.items.find(i => i.text.includes('hubだけの疑問'))!;
+  await setItemSchedule(config, { projectId: 'hub', itemKey: own.key, due: '2026-12-15', reviewAfter: null, source: 'cli' });
+
+  await unmergeProject(config, { fromId: 'tool', intoId: 'hub', ...await hashes(vault, 'tool', 'hub'), source: 'cli' });
+  const back = (await readNowItems(vault, 'tool'))!.items;
+  expect(back.find(i => i.text === '配布方法が決まっていない')).toMatchObject({ resolution: expect.anything() });
+  expect(back.find(i => i.text === '名前が決まっていない')).toMatchObject({ resolution: null, schedule: { due: '2026-12-01' } });
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === own.key)).toMatchObject({ schedule: { due: '2026-12-15' } });
+  await rebuildDashboard(config, { now: new Date('2026-11-20T00:00:00Z') });
+  expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
+  // 記録そのものは書き換えない。
+  expect((await readItemResolutions(vault, { raw: true })).at(-1)).toMatchObject({ project_id: 'hub', item_key: solved.key });
+});
+
+test('統合している間に統合元を指定して届いたメモは、取り消すと統合元だけに戻る', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'hub', title: '集約ツール' });
+  // NOWのないプロジェクトを統合し、その間にメモが届く。
+  await addProject(config, { id: 'tool', title: 'まとめツール' });
+  await merge(config, vault);
+  const late = await capture(config, { source: 'cli', project: 'tool', ...at('2026-10-10T01:00:00Z'), text: 'まとめツールの配布方法はどうする？' });
+  await organize(config, new MockLlm());
+  expect(parseMarkdown((await vault.read('10_projects/hub/NOW.md'))!).meta.input_ids).toEqual([late.inputId]);
+  await unmergeProject(config, { fromId: 'tool', intoId: 'hub', ...await hashes(vault, 'tool', 'hub'), source: 'cli' });
+  expect(parseMarkdown((await vault.read('10_projects/tool/NOW.md'))!).meta.input_ids).toEqual([late.inputId]);
+  expect(parseMarkdown((await vault.read('10_projects/hub/NOW.md'))!).meta.input_ids).toEqual([]);
+  expect((await doctor(config)).issues).toEqual([]);
+});
+
+test('統合先のIDが数値や真偽値に読めても、統合先を文字列として書く', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: '2026', title: '今年の計画' });
+  await addProject(config, { id: 'true', title: '本当の計画' });
+  await addProject(config, { id: 'plan', title: '計画' });
+  await merge(config, vault, 'plan', '2026');
+  expect((await readProjects(config)).find(p => p.id === 'plan')).toMatchObject({ merged_into: '2026' });
+  await unmergeProject(config, { fromId: 'plan', intoId: '2026', ...await hashes(vault, 'plan', '2026'), source: 'cli' });
+  await merge(config, vault, 'plan', 'true');
+  expect((await readProjects(config)).find(p => p.id === 'plan')).toMatchObject({ merged_into: 'true' });
+});
+
+test('取り消しも、記録の後・定義の書き込み前に止まった場合は同じ受付IDの再送で完了する', async () => {
+  const { config, vault } = await fixture();
+  await merge(config, vault);
+  const fromBefore = await definition(vault, 'tool'), intoBefore = await definition(vault, 'hub');
+  const request = { fromId: 'tool', intoId: 'hub', fromHash: hash(fromBefore), intoHash: hash(intoBefore), source: 'quickadd', sourceEventId: 'REQ-undo' };
+  const first = await unmergeProject(config, request);
+  const fromAfter = await definition(vault, 'tool'), intoAfter = await definition(vault, 'hub');
+  for (const stopped of [[fromAfter, intoBefore], [fromBefore, intoBefore]] as const) {
+    await vault.write('10_projects/tool/project.md', stopped[0]); await vault.write('10_projects/hub/project.md', stopped[1]);
+    expect(await unmergeProject(config, request)).toMatchObject({ mergeId: first.mergeId, action: 'unmerge', deduped: true });
+    expect(await definition(vault, 'tool')).toBe(fromAfter);
+    expect(await definition(vault, 'hub')).toBe(intoAfter);
+  }
+  // 取り消した後にもう一度統合した後で、古い取り消しが再送されても、定義には触れない。
+  const again = await merge(config, vault);
+  expect(again.deduped).toBe(false);
+  const merged = await definition(vault, 'tool');
+  expect(await unmergeProject(config, request)).toMatchObject({ mergeId: first.mergeId, deduped: true });
+  expect(await definition(vault, 'tool')).toBe(merged);
+});
+
+function cli(configPath: string, args: string[]): Promise<{ code: number | null; out: string; err: string }> {
+  return new Promise((done, reject) => {
+    const p = spawn(process.execPath, [resolve('packages/core/dist/cli.js'), '--config', configPath, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { err += d; });
+    p.on('error', reject); p.on('close', code => done({ code, out, err }));
+  });
+}
+test('CLIで長いIDのプロジェクトを統合・取り消し・再統合でき、同じ引数の再実行は重ねて記録しない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  const a = 'project-01k5abcdefghjkmnpqrstvwxyz', b = 'project-01k5abcdefghjkmnpqrstvwxy0';
+  await addProject(config, { id: a, title: '重複したほう', aliases: ['別名'] });
+  await addProject(config, { id: b, title: '残すほう' });
+  await setProjectStatus(config, { projectId: a, status: 'paused', expectedHash: hash(await definition(vault, a)), source: 'cli' });
+  const path = `${config.statePath}/cli-config.json`;
+  await writeFile(path, JSON.stringify(config));
+  const run = async (command: 'merge' | 'unmerge') => {
+    const h = await hashes(vault, a, b);
+    return cli(path, ['project', command, a, ...(command === 'merge' ? ['--into', b] : []), '--hash', h.fromHash, '--into-hash', h.intoHash, '--confirm']);
+  };
+  const before = await hashes(vault, a, b);
+  const first = await run('merge');
+  expect(first.code, first.err).toBe(0);
+  expect(JSON.parse(first.out)).toMatchObject({ action: 'merge', deduped: false, aliases: ['重複したほう', '別名'] });
+  // 同じ引数での再実行は、同じ操作として扱う。
+  const repeated = await cli(path, ['project', 'merge', a, '--into', b, '--hash', before.fromHash, '--into-hash', before.intoHash, '--confirm']);
+  expect(JSON.parse(repeated.out)).toMatchObject({ mergeId: JSON.parse(first.out).mergeId, deduped: true });
+  expect((await run('unmerge')).code).toBe(0);
+  expect(await hashes(vault, a, b)).toEqual(before);
+  // 取り消すと定義は同じhashへ戻る。もう一度の統合は新しい操作として記録する。
+  const second = await run('merge');
+  expect(JSON.parse(second.out)).toMatchObject({ action: 'merge', deduped: false });
+  expect((await readProjectMerges(vault)).map(m => m.action)).toEqual(['merge', 'unmerge', 'merge']);
+  const undone = await run('unmerge');
+  expect(JSON.parse(undone.out)).toMatchObject({ action: 'unmerge', deduped: false, aliases: ['重複したほう', '別名'] });
+  expect((await readProjects(config)).find(p => p.id === a)).toMatchObject({ status: 'paused' });
+  expect(parseMarkdown(await definition(vault, b)).meta.aliases).toEqual([]);
+}, 30000);

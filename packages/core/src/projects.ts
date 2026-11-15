@@ -106,6 +106,7 @@ export class ProjectMergedError extends Error {
 }
 /** 統合済みなら、統合先を示して止める。 */
 export function assertNotMerged(projects: Project[], id: string): void {
-  const project = projects.find(p => p.id === id);
-  if (project?.merged_into) throw new ProjectMergedError(mergeTargets(projects).get(id) ?? project.merged_into);
+  // 統合先が見つからない・循環している定義は統合として扱わない（mergeIssuesで示す）。
+  const target = mergeTargets(projects).get(id);
+  if (target) throw new ProjectMergedError(target);
 }
