@@ -48,6 +48,24 @@ export type NowItem = z.infer<typeof nowItemSchema>;
 export const nowItemsSchema = z.object({ schema_version: z.literal(1), project: projectIdSchema, generated_at: z.string().datetime({ offset: true }), items: z.array(nowItemSchema) }).strict();
 export type NowItems = z.infer<typeof nowItemsSchema>;
 
+/**
+ * 依頼した項目の今の状態では受け付けられない理由。同じ内容の依頼は何度受け付けても同じ結果になるため、受付は再試行しない。
+ * item-missing: NOWに項目がない / item-closed: 既に解決済み・誤りとして外した / item-open: 解決済みではない（戻す依頼）。
+ */
+export type ItemTargetReason = { code: 'item-missing' } | { code: 'item-closed'; state: 'resolved' | 'excluded' } | { code: 'item-open' };
+export class ItemTargetError extends Error {
+  constructor(readonly reason: ItemTargetReason, message: string) {
+    super(message);
+    this.name = 'ItemTargetError';
+  }
+}
+/** 受付ファイルで依頼した本人とHOMEへ示す文。CLIの例外文とは別に、何が起きた可能性があるかと次の操作を示す。 */
+export function itemTargetMessage(reason: ItemTargetReason): string {
+  if (reason.code === 'item-missing') return 'NOWにこの項目がありませんでした。先に届いた依頼で片付いたか、同じメモの別の項目を「別のプロジェクトの話」として外し、メモごとプロジェクトから外れた可能性があります。再読込してNOWを確認してください。';
+  if (reason.code === 'item-closed') return `この項目は既に${reason.state === 'excluded' ? '誤りとして外されていました' : '解決済み・完了になっていました'}。変える場合は未解決に戻してから操作してください。`;
+  return 'この項目は解決済みではありませんでした。既に未解決に戻っている可能性があります。再読込してNOWを確認してください。';
+}
+
 const resolutionDir = '90_system/item-resolutions';
 export const nowItemsPath = (projectId: string) => `90_system/now-items/${projectId}.json`;
 
@@ -204,10 +222,10 @@ export async function setItemResolution(config: HubConfig, request: ItemResoluti
     assertNotMerged(projects, r.projectId);
     const items = await readNowItems(vault, r.projectId);
     const item = items?.items.find(i => i.key === r.itemKey);
-    if (!item) throw new Error('NOWに該当する項目がありません。最新のNOWで確認してください');
+    if (!item) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
     const active = activeResolutions(records, r.projectId).get(r.itemKey);
-    if (r.action !== 'reopen' && active) throw new Error(active.action === 'exclude' ? 'この項目は既に誤りとして外しています。変えるときは未解決に戻してから操作してください' : 'この項目は既に解決済みです');
-    if (r.action === 'reopen' && !active) throw new Error('この項目は解決済みではありません');
+    if (r.action !== 'reopen' && active) throw new ItemTargetError({ code: 'item-closed', state: active.action === 'exclude' ? 'excluded' : 'resolved' }, active.action === 'exclude' ? 'この項目は既に誤りとして外しています。変えるときは未解決に戻してから操作してください' : 'この項目は既に解決済みです');
+    if (r.action === 'reopen' && !active) throw new ItemTargetError({ code: 'item-open' }, 'この項目は解決済みではありません');
     const record: ItemResolution = {
       schema_version: 1, id: `RES-${ulid()}`, project_id: r.projectId, item_key: r.itemKey, section: item.section, text: item.text, input_id: item.input_id,
       action: r.action, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),

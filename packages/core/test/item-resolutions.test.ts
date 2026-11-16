@@ -7,6 +7,8 @@ import { organize } from '../src/organize.js';
 import { MockLlm } from '../src/llm.js';
 import { ingest, readIntakeReceipts } from '../src/intake.js';
 import { buildDigest } from '../src/digest.js';
+import { rebuildDashboard } from '../src/dashboard.js';
+import { hash } from '../src/storage.js';
 import { itemKey, readItemResolutions, readNowItems, setItemResolution } from '../src/item-resolutions.js';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
@@ -81,6 +83,28 @@ test('受付ファイルの解決報告を本人操作として反映し、同�
   expect(await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'resolve', source: 'flutter', sourceEventId: p.requestId })).toMatchObject({ deduped: true, resolutionId: records[0]!.id });
   await expect(setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'reopen', source: 'flutter', sourceEventId: p.requestId })).rejects.toThrow('別の解決報告');
   expect(await readItemResolutions(vault)).toHaveLength(1);
+});
+
+test('NOWにない項目や先の依頼で片付いた項目への受付は、理由付きで拒否して再試行しない', async () => {
+  const { config, vault } = await fixture();
+  const key = (await readNowItems(vault, 'hub'))!.items[2]!.key, base = { source: 'flutter', project_id: 'hub', confirmed: true };
+  // 受付はファイル名順で、端末で操作した順ではない。先に処理した依頼で項目が片付いたり、NOWから消えたりしていることがある。
+  await packet(config, { ...base, request_id: `REQ-${'0'.repeat(32)}`, operation: 'item-resolution', item_key: key, action: 'exclude', reason: 'outdated' }, '');
+  const closed = await packet(config, { ...base, request_id: `REQ-${'1'.repeat(32)}`, operation: 'item-resolution', item_key: key, action: 'resolve' }, '');
+  const missing = await packet(config, { ...base, request_id: `REQ-${'2'.repeat(32)}`, operation: 'item-resolution', item_key: 'a'.repeat(64), action: 'resolve' }, '');
+  const schedule = await packet(config, { ...base, request_id: `REQ-${'3'.repeat(32)}`, operation: 'item-schedule', item_key: 'a'.repeat(64), due: '2026-11-20', review_after: null }, '');
+  expect(await ingest(config)).toMatchObject({ accepted: 1, rejected: 3 });
+  const reason = async (path: string) => JSON.parse((await vault.read(`90_system/intake-errors/${hash(path)}.json`))!).reason;
+  expect(await reason(closed.path)).toEqual({ code: 'item-closed', state: 'excluded' });
+  expect(await reason(missing.path)).toEqual({ code: 'item-missing' });
+  expect(await reason(schedule.path)).toEqual({ code: 'item-missing' });
+  // 同じ内容の依頼は何度受け付けても同じ結果のため、次の受付では試し直さない。
+  expect(await ingest(config)).toMatchObject({ accepted: 0, rejected: 0, requestIds: [] });
+  await rebuildDashboard(config);
+  const home = (await vault.read('HOME.md'))!;
+  expect(home).toContain('この項目は既に誤りとして外されていました');
+  expect(home).toContain('NOWにこの項目がありませんでした');
+  expect(home).not.toContain('doctorで確認');
 });
 
 test('ふりかえりは期間内の完了・解決を数え、解決済みを持ち越しの未解決から外す', async () => {
