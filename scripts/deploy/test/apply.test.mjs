@@ -3,7 +3,7 @@ import {writeFile,readFile,access,unlink,lstat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
-import {fixture,fakeServices,project} from './fixtures.mjs';
+import {fixture,fakeServices,intakeFailure,project} from './fixtures.mjs';
 import {preparePlan} from '../prepare.mjs';
 import {applyPlan} from '../apply.mjs';
 import {deploymentStatus} from '../status.mjs';
@@ -11,6 +11,27 @@ import {unlockVault} from '../../../packages/core/dist/storage.js';
 const fs=[];afterEach(async()=>{for(const f of fs.splice(0))await f.cleanup();});
 async function setup(){const f=await fixture();fs.push(f);return f;}
 const options=f=>({repository:f.repository,run:f.execute});
+test('既存の受付失敗を保持して更新し、受付ファイルと停止回復記録を変えない',async()=>{
+ const f=await setup(),failure=await intakeFailure(f),paths=Object.values(failure.paths),before=await Promise.all(paths.map(p=>readFile(p)));
+ const p=await preparePlan(f.file,options(f));await applyPlan(p.planPath,p.planHash,{run:f.execute});
+ expect((await deploymentStatus(f.file)).commit).toBe(p.summary.commit);expect(await Promise.all(paths.map(p=>readFile(p)))).toEqual(before);
+},30000);
+test('plan後の新しい受付失敗は、サービスを停止する前に拒否する',async()=>{
+ const f=await setup(),fake=await fakeServices(f),deps={run:fake.execute,platform:'darwin',ready:fake.ready},p=await preparePlan(f.file,{repository:f.repository,...deps});
+ await intakeFailure(f);fake.calls.length=0;
+ await expect(applyPlan(p.planPath,p.planHash,deps)).rejects.toThrow(/新し|診断/);
+ expect(fake.calls.some(([exe,args])=>exe==='launchctl'&&args==='bootout')).toBe(false);expect([...fake.serviceState.values()]).toEqual([true,true]);
+});
+test('更新後の新しい受付失敗では復旧し、既存・新規の受付記録を削除しない',async()=>{
+ const f=await setup(),existing=await intakeFailure(f),before=await Promise.all(Object.values(existing.paths).map(p=>readFile(p))),p=await preparePlan(f.file,options(f));let added;
+ const execute=async(exe,args,o)=>{
+  if(!added&&exe===process.execPath&&args[0]===join(f.config.installDir,'runtime/packages/core/dist/cli.js'))added=await intakeFailure(f,`REQ-${'b'.repeat(32)}`);
+  return f.execute(exe,args,o);
+ };
+ await expect(applyPlan(p.planPath,p.planHash,{run:execute})).rejects.toThrow(/新し|診断/);
+ expect((await deploymentStatus(f.file)).commit).toBeNull();expect(await Promise.all(Object.values(existing.paths).map(p=>readFile(p)))).toEqual(before);
+ for(const path of Object.values(added.paths))await expect(readFile(path)).resolves.toBeDefined();
+},30000);
 test('初回を配置し、原文を変えずに通常更新し、同版の再適用は変更なしになる',async()=>{
  const f=await setup();await writeFile(join(f.vault,'00_inbox','sentinel.txt'),'immutable original\n');
  const p=await preparePlan(f.file,options(f));await applyPlan(p.planPath,p.planHash,{run:f.execute});

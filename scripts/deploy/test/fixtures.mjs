@@ -1,9 +1,10 @@
-import {mkdtemp,realpath,mkdir,writeFile,cp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,realpath,mkdir,writeFile,cp,readFile,rm,utimes} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {defaultConfig} from '../../../packages/core/dist/config.js';
-import {Vault} from '../../../packages/core/dist/storage.js';
+import {Vault,markdown,hash} from '../../../packages/core/dist/storage.js';
+import {ingest} from '../../../packages/core/dist/intake.js';
 import {run} from '../common.mjs';
 
 export const project=resolve(import.meta.dirname,'../../..');
@@ -33,6 +34,12 @@ export async function fixture(){
  return{root,repository,vault,file,config,hub,git,calls,execute,cleanup:()=>rm(root,{recursive:true,force:true})};
 }
 export async function configSave(f){await writeFile(f.file,JSON.stringify(f.config));}
+export async function intakeFailure(f,id=`REQ-${'a'.repeat(32)}`){
+ const path=`Input/${id}.md`,vault=new Vault(f.hub);
+ await vault.create(path,markdown({schema_version:1,request_id:id,operation:'correct',source:'fixture',occurred_at:'2026-10-03T10:00:00Z',target_id:`IN-${'0'.repeat(26)}`},'架空の欠損対象への訂正'));
+ await utimes(join(f.vault,path),new Date(0),new Date(0));await ingest(f.hub,{limit:1});
+ return{requestId:id,paths:{input:join(f.vault,path),pending:join(f.vault,`90_system/intake/pending/${id}.json`),error:join(f.vault,`90_system/intake-errors/${hash(path)}.json`)}};
+}
 export async function fakeServices(f){
  const serviceState=new Map(),plistValues=new Map(),calls=[];
  const host=join(f.root,'openclaw');await mkdir(host);await writeFile(join(host,'openclaw.mjs'),'// 架空の実行ファイル\n',{mode:0o700});await writeFile(join(host,'package.json'),'{"name":"openclaw","version":"2026.9.9"}');
