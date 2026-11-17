@@ -1,4 +1,4 @@
-import { listText } from './markdown-text.js';
+import { clipText, listText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { readProjects } from './projects.js';
@@ -19,7 +19,7 @@ import type { HubConfig, Input, Project, Receipt } from './types.js';
  * NOWは「今」、REVIEWは直近の期間だけを示すため、休止から戻るときや完了にするときに流れを通して読む場所として使う。
  */
 const plain = listText;
-const clip = (s: string, n = 120) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
+const clip = (s: string, n = 120) => clipText(s, n);
 /** 月ごとに載せる入力の上限。超えた分は件数だけ示す。 */
 const INPUTS_PER_MONTH = 8;
 /** 現在地の変化として1件の作業要約から載せる項目の上限。 */

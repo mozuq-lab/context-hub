@@ -37,7 +37,7 @@ async function projectReview(config:HubConfig,id:string,coverage:ProjectCoverage
   await depend(`90_system/project-confirmations/${id}.json`);
   const chain=(await readCorrectionChains(config)).find(c=>c.root.id===meta.root_input_id);
   if(chain){for(const i of [chain.root,...chain.revisions])await depend(i.path);if(chain.evidenceHash!==meta.evidence_hash)item.warnings.push('根拠に新しい訂正があります。');}
-  if(item.status==='stale')item.warnings.push(coverage.unreadable?UNREADABLE_DECISION_WARNING:'候補が古いか、確認情報の同期が不足しています。');
+  if(item.status==='stale')item.warnings.push(coverage.unreadable.length?UNREADABLE_DECISION_WARNING:'候補が古いか、確認情報の同期が不足しています。');
   // 承認の判断記録が、プロジェクト定義へ反映済みかを確かめる。
   const reflect=async(record:NonNullable<typeof decision>,projectId:unknown)=>{
    if(record.action!=='approve'){item.reflected=true;return;}

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { inlineText } from './markdown-text.js';
+import { clipText } from './markdown-text.js';
 import { Vault } from './storage.js';
 import { associatedProjects, dateLabel } from './views.js';
 import type { EffectiveInput } from './effective-inputs.js';
@@ -80,18 +80,14 @@ export async function rebuildUnassignedActionsLocked(config: HubConfig, vault: V
   return built;
 }
 
-/**
- * HOMEの行に埋め込む本人の言葉とAIの提案の無害化。一覧の既定（改行・表の区切り・角括弧）に加えて、
- * バックスラッシュ（角括弧の無効化を打ち消してリンクを作れる）とHTMLの開始（<）も無効にする。
- */
-const plain = (s: string) => inlineText(s.replaceAll('\\', '\\\\'), { table: true, brackets: true, angle: true });
-/** 先に切ってから無害化する。無害化で足した記号の途中では切らない。 */
-const clip = (s: string, n = 120) => { const a = Array.from(s); return a.length > n ? plain(a.slice(0, n).join('')) + '…' : plain(s); };
+const clip = (s: string, n = 120) => clipText(s, n);
+/** 原文へのリンク先。空白や括弧を含むパスは、リンクが途中で切れないよう山括弧で囲む。 */
+const destination = (path: string) => /[\s()]/.test(path) ? `<${path}>` : path;
 /** HOMEの「プロジェクト未定の次の一手」（前後の空行は含めない）。対象のメモがなければ空文字。 */
 export function unassignedActionsSection(config: HubConfig, actions: UnassignedActions): string {
   if (!actions.memos.length) return '';
   const rows = actions.memos.slice(0, UNASSIGNED_HOME_MEMOS).flatMap(m => [
-    `- ${dateLabel(m.occurred_at, config.timezone).slice(0, 10)} ${m.own_words ? '' : 'AI要約: '}${clip(m.text)} — [${m.input_id}](${m.path})${m.task ? ' / タスク候補' : ''}`,
+    `- ${dateLabel(m.occurred_at, config.timezone).slice(0, 10)} ${m.own_words ? '' : 'AI要約: '}${clip(m.text)} — [${m.input_id}](${destination(m.path)})${m.task ? ' / タスク候補' : ''}`,
     ...m.suggestions.slice(0, UNASSIGNED_SUGGESTIONS_PER_MEMO).map(s => `  - AI提案: ${clip(s)}`),
     ...(m.suggestions.length > UNASSIGNED_SUGGESTIONS_PER_MEMO ? [`  - ほかAI提案${m.suggestions.length - UNASSIGNED_SUGGESTIONS_PER_MEMO}件（アプリの「次の一手」で確認）`] : []),
   ]);

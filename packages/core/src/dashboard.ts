@@ -1,4 +1,4 @@
-import { listText } from './markdown-text.js';
+import { clipText, listText } from './markdown-text.js';
 import {rebuildPoliciesLocked,readPolicies} from './policies.js';
 import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
@@ -24,7 +24,7 @@ import { readExclusionOverlays, rereadResolutionIds } from './item-rereads.js';
 import { backupHomeLine, backupStatus, readBackupChecks } from './backup-check.js';
 // HTMLコメントの開始はNOWと同じく無害化し、以降の行が隠れないようにする。
 const plain=listText;
-const clip=(s:string,n=120)=>{const a=Array.from(plain(s));return a.length>n?a.slice(0,n).join('')+'…':a.join('');};
+const clip=(s:string,n=120)=>clipText(s,n);
 const DAY=86_400_000;
 /** HOMEの「次の一手」に載せる、プロジェクトごとの上限。全件は各NOWとアプリで確認する。 */
 const NEXT_PER_PROJECT=3;

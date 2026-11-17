@@ -1,4 +1,4 @@
-import { listText } from './markdown-text.js';
+import { clipText, listText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault } from './storage.js';
 import { readProjects, mergeTargets } from './projects.js';
@@ -14,7 +14,7 @@ import type { HubConfig, Input, ExtractedItem } from './types.js';
 const DAY = 86_400_000;
 // 以前はHTMLコメントの開始を無効にしていなかった。ほかの生成物と同じ無害化にそろえる。
 const plain = listText;
-const clip = (s: string, n = 120) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
+const clip = (s: string, n = 120) => clipText(s, n);
 const optionsSchema = z.object({ days: z.number().int().min(1).max(366).optional(), now: z.date().optional() }).strict();
 export interface DigestOptions { days?: number; now?: Date }
 

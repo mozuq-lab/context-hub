@@ -129,6 +129,24 @@ describe('プロジェクト未定の次の一手', () => {
     expect(await vault.read('HOME.md')).toContain(`[${saved.inputId}](00_inbox/2026/${name})`);
     await rebuildDashboard(config, { now: new Date('2026-11-11T00:00:00Z') });
     expect(await vault.read(unassignedActionsPath)).toBe(first);
+    // 空白や括弧を含むフォルダの原文へも、リンクが切れないように書く。
+    const spaced = await capture(config, { source: 'cli', occurredAt: '2026-11-02T09:00:00+09:00', text: '会場を予約する' });
+    const spacedName = spaced.path.split('/').at(-1)!;
+    await mkdir(join(config.vaultPath, '00_inbox/2026 archive (old)'), { recursive: true });
+    await rename(join(config.vaultPath, spaced.path), join(config.vaultPath, '00_inbox/2026 archive (old)', spacedName));
+    await organize(config, new MockLlm([result({ category: 'task' })]));
+    await rebuildDashboard(config, { now: new Date('2026-11-12T00:00:00Z') });
+    expect(await vault.read('HOME.md')).toContain(`[${spaced.inputId}](<00_inbox/2026 archive (old)/${spacedName}>)`);
+  });
+
+  test('形式に合わないメモは一覧に載せず、一覧をいつも検証できる形に保つ', async () => {
+    const { config } = await setup();
+    await memo(config, '講習の申込をする', '2026-11-01T09:00:00+09:00', result({ category: 'task' }));
+    const units = await readEffectiveInputs(config);
+    // 受信箱の外を指す原文のパス（通常は起きない）。
+    const moved = units.map(u => ({ ...u, chain: { ...u.chain, root: { ...u.chain.root, path: '10_projects/x.md' } } }));
+    const built = buildUnassignedActions(config, moved, new Date('2026-11-10T00:00:00Z'));
+    expect(unassignedActionsSchema.parse(built)).toMatchObject({ total_memos: 0, memos: [] });
   });
 
   test('HOMEの行では、メモと提案に含まれるリンクやHTMLの記法を無効にする', async () => {
@@ -139,7 +157,7 @@ describe('プロジェクト未定の次の一手', () => {
     // バックスラッシュで角括弧の無効化を打ち消せない。
     expect(section).toContain('- 2026-11-01 \\\\\\[資料\\\\\\](https://example.com/x) を読む — [IN-');
     expect(section).toContain('  - AI提案: &lt;img src=https://example.com/p.png> を確かめる');
-    expect(section).toContain('  - AI提案: `\\[手順\\](https://example.com/y)` を見る');
+    expect(section).toContain('  - AI提案: \\`\\[手順\\](https://example.com/y)\\` を見る');
     expect(section).not.toContain('<img');
   });
 

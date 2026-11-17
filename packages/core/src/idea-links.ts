@@ -1,4 +1,4 @@
-import { listText } from './markdown-text.js';
+import { clipText } from './markdown-text.js';
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault, hash, parseMarkdown } from './storage.js';
@@ -196,8 +196,7 @@ export async function rebuildIdeaIndexLocked(_config: HubConfig, vault: Vault, n
   return index;
 }
 
-const plain = listText;
-const clip = (s: string, n = 60) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
+const clip = (s: string, n = 60) => clipText(s, n);
 const ideaLink = (index: IdeaIndex, id: string) => `[${clip(index.summaries[id] || id, 40)}](20_ideas/${id}.md)`;
 /** HOMEの「似ているアイデア」「束ねたアイデア」。どちらもなければ空。 */
 export function ideaSection(index: IdeaIndex): string {

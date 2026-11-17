@@ -15,12 +15,17 @@ type Names = Pick<ProjectProposal, 'title' | 'aliases'>;
  * キーワードは使わない（広い語が多いため）。
  */
 export function relatedProposals(a: Names, b: Names): boolean {
-  const names = (proposal: Names) => new Set([proposal.title, ...proposal.aliases].map(normalizeName).filter(Boolean));
-  const left = names(a), right = names(b);
-  for (const name of left) if (right.has(name)) return true;
-  const x = normalizeName(a.title), y = normalizeName(b.title);
-  const within = (part: string, whole: string) => [...part].length >= RELATED_NAME_MIN_CHARS && whole.includes(part);
-  return within(x, y) || within(y, x);
+  return relatedKeys(nameKeys(a), nameKeys(b));
+}
+/** 比べるために正規化した名前。何件も比べるときは、案ごとに1回だけ作る。 */
+interface NameKeys { title: string; names: Set<string>; contained: boolean }
+function nameKeys(proposal: Names): NameKeys {
+  const title = normalizeName(proposal.title);
+  return { title, names: new Set([proposal.title, ...proposal.aliases].map(normalizeName).filter(Boolean)), contained: [...title].length >= RELATED_NAME_MIN_CHARS };
+}
+function relatedKeys(a: NameKeys, b: NameKeys): boolean {
+  for (const name of a.names) if (b.names.has(name)) return true;
+  return (a.contained && b.title.includes(a.title)) || (b.contained && a.title.includes(b.title));
 }
 
 export interface ProposalGroup<T> { representative: T; duplicates: T[] }
@@ -33,9 +38,10 @@ export interface ProposalGroup<T> { representative: T; duplicates: T[] }
  * 結果は渡す順に依存しない。
  */
 export function groupProposals<T extends { id: string; proposal: Names; generatedAt: string }>(items: T[]): ProposalGroup<T>[] {
-  const related = items.map((a, i) => items.map((b, j) => i !== j && relatedProposals(a.proposal, b.proposal)));
+  const keys = items.map(item => nameKeys(item.proposal)), related = items.map(() => items.map(() => false));
+  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) related[i]![j] = related[j]![i] = relatedKeys(keys[i]!, keys[j]!);
   const age = (item: T) => Date.parse(item.generatedAt) || 0, older = (a: T, b: T) => age(a) - age(b) || a.id.localeCompare(b.id);
-  const length = items.map(item => [...normalizeName(item.proposal.title)].length);
+  const length = keys.map(key => [...key.title].length);
   // まだ組に入っていない案と、その案が重なる、まだ組に入っていない案の数。
   const free = new Set(items.keys()), links = related.map(row => row.filter(Boolean).length);
   const take = (i: number) => { free.delete(i); related[i]!.forEach((linked, j) => { if (linked) links[j]!--; }); };
