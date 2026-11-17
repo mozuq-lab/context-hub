@@ -49,8 +49,10 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   const count = (status: string) => recent.filter(u => state(u) === status).length;
   const ref = (input: Input) => `[${input.id}](${input.path})`;
   const label = (iso: string) => `${dateLabel(iso, config.timezone)}`;
-  const pending = review.items.filter(c => c.status === 'pending');
-  const lingering = pending.filter(c => c.generatedAt && before(c.generatedAt));
+  // 同じ対象を指すプロジェクト案は代表の1件にまとめて数え、待っている日数は組の中で最も古い案から数える。
+  const pending = review.items.filter(c => c.status === 'pending' && !c.duplicateOf);
+  const since = (c: typeof pending[number]) => [c.generatedAt, ...(c.duplicates ?? []).map(id => review.items.find(i => i.id === id)?.generatedAt)].filter((at): at is string => !!at && Number.isFinite(Date.parse(at))).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const lingering = pending.filter(c => { const at = since(c); return at !== undefined && before(at); });
   const unassigned = recent.filter(u => u.unit.receipt?.result && !u.projects.length).length;
 
   const lines: string[] = [
@@ -121,8 +123,10 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   if (inactive.length) lines.push(merged.size ? '## 休止・完了・統合済み' : '## 休止・完了', ...inactive, '');
   lines.push('## 確認待ちの候補');
   if (!pending.length) lines.push('確認待ちの候補はありません。');
-  for (const c of [...pending].sort((a, b) => (Date.parse(a.generatedAt ?? '') || 0) - (Date.parse(b.generatedAt ?? '') || 0)))
-    lines.push(`- [${plain(c.title)}](${c.path})${c.generatedAt && Number.isFinite(Date.parse(c.generatedAt)) ? ` — ${daysSince(c.generatedAt, now)}日前から` : ''}`);
+  for (const c of [...pending].sort((a, b) => (Date.parse(since(a) ?? '') || 0) - (Date.parse(since(b) ?? '') || 0))) {
+    const at = since(c);
+    lines.push(`- [${plain(c.title)}](${c.path})${c.duplicates?.length ? `（根拠のメモ${c.duplicates.length + 1}件）` : ''}${at ? ` — ${daysSince(at, now)}日前から` : ''}`);
+  }
   return lines.join('\n') + '\n';
 }
 
