@@ -38,6 +38,10 @@ test('SIGTERMを無視する子プロセスも期限内に終了させる',async
  try{const result=await Promise.race([task,timeout]);expect(result.code).not.toBe(0);}
  finally{try{childPid=Number(await readFile(pidFile,'utf8'));process.kill(childPid,'SIGKILL');}catch{}}
 },4000);
+test('SIGTERMで終了する期限超過も、通常の終了コード1と区別する',async()=>{
+ const r=await run(process.execPath,['-e',"process.on('SIGTERM',()=>process.exit(1));process.stdout.write('ready');setInterval(()=>{},1000);"],{timeout:500});
+ expect(r.stdout).toBe('ready');expect(r.code).toBe(1);expect(r.signal).toBeNull();expect(r.timedOut).toBe(true);
+});
 test.each(['vault','source'])('運用先が%s内にある設定を拒否する',async kind=>{
  const f=await fixture();f.config.installDir=join(kind==='vault'?f.vault:f.repository,'runtime');await writeFile(f.file,JSON.stringify(f.config));
  await expect(loadConfig(f.file,f.repository)).rejects.toThrow(/外|重な|包含/);

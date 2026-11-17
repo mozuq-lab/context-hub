@@ -85,14 +85,14 @@ export async function run(executable,args,{cwd,env,timeout=60000,logFile,capture
   const grouped=process.platform!=='win32',child=spawn(executable,args,{cwd,env:env??process.env,shell:false,detached:grouped,stdio:['ignore','pipe','pipe']});let stdout='',stderr='',size=0,finished=false,expired=false,forceTimer,deadline;
   function kill(signal){try{process.kill(grouped?-child.pid:child.pid,signal);}catch{}}
   async function finish(result,error){if(finished)return;finished=true;clearTimeout(timer);clearTimeout(forceTimer);clearTimeout(deadline);try{if(logFile)await atomicWrite(logFile,stdout+stderr);if(error)reject(error);else done(result);}catch(e){reject(e);}}
-  function stop(){if(expired)return;expired=true;kill('SIGTERM');forceTimer=setTimeout(()=>kill('SIGKILL'),1000);deadline=setTimeout(()=>{child.stdout.destroy();child.stderr.destroy();finish({code:1,stdout,stderr,signal:'SIGKILL'});},2000);}
+  function stop(){if(expired)return;expired=true;kill('SIGTERM');forceTimer=setTimeout(()=>kill('SIGKILL'),1000);deadline=setTimeout(()=>{child.stdout.destroy();child.stderr.destroy();finish({code:1,stdout,stderr,signal:'SIGKILL',timedOut:true});},2000);}
   const timer=setTimeout(stop,timeout);
   for(const [stream,key] of [[child.stdout,'stdout'],[child.stderr,'stderr']])stream.on('data',b=>{
    if(!capture)return;size+=b.length;if(size>32*1024*1024){stop();return;}
    if(key==='stdout')stdout+=b.toString();else stderr+=b.toString();
   });
   child.on('error',()=>finish(null,new Error('外部コマンドを起動できませんでした')));
-  child.on('close',(code,signal)=>finish({code:expired?1:code??1,stdout,stderr,signal}));
+  child.on('close',(code,signal)=>finish({code:expired?1:code??1,stdout,stderr,signal,timedOut:expired}));
  });
 }
 export async function checked(executor,exe,args,options){const r=await executor(exe,args,options);if(r.code!==0)throw new Error('外部コマンドの検証または実行に失敗しました。保存したログを確認してください');return r;}

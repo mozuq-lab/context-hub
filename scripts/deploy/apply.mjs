@@ -48,11 +48,12 @@ export async function applyPlan(planPath,confirmation,deps={}){
    await validateTargets(false);
    const s=await inspectServices(c,current?runtime:c.previousRuntimePath??p.repository,deps);
    if(s.agents.some((a,i)=>a.loaded!==p.snapshot.agents[i]?.loaded||a.hash!==p.snapshot.agents[i]?.hash)||Boolean(s.job)!==Boolean(p.snapshot.job)||s.job&&jobHash(s.job)!==jobHash(p.snapshot.job))throw new Error('確認後にサービス設定・状態が変更されています');
+   await coreDoctor(candidate,c,{...deps,logFile:join(folder,'doctor-apply-before.log')},p.doctor??{issues:0});
    state={schema_version:1,planId:p.planId,planHash,phase:'ready',writersResumed:false,hadRuntime:Boolean(current),backedUp:false};
    if(current?.commit===p.commit&&!p.changes.length&&!p.controlChanges.length){
     await writeJson(join(runtime,releaseName),{...current,assets:p.assets,preserved:p.preserved});state.runtimeTreeHash=current.treeHash;state.phase='completed';await writeJson(statePath,state);return{commit:p.commit,unchanged:true};
    }
-  }else await validateTargets(true);
+  }else{await validateTargets(true);await coreDoctor(await exists(candidate)?candidate:runtime,c,{...deps,logFile:join(folder,'doctor-apply-before.log')},p.doctor??{issues:0});}
   const phase=async name=>{state.phase=name;await writeJson(statePath,state);await deps.onProgress?.({phase:name});};
   async function validateTargets(partial){
    for(const a of [...p.changes,...p.controlChanges]){const h=await fileHash(a.path);if(h!==a.beforeHash&&!(partial&&h===a.afterHash))throw new Error('確認後に配布物・設定が変更されています');}
@@ -108,7 +109,7 @@ export async function applyPlan(planPath,confirmation,deps={}){
     for(const a of p.controlChanges){const h=await fileHash(a.path);if(h!==a.beforeHash&&!(resuming&&h===a.afterHash))throw new Error('書き込み前に設定が変更されています');await atomicWrite(a.path,await readBytes(join(folder,a.afterFile)));}
     await phase('files-written');
    }),'organize');
-   await coreDoctor(runtime,c,{...deps,logFile:join(folder,'doctor-after.log')});
+   await coreDoctor(runtime,c,{...deps,logFile:join(folder,'doctor-after.log')},p.doctor??{issues:0});
    await phase('verified');
    if(p.snapshot.agents.some(a=>a.loaded)){state.writersResumed=true;await phase('starting');}
    await resumeServices(c,p.snapshot,deps,{gatewayOnly:true});await verifyServices(c,p.snapshot,deps);await resumeServices(c,p.snapshot,deps);

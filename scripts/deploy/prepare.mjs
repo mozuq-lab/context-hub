@@ -4,6 +4,8 @@ import {randomUUID} from 'node:crypto';
 import {loadConfig} from './config.mjs';
 import {sha,readJson,readBytes,fileHash,safePath,exists,privateDir,treeHash,writeJson,run,checked,within} from './common.mjs';
 import {inspectServices,serviceChanges,hostPackage} from './services.mjs';
+import {coreDoctor} from './doctor.mjs';
+export {coreDoctor} from './doctor.mjs';
 
 export const releaseName='.context-hub-release.json';
 export async function releaseAt(root){
@@ -11,10 +13,6 @@ export async function releaseAt(root){
  if(await exists(root)&&(!value||value.schema_version!==1||!/^[a-f0-9]{40,64}$/.test(value.commit??'')||!Array.isArray(value.assets)||typeof value.treeHash!=='string'))throw new Error('未知の既存runtimeへは上書きできません');return value;
 }
 function relativePath(v){if(typeof v!=='string'||!v||isAbsolute(v)||v.split(/[\\/]/).some(x=>!x||x==='.'||x==='..'))throw new Error('配布manifestの相対パスが不正です');return v;}
-export async function coreDoctor(root,c,deps={}){
- const r=await checked(deps.run??run,process.execPath,[join(root,'packages/core/dist/cli.js'),'--config',c.hubConfigPath,'doctor'],{env:{...process.env,CONTEXT_HUB_CONFIG:c.hubConfigPath},logFile:deps.logFile});
- const d=JSON.parse(r.stdout);if(!Array.isArray(d.issues)||d.issues.length)throw new Error('Vaultのdoctorに問題があります');return{issues:0,inputs:d.inputs};
-}
 export async function preparePlan(configFile,{repository=resolve(import.meta.dirname,'../..'),...deps}={}){
  const c=await loadConfig(configFile,repository),execute=deps.run??run;
  const git=async args=>(await checked(execute,'git',['-C',repository,...args])).stdout.trim();
@@ -56,5 +54,5 @@ export async function preparePlan(configFile,{repository=resolve(import.meta.dir
  const controlChanges=await serviceChanges(c,snapshot,fromRoot,folder,deps),doctor=await coreDoctor(candidate,c,{...deps,logFile:join(folder,'doctor-before.log')}),candidateHash=await treeHash(candidate);
  const plan={schema_version:1,planId,commit,repository,configFile:c.file,configHash:await fileHash(c.file),hubConfigHash:await fileHash(c.hubConfigPath),candidate,candidateHash,previous:previous??null,manifest,assets,preserved,changes,controlChanges,snapshot,doctor};
  const planPath=join(folder,'plan.json');await writeJson(planPath,plan);const planHash=await fileHash(planPath);
- return{planPath,planHash,summary:{commit,initialAdoption:!previous,checks:checks.map(v=>`npm ${v.join(' ')}`),changes:[...changes.map(a=>a.path),...controlChanges.map(a=>a.path)],preserved,services:snapshot.agents.map(a=>({role:a.role,loaded:a.loaded})),note:!previous?'既存版不明・初回の基準登録':null}};
+ return{planPath,planHash,summary:{commit,initialAdoption:!previous,checks:checks.map(v=>`npm ${v.join(' ')}`),changes:[...changes.map(a=>a.path),...controlChanges.map(a=>a.path)],preserved,existingIntakeIssues:doctor.issues,services:snapshot.agents.map(a=>({role:a.role,loaded:a.loaded})),note:!previous?'既存版不明・初回の基準登録':null}};
 }
