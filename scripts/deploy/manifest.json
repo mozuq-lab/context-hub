@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "vaultFormat": 1,
+  "assets": [
+    {"id":"quickadd","scope":"vault","source":"examples/quickadd/context-hub.js","target":"_ContextHub/scripts/context-hub.js"},
+    {"id":"submit-input","scope":"vault","source":"scripts/submit-input.mjs","target":"_ContextHub/scripts/submit-input.mjs"},
+    {"id":"template-memo","scope":"vault","source":"examples/quickadd/templates/memo.md","target":"_ContextHub/templates/memo.md"},
+    {"id":"template-summary","scope":"vault","source":"examples/quickadd/templates/work-summary.md","target":"_ContextHub/templates/work-summary.md"},
+    {"id":"file-input","scope":"vault","source":"docs/prompts/file-input.md","target":"_ContextHub/docs/file-input.md"},
+    {"id":"policy-check","scope":"vault","source":"docs/prompts/policy-check.md","target":"_ContextHub/docs/policy-check.md"},
+    {"id":"handoff-summary","scope":"vault","source":"docs/prompts/handoff-summary.md","target":"_ContextHub/docs/handoff-summary.md"},
+    {"id":"guided-capture","scope":"vault","source":"docs/prompts/guided-capture.md","target":"_ContextHub/docs/guided-capture.md"},
+    {"id":"vault-agents","scope":"vault","source":"examples/vault-instructions/AGENTS.md","target":"AGENTS.md"},
+    {"id":"vault-claude","scope":"vault","source":"examples/vault-instructions/CLAUDE.md","target":"CLAUDE.md"},
+    {"id":"guided-capture-skill","scope":"vault","source":"examples/vault-instructions/.claude/skills/guided-capture/SKILL.md","target":".claude/skills/guided-capture/SKILL.md"},
+    {"id":"hub-agents","scope":"workspace","source":"examples/openclaw-workspace/AGENTS.md","target":"AGENTS.md"},
+    {"id":"hub-find","scope":"workspace","source":"examples/openclaw-workspace/skills/ctx_find/SKILL.md","target":"skills/ctx_find/SKILL.md"},
+    {"id":"hub-resume","scope":"workspace","source":"examples/openclaw-workspace/skills/ctx_resume/SKILL.md","target":"skills/ctx_resume/SKILL.md"},
+    {"id":"hub-recent","scope":"workspace","source":"examples/openclaw-workspace/skills/ctx_recent/SKILL.md","target":"skills/ctx_recent/SKILL.md"},
+    {"id":"hub-pending","scope":"workspace","source":"examples/openclaw-workspace/skills/ctx_pending/SKILL.md","target":"skills/ctx_pending/SKILL.md"},
+    {"id":"hub-help","scope":"workspace","source":"examples/openclaw-workspace/skills/ctx_help/SKILL.md","target":"skills/ctx_help/SKILL.md"}
+  ]
+}

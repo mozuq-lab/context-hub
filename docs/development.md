@@ -2,6 +2,8 @@
 
 Node 24とnpm workspacesを使います。coreはTypeScript ESM、検証はVitestです。
 
+更新ツールは`scripts/deploy/`のESMで実装し、Vitestは同ディレクトリのテストも実行します。テストは一時Git repo・架空Vault・子プロセス境界のfakeを使用し、実サービスへ接続しません。`plan`が準備する候補にはworktreeが含まれず、通常の`npm test`・CI・候補検証はいずれも並列数2で全テストを検証します。開発用checkoutを本番から直接参照している場合、そこでのbuildも運用に影響します。[共通更新コマンド](deployment.md)で分離し、機能開発の検証には別のworktreeを使ってください。
+
 ```sh
 npm ci
 npm run check

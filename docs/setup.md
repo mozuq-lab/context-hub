@@ -2,6 +2,8 @@
 
 まずREADMEのデモを試し、生成物と原文が分かれていることを確認してください。以下は自分の環境へ手動で導入する手順です。設定例とテンプレートは、そのまま常駐サービスへ登録しません。
 
+既存環境を更新するときは、[共通更新コマンド](deployment.md)で開発用checkoutと運用コードを分離できます。初回移行後は、定期ジョブ等が参照する`runtime`を明示的な更新操作で入れ替えます。
+
 ## 1. Vaultと設定を決める
 
 実データのない専用フォルダーを選びます。Vault、statePath、logging.dir、バックアップを分離してください。設定例は`examples/config.production.json`（mock）と`config.production.openclaw-infer.json`（実AI用）です。`YOUR_DISCORD_USER_ID`は自分の値へ置換し、Discordを使わない場合はcapture.allowedSenderIdsを空配列にできます。

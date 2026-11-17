@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "hubConfigPath": "/path/to/settings/context-hub.json",
+  "installDir": "/path/to/context-hub-installation",
+  "previousRuntimePath": "/path/to/context-hub-checkout",
+  "openclaw": {
+    "executable": "/path/to/openclaw",
+    "configPath": "/path/to/settings/openclaw.json",
+    "gatewayPlist": "/path/to/LaunchAgents/ai.openclaw.gateway.plist",
+    "automationId": "REPLACE_WITH_EXISTING_JOB_ID"
+  },
+  "launchd": {
+    "syncPlist": "/path/to/LaunchAgents/com.context-hub.syncthing.plist",
+    "backupPlist": "/path/to/LaunchAgents/com.context-hub.vault-backup.plist",
+    "backupVerifyPlist": null
+  },
+  "workspacePath": "/path/to/openclaw/workspace-hub",
+  "preserveAssets": []
+}

@@ -86,6 +86,7 @@ flowchart LR
 
 - [構成・データ・承認の境界](docs/architecture.md)
 - [個人設定を分離した導入手順](docs/setup.md)
+- [取得済みリポジトリから安全に更新する](docs/deployment.md)
 - [停止・同期・バックアップ・復元](docs/operations.md)
 - [Codex・Claude CodeからVaultを参照する](docs/prompts/vault-access.md)
 - [AI作業要約の形式](docs/prompts/handoff-summary.md)
