@@ -1,8 +1,22 @@
 import {afterEach,expect,test} from 'vitest';
 import {fixture,fakeServices} from './fixtures.mjs';
 import {loadConfig} from '../config.mjs';
-import {inspectServices,stopServices,resumeServices,verifyServices} from '../services.mjs';
+import {inspectServices,stopServices,resumeServices,verifyServices,jobHash} from '../services.mjs';
 const fs=[];afterEach(async()=>{for(const f of fs.splice(0))await f.cleanup();});
+const hashJob={id:'fixture-job',enabled:true,createdAtMs:1,schedule:{kind:'every',everyMs:3600000},payload:{kind:'command',argv:['node','/fake/cli.js','cycle'],env:{CONTEXT_HUB_CONFIG:'/fake/hub.json'}},delivery:{mode:'none'}};
+test('OpenClawのread viewに付く実行履歴・予定・revisionはジョブ設定のhashから除く',()=>{
+ const projected={...hashJob,state:{lastRunAtMs:1},status:'ok',updatedAtMs:2,effectiveAgentId:'fixture-agent',configRevision:'fixture-revision',nextRunAtMs:3,lastRunAtMs:1,lastRunStatus:'ok',lastRunError:'fixture error',lastDelivered:true,lastDeliveryStatus:'delivered',lastDeliveryError:'fixture delivery',deliverySuppressionReason:'fixture suppression',lastFailureNotificationDelivered:true,lastFailureNotificationDeliveryStatus:'delivered',lastFailureNotificationDeliveryError:'fixture notification'};
+ expect(jobHash(projected)).toBe(jobHash(hashJob));expect(projected.state).toEqual({lastRunAtMs:1});
+});
+test.each(['enabled','schedule','argv','env','delivery','unknown'])('ジョブの%s設定の変更はhashで検出する',kind=>{
+ const changed=structuredClone(hashJob);
+ if(kind==='enabled')changed.enabled=false;
+ else if(kind==='schedule')changed.schedule.everyMs=7200000;
+ else if(kind==='argv')changed.payload.argv[1]='/fake/different-cli.js';
+ else if(kind==='env')changed.payload.env.CONTEXT_HUB_CONFIG='/fake/different-hub.json';
+ else if(kind==='delivery')changed.delivery.mode='announce';else changed.futureSetting='different';
+ expect(jobHash(changed)).not.toBe(jobHash(hashJob));
+});
 test('明示したGateway・同期・既存ジョブだけを停止し、周期とpayloadを保って再開する',async()=>{
  const f=await fixture();fs.push(f);const fake=await fakeServices(f),c=await loadConfig(f.file,f.repository),deps={run:fake.execute,platform:'darwin',ready:fake.ready};
  const snapshot=await inspectServices(c,f.repository,deps),before=fake.getJob();await stopServices(c,snapshot,deps);

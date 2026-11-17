@@ -8,9 +8,32 @@ import {preparePlan} from '../prepare.mjs';
 import {applyPlan} from '../apply.mjs';
 import {deploymentStatus} from '../status.mjs';
 import {unlockVault} from '../../../packages/core/dist/storage.js';
+import {sha} from '../common.mjs';
 const fs=[];afterEach(async()=>{for(const f of fs.splice(0))await f.cleanup();});
 async function setup(){const f=await fixture();fs.push(f);return f;}
 const options=f=>({repository:f.repository,run:f.execute});
+test('plan後の定期実行とCLI更新に伴うread viewの変化だけなら、同じplanを適用できる',async()=>{
+ const f=await setup(),fake=await fakeServices(f);let lastRun=1;
+ const execute=async(exe,args,o)=>{
+  const r=await fake.execute(exe,args,o);
+  if(exe===f.config.openclaw.executable&&args[0]==='automations'&&r.code===0){
+   const j=JSON.parse(r.stdout);Object.assign(j,{lastRunAtMs:lastRun,nextRunAtMs:lastRun+3600000,lastRunStatus:'ok',configRevision:sha(JSON.stringify([j.enabled,j.payload.argv]))});return{...r,stdout:JSON.stringify(j)};
+  }
+  return r;
+ };
+ const deps={run:execute,platform:'darwin',ready:fake.ready},p=await preparePlan(f.file,{repository:f.repository,...deps});lastRun=2;
+ await applyPlan(p.planPath,p.planHash,deps);expect((await deploymentStatus(f.file)).commit).toBe(p.summary.commit);expect(fake.getJob().enabled).toBe(true);expect([...fake.serviceState.values()]).toEqual([true,true]);
+},30000);
+test('plan後の設定revisionの変更は、サービス停止前に拒否する',async()=>{
+ const f=await setup(),fake=await fakeServices(f);let revision='fixture-revision-1';
+ const execute=async(exe,args,o)=>{
+  const r=await fake.execute(exe,args,o);
+  return exe===f.config.openclaw.executable&&args[0]==='automations'&&r.code===0?{...r,stdout:JSON.stringify({...JSON.parse(r.stdout),configRevision:revision})}:r;
+ };
+ const deps={run:execute,platform:'darwin',ready:fake.ready},p=await preparePlan(f.file,{repository:f.repository,...deps});revision='fixture-revision-2';fake.calls.length=0;
+ await expect(applyPlan(p.planPath,p.planHash,deps)).rejects.toThrow(/変更/);expect(fake.calls.some(([exe,arg])=>exe==='launchctl'&&arg==='bootout')).toBe(false);
+ expect(fake.calls.some(([exe,op,verb])=>exe===f.config.openclaw.executable&&op==='automations'&&['disable','enable','edit'].includes(verb))).toBe(false);
+});
 test('既存の受付失敗を保持して更新し、受付ファイルと停止回復記録を変えない',async()=>{
  const f=await setup(),failure=await intakeFailure(f),paths=Object.values(failure.paths),before=await Promise.all(paths.map(p=>readFile(p)));
  const p=await preparePlan(f.file,options(f));await applyPlan(p.planPath,p.planHash,{run:f.execute});

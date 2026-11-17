@@ -2,7 +2,9 @@ import {join,dirname} from 'node:path';
 import {realpath,readFile} from 'node:fs/promises';
 import {run,checked,readJson,fileHash,sha,atomicWrite} from './common.mjs';
 
-export const jobHash=job=>{const v=structuredClone(job);delete v.state;delete v.status;delete v.updatedAtMs;return sha(JSON.stringify(v));};
+// OpenClaw 2026.9.9のread viewに追加される実行状態と派生revisionを、設定本体から分ける。
+const jobViewFields=['state','status','updatedAtMs','effectiveAgentId','configRevision','nextRunAtMs','lastRunAtMs','lastRunStatus','lastRunError','lastDelivered','lastDeliveryStatus','lastDeliveryError','deliverySuppressionReason','lastFailureNotificationDelivered','lastFailureNotificationDeliveryStatus','lastFailureNotificationDeliveryError'];
+export const jobHash=job=>{const v=structuredClone(job);for(const key of jobViewFields)delete v[key];return sha(JSON.stringify(v));};
 const environment=c=>({...process.env,OPENCLAW_CONFIG_PATH:c.openclaw.configPath,OPENCLAW_CONFIG_READONLY:'1'});
 async function command(c,args,deps={}){const r=await checked(deps.run??run,c.openclaw.executable,args,{env:environment(c),logFile:deps.logFile});return r.stdout;}
 async function job(c,deps){const v=JSON.parse(await command(c,['automations','show',c.openclaw.automationId,'--json'],deps));return v.job??v;}

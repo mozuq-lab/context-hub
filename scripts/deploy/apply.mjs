@@ -47,7 +47,7 @@ export async function applyPlan(planPath,confirmation,deps={}){
    const current=await releaseAt(runtime);if(JSON.stringify(current??null)!==JSON.stringify(p.previous)||current&&await treeHash(runtime)!==current.treeHash)throw new Error('確認後に運用コードが変更されています');
    await validateTargets(false);
    const s=await inspectServices(c,current?runtime:c.previousRuntimePath??p.repository,deps);
-   if(s.agents.some((a,i)=>a.loaded!==p.snapshot.agents[i]?.loaded||a.hash!==p.snapshot.agents[i]?.hash)||Boolean(s.job)!==Boolean(p.snapshot.job)||s.job&&jobHash(s.job)!==jobHash(p.snapshot.job))throw new Error('確認後にサービス設定・状態が変更されています');
+   if(s.agents.some((a,i)=>a.loaded!==p.snapshot.agents[i]?.loaded||a.hash!==p.snapshot.agents[i]?.hash)||Boolean(s.job)!==Boolean(p.snapshot.job)||s.job&&(jobHash(s.job)!==jobHash(p.snapshot.job)||s.job.configRevision!==p.snapshot.job.configRevision))throw new Error('確認後にサービス設定・状態が変更されています');
    await coreDoctor(candidate,c,{...deps,logFile:join(folder,'doctor-apply-before.log')},p.doctor??{issues:0});
    state={schema_version:1,planId:p.planId,planHash,phase:'ready',writersResumed:false,hadRuntime:Boolean(current),backedUp:false};
    if(current?.commit===p.commit&&!p.changes.length&&!p.controlChanges.length){
