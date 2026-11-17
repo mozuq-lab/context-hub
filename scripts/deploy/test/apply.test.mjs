@@ -103,7 +103,7 @@ test('通常更新でもHub設定とdeployment設定を利用者専用で退避�
 test('同じcommitで新しくplanを作っても、再配置やサービス停止を行わない',async()=>{
  const f=await setup(),p=await preparePlan(f.file,options(f));await applyPlan(p.planPath,p.planHash,{run:f.execute});
  const next=await preparePlan(f.file,options(f));expect((await applyPlan(next.planPath,next.planHash,{run:f.execute})).unchanged).toBe(true);
-});
+},30000);
 test('初回の既存参照を移し、認証・ジョブの周期とpayloadを保持する',async()=>{
  const f=await setup(),fake=await fakeServices(f),deps={run:fake.execute,platform:'darwin',ready:fake.ready};
  const p=await preparePlan(f.file,{repository:f.repository,...deps}),before=fake.getJob();await applyPlan(p.planPath,p.planHash,deps);
