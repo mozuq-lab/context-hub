@@ -50,10 +50,10 @@ describe('プロジェクト未定の次の一手', () => {
     expect(built).toMatchObject({ schema_version: 1, generated_at: '2026-11-10T00:00:00.000Z', total_memos: 4 });
     expect(built.memos).toEqual([
       // 短いメモは本人の言葉を、長いメモはAIの要約を示す。同じ提案は1件にまとめる。
-      { input_id: suggested, path: inbox(suggested), occurred_at: '2026-11-03T09:00:00+09:00', text: '動画の作り方を見直したい', task: false, suggestions: ['手順を書き出す', '詰まった所を3つ挙げる', '道具を比べる', '試作を1本作る'] },
-      { input_id: long, path: inbox(long), occurred_at: '2026-11-02T09:00:00+09:00', text: '長いメモの要約', task: true, suggestions: ['分ける'] },
-      { input_id: task, path: inbox(task), occurred_at: '2026-11-01T09:00:00+09:00', text: '講習の申込をする', task: true, suggestions: [] },
-      { input_id: weak, path: inbox(weak), occurred_at: '2026-10-30T09:00:00+09:00', text: '関係が薄いメモ', task: false, suggestions: ['確かめる'] },
+      { input_id: suggested, path: inbox(suggested), occurred_at: '2026-11-03T09:00:00+09:00', text: '動画の作り方を見直したい', own_words: true, task: false, suggestions: ['手順を書き出す', '詰まった所を3つ挙げる', '道具を比べる', '試作を1本作る'] },
+      { input_id: long, path: inbox(long), occurred_at: '2026-11-02T09:00:00+09:00', text: '長いメモの要約', own_words: false, task: true, suggestions: ['分ける'] },
+      { input_id: task, path: inbox(task), occurred_at: '2026-11-01T09:00:00+09:00', text: '講習の申込をする', own_words: true, task: true, suggestions: [] },
+      { input_id: weak, path: inbox(weak), occurred_at: '2026-10-30T09:00:00+09:00', text: '関係が薄いメモ', own_words: true, task: false, suggestions: ['確かめる'] },
     ]);
   });
 
@@ -105,6 +105,11 @@ describe('プロジェクト未定の次の一手', () => {
     expect(section).not.toContain(`[${ids[0]}]`);
     await rebuildDashboard(config, { now: new Date('2026-11-11T00:00:00Z') });
     expect(await vault.read(unassignedActionsPath)).toBe(first);
+    // 長いメモはAIの一行要約で示し、本人の言葉と区別できるよう印を付ける。
+    const long = await memo(config, '長い作業メモ。'.repeat(20), '2026-11-08T09:00:00+09:00', result({ category: 'task', summary: '長いメモの要約' }));
+    await rebuildDashboard(config, { now: new Date('2026-11-12T00:00:00Z') });
+    expect(await vault.read('HOME.md')).toContain(`- 2026-11-08 AI要約: 長いメモの要約 — [${long}](00_inbox/`);
+    expect(JSON.parse((await vault.read(unassignedActionsPath))!).memos[0]).toMatchObject({ input_id: long, own_words: false });
   });
 
   test('HOMEは次の一手とプロジェクト未定の次の一手を、プロジェクト一覧より前に置く', async () => {

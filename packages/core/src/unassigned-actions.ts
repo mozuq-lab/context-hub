@@ -29,6 +29,7 @@ const memoSchema = z.object({
   /** 元のメモの原文。 */ path: z.string().regex(/^00_inbox\/[^/]+\.md$/),
   occurred_at: z.string().refine(s => Number.isFinite(Date.parse(s))),
   /** 訂正のない短いメモは本人の言葉、それ以外はAIの一行要約（未検証）。 */ text: z.string().min(1),
+  /** textが本人の言葉か。falseならAIの一行要約（未検証）。 */ own_words: z.boolean(),
   /** AIが「タスク」と分類したメモか（未検証）。 */ task: z.boolean(),
   /** AIが挙げた次の一手の提案（未検証）。 */ suggestions: z.array(z.string().min(1)).max(10),
 }).strict();
@@ -60,7 +61,7 @@ export function buildUnassignedActions(config: HubConfig, units: EffectiveInput[
     const own = shortMemoText({ root: { ...chain.root, text: hide(chain.root.text) }, revisions: chain.revisions });
     const text = clipChars(own ?? hide(result.summary).trim().replace(/\s+/g, ' '), TEXT_CHARS);
     if (!text) continue;
-    memos.push({ input_id: chain.root.id, path: chain.root.path, occurred_at: chain.root.occurred_at, text, task, suggestions });
+    memos.push({ input_id: chain.root.id, path: chain.root.path, occurred_at: chain.root.occurred_at, text, own_words: own !== undefined, task, suggestions });
   }
   memos.sort((a, b) => Date.parse(b.occurred_at) - Date.parse(a.occurred_at) || b.input_id.localeCompare(a.input_id));
   return { schema_version: 1, generated_at: now.toISOString(), total_memos: memos.length, memos: memos.slice(0, UNASSIGNED_MEMOS_MAX) };
@@ -83,9 +84,9 @@ const clip = (s: string, n = 120) => { const a = Array.from(plain(s)); return a.
 export function unassignedActionsSection(config: HubConfig, actions: UnassignedActions): string {
   if (!actions.memos.length) return '';
   const rows = actions.memos.slice(0, UNASSIGNED_HOME_MEMOS).flatMap(m => [
-    `- ${dateLabel(m.occurred_at, config.timezone).slice(0, 10)} ${clip(m.text)} — [${m.input_id}](${m.path})${m.task ? ' / タスク候補' : ''}`,
+    `- ${dateLabel(m.occurred_at, config.timezone).slice(0, 10)} ${m.own_words ? '' : 'AI要約: '}${clip(m.text)} — [${m.input_id}](${m.path})${m.task ? ' / タスク候補' : ''}`,
     ...m.suggestions.slice(0, UNASSIGNED_SUGGESTIONS_PER_MEMO).map(s => `  - AI提案: ${clip(s)}`),
     ...(m.suggestions.length > UNASSIGNED_SUGGESTIONS_PER_MEMO ? [`  - ほかAI提案${m.suggestions.length - UNASSIGNED_SUGGESTIONS_PER_MEMO}件（アプリの「次の一手」で確認）`] : []),
   ]);
-  return `## プロジェクト未定の次の一手（メモ${actions.total_memos}件）\nどのプロジェクトにも結び付いていないメモから、AIが「タスク」と分類したものと、AIが挙げた次の一手の提案を集めた一覧です。分類と提案はAI生成・未検証で、完了の報告や期日の対象にはなりません。プロジェクトを追加したり、名前・別名・キーワードを直したりして、メモがプロジェクトに結び付くと、そのプロジェクトのNOWへ移ります。${actions.total_memos > UNASSIGNED_HOME_MEMOS ? `新しい${UNASSIGNED_HOME_MEMOS}件を載せます。` : ''}\n${rows.join('\n')}`;
+  return `## プロジェクト未定の次の一手（メモ${actions.total_memos}件）\nどのプロジェクトにも結び付いていないメモから、AIが「タスク」と分類したものと、AIが挙げた次の一手の提案を集めた一覧です。短いメモは本人の言葉のまま、長いメモは「AI要約:」を付けた一行要約で示します。分類・要約・提案はAI生成・未検証で、完了の報告や期日の対象にはなりません。プロジェクトを追加したり、名前・別名・キーワードを直したりして、メモがプロジェクトに結び付くと、そのプロジェクトのNOWへ移ります。${actions.total_memos > UNASSIGNED_HOME_MEMOS ? `新しい${UNASSIGNED_HOME_MEMOS}件を載せます。` : ''}\n${rows.join('\n')}`;
 }
