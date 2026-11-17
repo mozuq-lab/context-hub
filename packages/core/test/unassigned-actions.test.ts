@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/config.js';
@@ -110,6 +110,45 @@ describe('プロジェクト未定の次の一手', () => {
     await rebuildDashboard(config, { now: new Date('2026-11-12T00:00:00Z') });
     expect(await vault.read('HOME.md')).toContain(`- 2026-11-08 AI要約: 長いメモの要約 — [${long}](00_inbox/`);
     expect(JSON.parse((await vault.read(unassignedActionsPath))!).memos[0]).toMatchObject({ input_id: long, own_words: false });
+  });
+
+  test('受信箱の下の階層にあるメモも載せ、一覧を書き直し続けない', async () => {
+    const { config, vault } = await setup();
+    const saved = await capture(config, { source: 'cli', occurredAt: '2026-11-01T09:00:00+09:00', text: '講習の申込をする' });
+    // 年ごとのフォルダへ移した原文。
+    const name = saved.path.split('/').at(-1)!;
+    await mkdir(join(config.vaultPath, '00_inbox/2026'), { recursive: true });
+    await rename(join(config.vaultPath, saved.path), join(config.vaultPath, '00_inbox/2026', name));
+    await organize(config, new MockLlm([result({ category: 'task' })]));
+    const built = await actions(config);
+    expect(unassignedActionsSchema.parse(built)).toEqual(built);
+    expect(built.memos).toMatchObject([{ input_id: saved.inputId, path: `00_inbox/2026/${name}` }]);
+    await rebuildDashboard(config, { now: new Date('2026-11-10T00:00:00Z') });
+    const first = (await vault.read(unassignedActionsPath))!;
+    expect(unassignedActionsSchema.parse(JSON.parse(first)).memos).toHaveLength(1);
+    expect(await vault.read('HOME.md')).toContain(`[${saved.inputId}](00_inbox/2026/${name})`);
+    await rebuildDashboard(config, { now: new Date('2026-11-11T00:00:00Z') });
+    expect(await vault.read(unassignedActionsPath)).toBe(first);
+  });
+
+  test('HOMEの行では、メモと提案に含まれるリンクやHTMLの記法を無効にする', async () => {
+    const { config, vault } = await setup();
+    await memo(config, '\\[資料\\](https://example.com/x) を読む', '2026-11-01T09:00:00+09:00', result({ category: 'task', next_action_suggestions: ['<img src=https://example.com/p.png> を確かめる', '`[手順](https://example.com/y)` を見る'] }));
+    await rebuildDashboard(config);
+    const section = (await vault.read('HOME.md'))!.split('## プロジェクト未定の次の一手')[1]!.split('\n## ')[0]!;
+    // バックスラッシュで角括弧の無効化を打ち消せない。
+    expect(section).toContain('- 2026-11-01 \\\\\\[資料\\\\\\](https://example.com/x) を読む — [IN-');
+    expect(section).toContain('  - AI提案: &lt;img src=https://example.com/p.png> を確かめる');
+    expect(section).toContain('  - AI提案: `\\[手順\\](https://example.com/y)` を見る');
+    expect(section).not.toContain('<img');
+  });
+
+  test('長い本文は、無効化の記号の途中で切らない', async () => {
+    const { config, vault } = await setup();
+    const text = `${'あ'.repeat(119)}[x] の続き`;
+    await memo(config, 'メモ', '2026-11-01T09:00:00+09:00', result({ category: 'task', next_action_suggestions: [text] }));
+    await rebuildDashboard(config);
+    expect(await vault.read('HOME.md')).toContain(`  - AI提案: ${'あ'.repeat(119)}\\[…\n`);
   });
 
   test('HOMEは次の一手とプロジェクト未定の次の一手を、プロジェクト一覧より前に置く', async () => {

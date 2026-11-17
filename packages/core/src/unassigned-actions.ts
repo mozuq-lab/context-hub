@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { listText } from './markdown-text.js';
+import { inlineText } from './markdown-text.js';
 import { Vault } from './storage.js';
 import { associatedProjects, dateLabel } from './views.js';
 import type { EffectiveInput } from './effective-inputs.js';
@@ -26,7 +26,7 @@ const TEXT_CHARS = 400;
 
 const memoSchema = z.object({
   /** 元のメモ。 */ input_id: z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/),
-  /** 元のメモの原文。 */ path: z.string().regex(/^00_inbox\/[^/]+\.md$/),
+  /** 元のメモの原文。受信箱の下の階層にあってもよい。 */ path: z.string().regex(/^00_inbox\/.+\.md$/),
   occurred_at: z.string().refine(s => Number.isFinite(Date.parse(s))),
   /** 訂正のない短いメモは本人の言葉、それ以外はAIの一行要約（未検証）。 */ text: z.string().min(1),
   /** textが本人の言葉か。falseならAIの一行要約（未検証）。 */ own_words: z.boolean(),
@@ -61,7 +61,9 @@ export function buildUnassignedActions(config: HubConfig, units: EffectiveInput[
     const own = shortMemoText({ root: { ...chain.root, text: hide(chain.root.text) }, revisions: chain.revisions });
     const text = clipChars(own ?? hide(result.summary).trim().replace(/\s+/g, ' '), TEXT_CHARS);
     if (!text) continue;
-    memos.push({ input_id: chain.root.id, path: chain.root.path, occurred_at: chain.root.occurred_at, text, own_words: own !== undefined, task, suggestions });
+    const memo: UnassignedMemo = { input_id: chain.root.id, path: chain.root.path, occurred_at: chain.root.occurred_at, text, own_words: own !== undefined, task, suggestions };
+    // 形式に合わないメモは載せない。一覧のファイルを、読む側がいつも検証できる形に保つ。
+    if (memoSchema.safeParse(memo).success) memos.push(memo);
   }
   memos.sort((a, b) => Date.parse(b.occurred_at) - Date.parse(a.occurred_at) || b.input_id.localeCompare(a.input_id));
   return { schema_version: 1, generated_at: now.toISOString(), total_memos: memos.length, memos: memos.slice(0, UNASSIGNED_MEMOS_MAX) };
@@ -78,8 +80,13 @@ export async function rebuildUnassignedActionsLocked(config: HubConfig, vault: V
   return built;
 }
 
-const plain = listText;
-const clip = (s: string, n = 120) => { const a = Array.from(plain(s)); return a.length > n ? a.slice(0, n).join('') + '…' : a.join(''); };
+/**
+ * HOMEの行に埋め込む本人の言葉とAIの提案の無害化。一覧の既定（改行・表の区切り・角括弧）に加えて、
+ * バックスラッシュ（角括弧の無効化を打ち消してリンクを作れる）とHTMLの開始（<）も無効にする。
+ */
+const plain = (s: string) => inlineText(s.replaceAll('\\', '\\\\'), { table: true, brackets: true, angle: true });
+/** 先に切ってから無害化する。無害化で足した記号の途中では切らない。 */
+const clip = (s: string, n = 120) => { const a = Array.from(s); return a.length > n ? plain(a.slice(0, n).join('')) + '…' : plain(s); };
 /** HOMEの「プロジェクト未定の次の一手」（前後の空行は含めない）。対象のメモがなければ空文字。 */
 export function unassignedActionsSection(config: HubConfig, actions: UnassignedActions): string {
   if (!actions.memos.length) return '';

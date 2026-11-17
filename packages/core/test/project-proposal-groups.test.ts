@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { mkdtemp, rm, utimes } from 'node:fs/promises';
+import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/config.js';
-import { Vault } from '../src/storage.js';
+import { Vault, hash } from '../src/storage.js';
 import { capture } from '../src/capture.js';
 import { organize } from '../src/organize.js';
 import { MockLlm } from '../src/llm.js';
 import { readProjects } from '../src/projects.js';
 import { decideProject, listProjectCandidates, type ProjectCandidate } from '../src/project-proposals.js';
-import { groupProposals, relatedProposals } from '../src/project-proposal-groups.js';
+import { PROPOSAL_GROUP_MAX, groupProposals, relatedProposals } from '../src/project-proposal-groups.js';
 import { readReviewCandidates } from '../src/candidate-review.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { rebuildDigest } from '../src/digest.js';
@@ -37,12 +37,13 @@ const byTitle = async (config: HubConfig) => new Map((await listProjectCandidate
 const cover = (c: ProjectCandidate) => ({ candidateId: c.candidateId, expectedHash: c.candidateHash });
 const request = (c: ProjectCandidate, action: 'approve' | 'reject', covers?: { candidateId: string; expectedHash: string }[]) => ({ candidateId: c.candidateId, expectedHash: c.candidateHash, confirmationToken: c.confirmationToken, action, source: 'quickadd', sourceEventId: `REQ-${action === 'approve' ? 'a' : 'b'}${c.candidateId.slice(-31)}`, confirmed: true as const, ...(covers ? { covers } : {}) });
 const names = (title: string, aliases: string[] = []) => ({ title, aliases });
+const papr = (c: ProjectCandidate) => `90_system/project-approvals/PAPR-${c.candidateId.slice(5)}.json`;
 
 describe('同じ対象を指すプロジェクト案の判定', () => {
-  test('名前・別名が一致するか、4文字以上の名前がもう一方に含まれる案を同じ対象と見なす', () => {
+  test('名前・別名が一致するか、4文字以上の名前がもう一方の名前に含まれる案を同じ対象と見なす', () => {
     expect(relatedProposals(names('家庭菜園'), names('ベランダ栽培', ['家庭菜園']))).toBe(true);
     expect(relatedProposals(names('家庭菜園'), names('家庭菜園の水やり自動化'))).toBe(true);
-    expect(relatedProposals(names('ベランダ家庭菜園'), names('栽培記録', ['家庭菜園']))).toBe(true);
+    expect(relatedProposals(names('家庭菜園の水やり自動化'), names('家庭菜園'))).toBe(true);
     // 全角・半角と大文字・小文字の違いは同じ名前として扱う。
     expect(relatedProposals(names('Ｇａｒｄｅｎ　Ｌｏｇ'), names('garden log 公開'))).toBe(true);
     // 短い語が含まれるだけではまとめない（一致すればまとめる）。
@@ -51,16 +52,46 @@ describe('同じ対象を指すプロジェクト案の判定', () => {
     expect(relatedProposals(names('家庭菜園'), names('読書記録'))).toBe(false);
   });
 
-  test('つながっている案を1組にまとめ、ほかの案と最も多くつながる案（同数なら短い名前、古い案）を代表にする', () => {
-    const item = (id: string, title: string, generatedAt: string) => ({ id, proposal: names(title), generatedAt });
+  test('別名は一致だけを見る（広い語の別名がほかの案の名前に含まれても、同じ対象と見なさない）', () => {
+    expect(relatedProposals(names('確定申告', ['アプリ開発']), names('家計簿アプリ開発'))).toBe(false);
+    expect(relatedProposals(names('ベランダ家庭菜園'), names('栽培記録', ['家庭菜園']))).toBe(false);
+    expect(relatedProposals(names('栽培記録', ['ベランダ家庭菜園']), names('家庭菜園'))).toBe(false);
+    expect(relatedProposals(names('確定申告', ['アプリ開発']), names('家計簿', ['アプリ開発']))).toBe(true);
+  });
+
+  const item = (id: string, title: string, generatedAt: string, aliases: string[] = []) => ({ id, proposal: names(title, aliases), generatedAt });
+  const shape = (groups: ReturnType<typeof groupProposals<ReturnType<typeof item>>>) => groups.map(g => [g.representative.id, g.duplicates.map(d => d.id)]);
+
+  test('ほかの案と最も多く重なる案（同数なら短い名前、古い案）を代表にし、代表と重なる案を1組にまとめる', () => {
     const groups = groupProposals([
       item('a', '家庭菜園の水やり自動化', '2026-10-01T00:00:00Z'), item('b', '読書記録', '2026-10-02T00:00:00Z'),
       item('c', '家庭菜園', '2026-10-03T00:00:00Z'), item('d', 'ベランダ家庭菜園', '2026-10-04T00:00:00Z'),
     ]);
-    expect(groups.map(g => [g.representative.id, g.duplicates.map(d => d.id)])).toEqual([['c', ['a', 'd']], ['b', []]]);
+    expect(shape(groups)).toEqual([['c', ['a', 'd']], ['b', []]]);
     // 2件の組は、名前の短い案を代表にする。同じ長さなら古い案。
     expect(groupProposals([item('x', '家庭菜園の記録', '2026-10-01T00:00:00Z'), item('y', '家庭菜園', '2026-10-02T00:00:00Z')])[0]!.representative.id).toBe('y');
     expect(groupProposals([item('x', '家庭菜園', '2026-10-02T00:00:00Z'), item('y', '家庭菜園', '2026-10-01T00:00:00Z')])[0]!.representative.id).toBe('y');
+  });
+
+  test('代表と直接は重ならない案を、ほかの案を介してまとめない', () => {
+    // p-q-r-s と順に重なる案。qを代表にするとsはqと重ならないので、同じ組に入れない。
+    const chain = [
+      item('p', '旅行の計画', '2026-10-01T00:00:00Z'), item('q', '夏の旅行', '2026-10-02T00:00:00Z', ['旅行の計画', '写真の整理']),
+      item('r', '写真の整理', '2026-10-03T00:00:00Z', ['アルバム作り']), item('s', 'アルバム作り', '2026-10-04T00:00:00Z'),
+    ];
+    expect(shape(groupProposals(chain))).toEqual([['q', ['p', 'r']], ['s', []]]);
+    // 並べる順が違っても同じ組になる。
+    expect(shape(groupProposals([...chain].reverse()))).toEqual([['q', ['p', 'r']], ['s', []]]);
+    // 広い語の別名を持つ案を介して、別の取り組みをまとめない。
+    expect(shape(groupProposals([item('t', '確定申告', '2026-10-01T00:00:00Z', ['アプリ開発']), item('u', '家計簿アプリ開発', '2026-10-02T00:00:00Z'), item('v', '英語学習アプリ開発', '2026-10-03T00:00:00Z')]))).toEqual([['t', []], ['u', []], ['v', []]]);
+  });
+
+  test('1組にまとめる案は上限までとし、残りは別の組にする', () => {
+    const same = Array.from({ length: PROPOSAL_GROUP_MAX + 3 }, (_, i) => item(`i${String(i).padStart(2, '0')}`, '家庭菜園', new Date(Date.UTC(2026, 9, 1, i)).toISOString()));
+    const groups = groupProposals(same);
+    expect(groups.map(g => [g.representative.id, g.duplicates.length])).toEqual([['i00', PROPOSAL_GROUP_MAX], [`i${PROPOSAL_GROUP_MAX + 1}`, 1]]);
+    // まとめるのは古い案から。
+    expect(groups[0]!.duplicates.map(d => d.id)).toEqual(same.slice(1, PROPOSAL_GROUP_MAX + 1).map(d => d.id));
   });
 });
 
@@ -108,6 +139,8 @@ describe('重複するプロジェクト案をまとめて確認する', () => {
     const review = new Map((await readReviewCandidates(config)).map(i => [i.title, i]));
     expect(review.get('ベランダ家庭菜園')).toMatchObject({ status: 'approved', reflected: true, coveredBy: main.candidateId, decisionId: `PAPR-${main.candidateId.slice(5)}`, targetPath: `10_projects/${main.projectId}/project.md`, warnings: [] });
     expect(review.get('ベランダ家庭菜園')!.confirmationToken).toBeUndefined();
+    // まとめて判断された案は、代表の案の判断記録に依存する（自分の判断記録はないことを確かめる）。
+    expect(review.get('ベランダ家庭菜園')!.dependencies).toMatchObject({ [d.path]: d.candidateHash, [papr(d)]: null, [papr(main)]: hash((await vault.read(papr(main)))!) });
     expect(review.get('家庭菜園')).toMatchObject({ status: 'approved', reflected: true, duplicates: [a.candidateId, d.candidateId] });
     await rebuildDashboard(config);
     const home = (await vault.read('HOME.md'))!;
@@ -126,6 +159,8 @@ describe('重複するプロジェクト案をまとめて確認する', () => {
     expect(review.get('家庭菜園の水やり自動化')).toMatchObject({ status: 'rejected', reflected: true, coveredBy: main.candidateId });
     // 同じ判断の再送は同じ記録へまとめ、まとめる案が違う再送は拒否する。
     expect(await decideProject(config, request(main, 'reject', [cover(c.get('家庭菜園の水やり自動化')!), cover(c.get('ベランダ家庭菜園')!)]))).toMatchObject({ deduped: true });
+    // まとめる案の並びが違うだけの再送も、同じ判断として扱う。
+    expect(await decideProject(config, request(main, 'reject', [cover(c.get('ベランダ家庭菜園')!), cover(c.get('家庭菜園の水やり自動化')!)]))).toMatchObject({ deduped: true });
     await expect(decideProject(config, request(main, 'reject'))).rejects.toThrow('異なる承認・却下記録');
   });
 
@@ -150,6 +185,57 @@ describe('重複するプロジェクト案をまとめて確認する', () => {
     await expect(decideProject(config, request(main, 'approve', [cover(a)]))).rejects.toThrow('まとめて判断する案');
     expect(await readProjects(config)).toHaveLength(0);
     expect((await byTitle(config)).get('家庭菜園')!.status).toBe('pending');
+  });
+
+  test('判断する案と直接は同じ対象ではない案は、まとめて判断できない', async () => {
+    const { config } = await setup(); await propose(config, ['旅行の計画', ['夏の旅行', ['旅行の計画', '写真の整理']], '写真の整理']);
+    const c = await byTitle(config), p = c.get('旅行の計画')!, q = c.get('夏の旅行')!, r = c.get('写真の整理')!;
+    expect(q.duplicates).toEqual([p.candidateId, r.candidateId]);
+    // 「旅行の計画」と「写真の整理」は、代表の「夏の旅行」を介して同じ組にあるだけで、互いには重ならない。
+    await expect(decideProject(config, request(p, 'reject', [cover(q), cover(r)]))).rejects.toThrow('まとめて判断する案');
+    await decideProject(config, request(q, 'reject', [cover(p), cover(r)]));
+    expect([...(await byTitle(config)).values()].map(x => x.status)).toEqual(['rejected', 'rejected', 'rejected']);
+  });
+
+  test('同じ対象ではない候補のファイルが読めなくても、まとめた判断を受け付ける', async () => {
+    const { config } = await setup(); await propose(config, titles);
+    const c = await byTitle(config), main = c.get('家庭菜園')!, a = c.get('家庭菜園の水やり自動化')!, d = c.get('ベランダ家庭菜園')!, other = c.get('読書記録')!;
+    await writeFile(join(config.vaultPath, other.path), '壊れた候補');
+    await decideProject(config, request(main, 'approve', [cover(a), cover(d)]));
+    const review = new Map((await readReviewCandidates(config)).map(i => [i.id, i]));
+    expect([main, a, d, other].map(x => review.get(x.candidateId)!.status)).toEqual(['approved', 'approved', 'approved', 'unavailable']);
+  });
+
+  test('まとめる案のファイルが読めないときは、判断を受け付けない', async () => {
+    const { config } = await setup(); await propose(config, titles);
+    const c = await byTitle(config), main = c.get('家庭菜園')!, a = c.get('家庭菜園の水やり自動化')!;
+    await writeFile(join(config.vaultPath, a.path), '壊れた候補');
+    await expect(decideProject(config, request(main, 'approve', [cover(a)]))).rejects.toThrow('まとめて判断する案');
+    expect(await readProjects(config)).toHaveLength(0);
+  });
+
+  test('読めない判断記録がある間は、判断前の案を確認待ちに戻さず、判断を止める', async () => {
+    const { config, vault } = await setup(); await propose(config, titles);
+    const c = await byTitle(config), main = c.get('家庭菜園')!, a = c.get('家庭菜園の水やり自動化')!, d = c.get('ベランダ家庭菜園')!, other = c.get('読書記録')!;
+    await decideProject(config, request(main, 'reject', [cover(a), cover(d)]));
+    const record = (await vault.read(papr(main)))!;
+    // 代表の案の判断記録が途中までしか届いていない。どの案をまとめて判断したかを確かめられない。
+    await writeFile(join(config.vaultPath, papr(main)), record.slice(0, 40));
+    const broken = new Map((await readReviewCandidates(config)).map(i => [i.id, i]));
+    expect(broken.get(main.candidateId)!.status).toBe('unavailable');
+    for (const x of [a, d, other]) {
+      expect(broken.get(x.candidateId)).toMatchObject({ status: 'stale', warnings: [expect.stringContaining('読めない判断記録')] });
+      expect(broken.get(x.candidateId)).not.toHaveProperty('duplicates');
+      expect(broken.get(x.candidateId)).not.toHaveProperty('duplicateOf');
+    }
+    await expect(decideProject(config, request(d, 'approve'))).rejects.toThrow('読めない判断記録');
+    await expect(decideProject(config, request(other, 'approve'))).rejects.toThrow('読めない判断記録');
+    expect(await readProjects(config)).toHaveLength(0);
+    // 判断記録が読めるようになれば、まとめて判断した状態に戻る。
+    await writeFile(join(config.vaultPath, papr(main)), record);
+    const restored = new Map((await readReviewCandidates(config)).map(i => [i.id, i]));
+    expect([main, a, d, other].map(x => restored.get(x.candidateId)!.status)).toEqual(['rejected', 'rejected', 'rejected', 'pending']);
+    expect(restored.get(d.candidateId)).toMatchObject({ coveredBy: main.candidateId, warnings: [] });
   });
 
   test('受付の依頼でも、まとめる案をIDとハッシュの組で指定できる', async () => {

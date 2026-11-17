@@ -6,7 +6,7 @@ import { readCorrectionChains, type CorrectionChain } from './corrections.js';
 import { readProjects, projectSchema, overlappingProject } from './projects.js';
 import { inputIdSchema } from './capture.js';
 import { projectProposalSchema } from './llm.js';
-import { groupProposals } from './project-proposal-groups.js';
+import { PROPOSAL_GROUP_MAX, groupProposals, relatedProposals } from './project-proposal-groups.js';
 import type { HubConfig, ProjectProposal, Receipt } from './types.js';
 
 export interface ProjectCandidate {
@@ -20,8 +20,8 @@ export interface ProjectCandidate {
 }
 /** coversは、同じ対象の案として同じ判断にまとめる確認待ちの案。本人が表示で確認した内容のハッシュを添える。 */
 export interface ProjectDecisionRequest { candidateId:string; expectedHash:string; confirmationToken:string; action:'approve'|'reject'; source:string; sourceEventId:string; confirmed:true; covers?:{candidateId:string;expectedHash:string}[] }
-/** 1回の判断でまとめられる案の上限。 */
-export const PROJECT_COVERS_MAX=20;
+/** 1回の判断でまとめられる案の上限。一覧が1組にまとめる案の上限と同じ。 */
+export const PROJECT_COVERS_MAX=PROPOSAL_GROUP_MAX;
 export interface ProjectDecisionResult { candidateId:string; projectId:string; decisionId:string; deduped:boolean }
 const candidateId = z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), digest=z.string().regex(/^[a-f0-9]{64}$/);
 const candidateSchema=z.object({ schema_version:z.literal(1),id:candidateId,project_id:z.string().regex(/^project-[0-9a-hjkmnp-tv-z]{26}$/),root_input_id:inputIdSchema,evidence_ids:z.array(inputIdSchema).min(1).max(33),evidence_hash:digest,proposal:projectProposalSchema,generated_at:z.string().datetime({offset:true}),generated_by:z.object({model:z.string(),prompt_version:z.literal(1)}).strict(),verified:z.literal(false),generated_hash:z.string() }).strict();
@@ -78,18 +78,26 @@ export async function saveProjectCandidateLocked(config:HubConfig,vault:Vault,ch
 }
 /** 代表の案とまとめて判断された案の、判断の内容。 */
 export interface ProjectCoverage { by:string; decisionId:string; action:'approve'|'reject'; candidateHash:string }
+export interface ProjectCoverageIndex {
+ /** 代表の案とまとめて判断された案（キーはまとめられた案のID）。 */
+ covered:Map<string,ProjectCoverage>;
+ /** 読めない判断記録があるか。その記録がどの案をまとめて判断したかは確かめられない。 */
+ unreadable:boolean;
+}
+/** 読めない判断記録があるときに、判断前の案へ付ける注意。 */
+export const UNREADABLE_DECISION_WARNING='読めない判断記録があるため、判断済みの案かどうかを確認できません。Macでdoctorを実行して確認してください。';
 /**
- * 判断記録から、代表の案とまとめて判断された案を集める（キーはまとめられた案のID）。
- * 読めない判断記録は何もまとめていないものとして扱う（その記録の案は一覧で要確認になる）。
+ * 判断記録から、代表の案とまとめて判断された案を集める。
+ * 読めない判断記録があれば、その記録の案だけでなく、まとめて判断済みかもしれない案も確認待ちへ戻さない（unreadable）。
  */
-export async function readProjectCoverage(vault:Vault):Promise<Map<string,ProjectCoverage>>{
- const covered=new Map<string,ProjectCoverage>();
+export async function readProjectCoverage(vault:Vault):Promise<ProjectCoverageIndex>{
+ const covered=new Map<string,ProjectCoverage>();let unreadable=false;
  for(const path of await vault.files('90_system/project-approvals')){
   const match=/^90_system\/project-approvals\/PAPR-([0-9A-HJKMNP-TV-Z]{26})\.json$/.exec(path);if(!match)continue;
-  let record:Decision|undefined;try{record=await readDecision(vault,`PCAN-${match[1]}`);}catch{continue;}
+  let record:Decision|undefined;try{record=await readDecision(vault,`PCAN-${match[1]}`);}catch{unreadable=true;continue;}
   for(const c of record?.covers??[])if(!covered.has(c.candidate_id))covered.set(c.candidate_id,{by:record!.candidate_id,decisionId:record!.id,action:record!.action,candidateHash:c.candidate_hash});
  }
- return covered;
+ return{covered,unreadable};
 }
 /** 確認待ちの案のうち同じ対象を指すものをまとめ、代表の案（duplicates）とまとめられた案（duplicateOf）に印を付ける。 */
 export function markProposalGroups(items:ProjectCandidate[]):ProjectCandidate[]{
@@ -109,15 +117,16 @@ export async function listProjectCandidates(config:HubConfig):Promise<ProjectCan
  }return markProposalGroups(items);
 }
 /** coverageは、まとめて判断された案の一覧。何件も続けて読むときは、readProjectCoverageの結果を渡して判断記録の読み直しを避ける。 */
-export async function readProjectCandidate(config:HubConfig,id:string,coverage?:Map<string,ProjectCoverage>):Promise<ProjectCandidate>{
+export async function readProjectCandidate(config:HubConfig,id:string,coverage?:ProjectCoverageIndex):Promise<ProjectCandidate>{
  candidateId.parse(id);const vault=new Vault(config),chains=await readCorrectionChains(config),projects=await readProjects(config),path=candidatePath(id);
   const raw=(await vault.read(path))!,meta=parseCandidate(path,raw),confirmationRaw=await vault.read(confirmationPath(meta.id));
   const confirmation=confirmationRaw?confirmationSchema.parse(JSON.parse(confirmationRaw)):undefined;
   if(confirmation&&(confirmation.candidate_id!==meta.id||confirmation.candidate_hash!==hash(raw)))throw new Error('候補と確認情報が一致しません');
   const decision=await readDecision(vault,meta.id),chain=chains.find(c=>c.root.id===meta.root_input_id);
   // 自分の判断記録がなくても、代表の案とまとめて判断されていれば、その判断を自分の状態にする。
-  const covered=decision?undefined:(coverage??await readProjectCoverage(vault)).get(meta.id);
-  const stale=!confirmation||!chain||chain.evidenceHash!==meta.evidence_hash||JSON.stringify(meta.evidence_ids)!==JSON.stringify([chain.root,...chain.revisions].map(i=>i.id))||overlaps(meta.proposal,projects);
+  const index=decision?undefined:coverage??await readProjectCoverage(vault),covered=index?.covered.get(meta.id);
+  // 読めない判断記録がある間は、まとめて判断済みの案かもしれないので、確認待ちには戻さない。
+  const stale=!confirmation||!chain||chain.evidenceHash!==meta.evidence_hash||JSON.stringify(meta.evidence_ids)!==JSON.stringify([chain.root,...chain.revisions].map(i=>i.id))||overlaps(meta.proposal,projects)||index?.unreadable===true;
   return{candidateId:meta.id,projectId:meta.project_id,path,rootInputId:meta.root_input_id,evidenceHash:meta.evidence_hash,candidateHash:hash(raw),confirmationToken:confirmation?.confirmation_token??'',proposal:meta.proposal,generatedAt:meta.generated_at,status:decision?decision.action==='approve'?'approved':'rejected':covered?covered.action==='approve'?'approved':'rejected':stale?'stale':'pending',...(covered?{coveredBy:covered.by}:{}),...(decision?.covers?{duplicates:decision.covers.map(c=>c.candidate_id)}:{})};
 }
 export {readDecision as readProjectDecision};
@@ -127,17 +136,22 @@ export async function decideProject(config:HubConfig,request:ProjectDecisionRequ
  if(covers.some(c=>c.candidate_id===request.candidateId)||new Set(covers.map(c=>c.candidate_id)).size!==covers.length)throw new Error('まとめて判断する案の指定が重複しています');
  return vault.withLock(async()=>{
   const previous=await readDecision(vault,request.candidateId);
-  if(previous){if(previous.action!==request.action||previous.candidate_hash!==request.expectedHash||previous.confirmation_hash!==hash(request.confirmationToken)||JSON.stringify(previous.covers??[])!==JSON.stringify(covers))throw new Error('この候補には異なる承認・却下記録があります');await materialize(vault,previous);const meta=parseCandidate(candidatePath(request.candidateId),previous.candidate_snapshot);return{candidateId:request.candidateId,projectId:meta.project_id,decisionId:previous.id,deduped:true};}
-  const candidate=await readProjectCandidate(config,request.candidateId);
+  // まとめる案は、並びが違っても同じ組み合わせなら同じ判断として扱う。
+  const sameCovers=(recorded:typeof covers)=>recorded.length===covers.length&&recorded.every(r=>covers.some(c=>c.candidate_id===r.candidate_id&&c.candidate_hash===r.candidate_hash));
+  if(previous){if(previous.action!==request.action||previous.candidate_hash!==request.expectedHash||previous.confirmation_hash!==hash(request.confirmationToken)||!sameCovers(previous.covers??[]))throw new Error('この候補には異なる承認・却下記録があります');await materialize(vault,previous);const meta=parseCandidate(candidatePath(request.candidateId),previous.candidate_snapshot);return{candidateId:request.candidateId,projectId:meta.project_id,decisionId:previous.id,deduped:true};}
+  const coverage=await readProjectCoverage(vault);
+  // 読めない判断記録がある間は、この案がまとめて判断済みかどうかを確かめられない。
+  if(coverage.unreadable)throw new Error('読めない判断記録があるため、プロジェクト案の判断を受け付けられません。doctorで確認してください');
+  const candidate=await readProjectCandidate(config,request.candidateId,coverage);
   if(!candidate||candidate.status!=='pending')throw new Error('候補が古いか確認情報が不足しています。同期後に最新候補を確認してください');
   if(candidate.candidateHash!==request.expectedHash||candidate.confirmationToken!==request.confirmationToken)throw new Error('表示した候補と承認の確認情報が一致しません');
   const raw=(await vault.read(candidate.path))!;
   if(hash(raw)!==request.expectedHash)throw new Error('候補の内容が変更されました');
-  if(covers.length){
-   // まとめられるのは、いまも確認待ちで、この案と同じ組にあり、本人が確認したときから内容が変わっていない案だけ。
-   const all=await listProjectCandidates(config),self=all.find(c=>c.candidateId===candidate.candidateId)!,lead=self.duplicateOf??self.candidateId;
-   const group=new Map(all.filter(c=>c.status==='pending'&&c.candidateId!==self.candidateId&&(c.candidateId===lead||c.duplicateOf===lead)).map(c=>[c.candidateId,c]));
-   if(covers.some(c=>group.get(c.candidate_id)?.candidateHash!==c.candidate_hash))throw new Error('まとめて判断する案が古いか、同じ対象の案ではありません。同期後に最新の一覧を確認してください');
+  // まとめられるのは、いまも確認待ちで、この案と同じ対象を指し、本人が確認したときから内容が変わっていない案だけ。
+  // 添えられた案だけを読む。ほかの候補が読めなくても、この判断を止めない。
+  for(const c of covers){
+   let other:ProjectCandidate|undefined;try{other=await readProjectCandidate(config,c.candidate_id,coverage);}catch{/* 読めない案はまとめられない。 */}
+   if(other?.status!=='pending'||other.candidateHash!==c.candidate_hash||!relatedProposals(candidate.proposal,other.proposal))throw new Error('まとめて判断する案が古いか、同じ対象の案ではありません。同期後に最新の一覧を確認してください');
   }
   const definition={id:candidate.projectId,title:candidate.proposal.title,aliases:candidate.proposal.aliases,keywords:candidate.proposal.keywords,status:'active'};
   const record=decisionSchema.parse({schema_version:1,id:`PAPR-${candidate.candidateId.slice(5)}`,candidate_id:candidate.candidateId,candidate_hash:candidate.candidateHash,confirmation_hash:hash(request.confirmationToken),action:request.action,source:request.source,source_event_id:request.sourceEventId,decided_at:new Date().toISOString(),candidate_snapshot:raw,...(covers.length?{covers}:{}),project_text:markdown(definition,`# ${definition.title}\n\n利用者がプロジェクト候補を明示承認した定義です。\n\n理由: ${candidate.proposal.rationale}\n候補: [${candidate.candidateId}](../../${candidate.path})\n根拠ID: ${candidate.rootInputId}\n`)});

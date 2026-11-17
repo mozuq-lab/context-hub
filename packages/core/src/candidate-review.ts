@@ -3,7 +3,7 @@ import type { HubConfig } from './types.js';
 import {unlink} from 'node:fs/promises';
 import {Vault,hash,parseMarkdown} from './storage.js';
 import {readCorrectionChains} from './corrections.js';
-import {readProjectCandidate,readProjectCoverage,readProjectDecision,type ProjectCoverage} from './project-proposals.js';
+import {readProjectCandidate,readProjectCoverage,readProjectDecision,UNREADABLE_DECISION_WARNING,type ProjectCoverageIndex} from './project-proposals.js';
 import {groupProposals} from './project-proposal-groups.js';
 import {readKnowledgeCandidate,reviewRead,unavailableCandidate} from './knowledge-candidates.js';
 import {projectProposalSchema} from './llm.js';
@@ -23,7 +23,7 @@ export interface ReviewCandidate {
   dependencies:Record<string,string|null>;
 }
 export interface ReviewIndex {schema_version:1;generated_at:string;projects:ReviewProject[];items:ReviewCandidate[]}
-async function projectReview(config:HubConfig,id:string,coverage:Map<string,ProjectCoverage>):Promise<ReviewCandidate>{
+async function projectReview(config:HubConfig,id:string,coverage:ProjectCoverageIndex):Promise<ReviewCandidate>{
  const vault=new Vault(config),path=`90_system/project-candidates/${id}.md`,item=unavailableCandidate(id,path);
  const depend=async(p:string)=>{const raw=await reviewRead(vault,p);item.dependencies[p]=raw===undefined?null:hash(raw);return raw;};
  try{
@@ -31,13 +31,13 @@ async function projectReview(config:HubConfig,id:string,coverage:Map<string,Proj
   await depend(decisionPath);const decision=await readProjectDecision(vault,id);
   const raw=decision?.candidate_snapshot??current;if(!raw)throw new Error('候補がありません');
   const meta=parseMarkdown(raw).meta;
-  const candidate=decision?undefined:await readProjectCandidate(config,id,coverage),covered=decision?undefined:coverage.get(id);
+  const candidate=decision?undefined:await readProjectCandidate(config,id,coverage),covered=decision?undefined:coverage.covered.get(id);
   const proposal=decision?projectProposalSchema.parse(meta.proposal):candidate!.proposal;
   Object.assign(item,{kind:'project',aliases:proposal.aliases,keywords:proposal.keywords,title:proposal.title,claim:proposal.title,rationale:proposal.rationale,inputIds:meta.evidence_ids,candidateHash:hash(raw),status:decision?(decision.action==='approve'?'approved':'rejected'):candidate!.status,warnings:[],generatedAt:meta.generated_at,confirmationToken:covered?undefined:candidate?.confirmationToken});
   await depend(`90_system/project-confirmations/${id}.json`);
   const chain=(await readCorrectionChains(config)).find(c=>c.root.id===meta.root_input_id);
   if(chain){for(const i of [chain.root,...chain.revisions])await depend(i.path);if(chain.evidenceHash!==meta.evidence_hash)item.warnings.push('根拠に新しい訂正があります。');}
-  if(item.status==='stale')item.warnings.push('候補が古いか、確認情報の同期が不足しています。');
+  if(item.status==='stale')item.warnings.push(coverage.unreadable?UNREADABLE_DECISION_WARNING:'候補が古いか、確認情報の同期が不足しています。');
   // 承認の判断記録が、プロジェクト定義へ反映済みかを確かめる。
   const reflect=async(record:NonNullable<typeof decision>,projectId:unknown)=>{
    if(record.action!=='approve'){item.reflected=true;return;}

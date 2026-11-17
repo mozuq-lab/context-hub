@@ -37,10 +37,14 @@ const HOME_CANDIDATES = 10;
 const MIN_GRAMS = 4;
 
 export interface IdeaDoc { id: string; path: string; summary: string; occurredAt: string; hash: string }
-const evidenceLine = /^(?:入力|出典|発生日時|受信日時|性質|帰属候補): /;
-/** 生成されたアイデアの本文から、見出しと出典の行を除いた要約を取り出す。 */
+/**
+ * 生成されたアイデアの本文から要約を取り出す。本文は、見出し、要約、出典（「入力: [IN-…」から始まる行より後）の順に並ぶ。
+ * 位置で読む。短いメモは本人の言葉がそのまま要約になるので、見出しや出典の行のように書かれた要約も落とさない。
+ */
 export function ideaSummary(text: string): string {
-  return text.split(/\r?\n/).filter(line => !/^#\s/.test(line) && !evidenceLine.test(line)).join('\n').trim();
+  const lines = text.split(/\r?\n/), first = lines.findIndex(line => line.trim() !== '');
+  const start = first >= 0 && /^#\s/.test(lines[first]!) ? first + 1 : 0, evidence = lines.findLastIndex(line => /^入力: \[IN-/.test(line));
+  return lines.slice(start, evidence >= start ? evidence : lines.length).join('\n').trim();
 }
 /** 分類を取り消していない、整理済みのアイデア。 */
 export async function readIdeas(vault: Vault): Promise<IdeaDoc[]> {

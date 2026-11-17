@@ -30,6 +30,11 @@ test('似ている度合いは記号・URL・大文字小文字の違いを無�
   expect(ideaSimilarity('ContextHubを英語化 https://example.com/a', 'contexthubを英語化 https://example.com/b')).toBe(1);
   expect(ideaSimilarity('猫', '猫')).toBe(0);
   expect(ideaSummary('# アイデア（AI生成・未検証）\n\n本文\n\n入力: [IN-1](x)\n出典: cli\n帰属候補: なし\n')).toBe('本文');
+  // 見出しや出典の行に見える本人の言葉も、要約として読む（短いメモは本人の言葉をそのまま要約にするため）。
+  const body = (summary: string) => `# アイデア（AI生成・未検証）\n\n${summary}\n\n入力: [IN-01JZ0000000000000000000000](../00_inbox/x.md)\n出典: cli\n発生日時: 2026-11-01 09:00 Asia/Tokyo\n受信日時: 2026-11-01 09:00 Asia/Tokyo\n性質: user-note（未検証）\n\n帰属候補: なし\n`;
+  expect(ideaSummary(body('# 見出しのように書いたメモ'))).toBe('# 見出しのように書いたメモ');
+  expect(ideaSummary(body('出典: 新聞で読んだ話を試したい'))).toBe('出典: 新聞で読んだ話を試したい');
+  expect(ideaSummary(body('1行目\n# 2行目\n入力: 3行目'))).toBe('1行目\n# 2行目\n入力: 3行目');
   const docs = [{ id: 'IDEA-B', summary: 'あいうえおかきくけこ', path: '', occurredAt: '', hash: '' }, { id: 'IDEA-A', summary: 'あいうえおかきくけ', path: '', occurredAt: '', hash: '' }, { id: 'IDEA-C', summary: 'さしすせそたちつてと', path: '', occurredAt: '', hash: '' }];
   expect(similarPairs(docs)).toEqual([{ ideas: ['IDEA-A', 'IDEA-B'], score: 0.941 }]);
 });

@@ -12,6 +12,7 @@ import { SHORT_MEMO_CHARS, shortMemoText } from '../src/short-memo.js';
 import { addProject } from '../src/projects.js';
 import { readNowItems, setItemResolution } from '../src/item-resolutions.js';
 import { readRereads } from '../src/item-rereads.js';
+import { readIdeas } from '../src/idea-links.js';
 import type { HubConfig, Input, OrganizeResult } from '../src/types.js';
 
 const roots: string[] = [];
@@ -45,6 +46,14 @@ describe('短いメモは言い換えない', () => {
     const idea = parseMarkdown((await vault.read(`20_ideas/IDEA-${saved.inputId.slice(3)}.md`))!).text;
     expect(idea).toContain('\n\n朝に散歩すると 考えがまとまる\n\n');
     expect(idea).not.toContain('モデルが言い換えた要約');
+  });
+
+  test('見出しや出典の行のように書いた短いメモも、アイデアの要約として読める', async () => {
+    const { config, vault } = await setup();
+    const texts = ['# 買い物の記録を1か所にまとめる仕組み', '出典: 新聞の連載で読んだ片付けの方法を試す'];
+    for (const [i, text] of texts.entries()) await capture(config, { source: 'cli', text, occurredAt: `2026-11-01T1${i}:00:00+09:00` });
+    await organize(config, new MockLlm([paraphrase(), paraphrase()]));
+    expect((await readIdeas(vault)).map(idea => idea.summary).sort()).toEqual([...texts].sort());
   });
 
   test('長いメモ・作業要約・訂正のあるメモは、モデルの要約を使う', async () => {
