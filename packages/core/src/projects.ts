@@ -50,7 +50,8 @@ export async function addProject(config: HubConfig, value: Pick<Project, 'id' | 
     return project;
   });
 }
-const normalizeName=(s:string)=>s.normalize('NFKC').trim().toLocaleLowerCase();
+/** 名前・別名を比べるための正規化（全角・半角、大文字・小文字、前後の空白の違いを無視する）。 */
+export const normalizeName=(s:string)=>s.normalize('NFKC').trim().toLocaleLowerCase();
 /** 名前・別名が既存のプロジェクトのID・名前・別名と重なるか。重なった最初のプロジェクトを返す。 */
 export function overlappingProject(names:{title:string;aliases:string[]},projects:Project[]):Project|undefined{
   const wanted=new Set([names.title,...names.aliases].map(normalizeName).filter(Boolean));

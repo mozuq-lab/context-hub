@@ -220,7 +220,8 @@ test('「読み違い」で外したメモを理由と一言を添えて読み�
 });
 
 test('読み直した項目をさらに外しても、次の読み直しまで今の読み直しを使い、外した項目はどちらも戻せる', async () => {
-  const { config, vault, inputId, text } = await memoFixture();
+  // 短いメモの要約は本人の言葉のままで読み直しても変わらないため、要約を作る長さのメモで確かめる。
+  const { config, vault, inputId, text } = await memoFixture(`集約ツールの配布はストア経由でよいだろうか？${'審査の手間と更新の速さを比べて決めたい。'.repeat(5)}`);
   const first = (await readNowItems(vault, 'hub'))!.items[0]!.key;
   await setItemResolution(config, { projectId: 'hub', itemKey: first, action: 'exclude', reason: 'misread', source: 'cli' });
   // 読み直しで、未解決の本文が変わる。

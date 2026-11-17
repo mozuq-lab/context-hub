@@ -7,7 +7,7 @@ import { parseInput, eventMarker } from './capture.js';
 import { readProjects,inspectProjects,describeProjectIssue,mergeIssues } from './projects.js';
 import { readProjectMerges } from './project-merges.js';
 import { readEffectiveInputs } from './effective-inputs.js';
-import { listProjectCandidates,recoverProjectApprovalsLocked } from './project-proposals.js';
+import { listProjectCandidates,readProjectCoverage,recoverProjectApprovalsLocked } from './project-proposals.js';
 import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths } from './intake.js';
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
@@ -52,6 +52,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { await readItemResolutions(vault); } catch (error) { issues.push(error instanceof Error && error.message.startsWith('解決記録') ? error.message : '完了・解決・誤りとして外した記録を走査できません'); }
   try { for (const path of (await readRereads(vault)).problems) issues.push(`読み直しの記録が不正です（元の解釈で表示し、次の実行で読み直します）: ${path}`); } catch { issues.push('読み直しの記録を走査できません'); }
   try { await readEffectiveInputs(config); } catch { issues.push(definitionsBroken?afterDefinitions('訂正履歴・有効解釈と根拠を確認できません'):'訂正履歴・有効解釈と根拠が不正です'); }
+  // 読めない判断記録は、直す対象が分かるようにパスを示す（読めない間は、プロジェクト案の採用・却下を受け付けない）。
+  try { for(const path of (await readProjectCoverage(vault)).unreadable)issues.push(`プロジェクトの判断記録を読めません: ${path}`); } catch { /* 走査できない場合は、次の検査で報告する。 */ }
   try { await listProjectCandidates(config);if(await recoverProjectApprovalsLocked(config,vault,Number.MAX_SAFE_INTEGER,true))issues.push('プロジェクト承認の回復待ちがあります'); } catch { issues.push(definitionsBroken?afterDefinitions('プロジェクト候補・確認・承認記録を確認できません'):'プロジェクト候補・確認・承認記録が不正です'); }
   try {
     const acks=await readIntakeReceipts(config);

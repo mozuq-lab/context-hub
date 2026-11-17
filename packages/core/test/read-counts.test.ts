@@ -17,7 +17,8 @@ const N=12,K=6;
 const withKnowledge=(i:number):OrganizeResult=>({category:'unclassified',summary:`要約${i}`,project_candidates:[],next_action_suggestions:[],extracted:{current:[],next:[],open:[]},knowledge_candidate:{kind:'knowledge',claim:`主張${i}`,rationale:''},new_project_hint:null});
 async function filled(){
  const{config,vault}=await workflowSetup(roots);config.organize.maxItemsPerRun=50;
- for(let i=0;i<N;i++)await capture(config,{source:'cli',occurredAt:`2026-10-01T${String(i).padStart(2,'0')}:00:00Z`,text:`メモ${i}`});
+ // 短いメモからは恒久知識の候補を作らないため、候補を作るメモは長くする。
+ for(let i=0;i<N;i++)await capture(config,{source:'cli',occurredAt:`2026-10-01T${String(i).padStart(2,'0')}:00:00Z`,text:`メモ${i}: ${'検証で分かった事実を残す。'.repeat(10)}`});
  await organize(config,new MockLlm(Array.from({length:K},(_,i)=>withKnowledge(i))),{limit:K});await organize(config,new MockLlm());
  return{config,vault};
 }

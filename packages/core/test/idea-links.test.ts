@@ -30,8 +30,29 @@ test('似ている度合いは記号・URL・大文字小文字の違いを無�
   expect(ideaSimilarity('ContextHubを英語化 https://example.com/a', 'contexthubを英語化 https://example.com/b')).toBe(1);
   expect(ideaSimilarity('猫', '猫')).toBe(0);
   expect(ideaSummary('# アイデア（AI生成・未検証）\n\n本文\n\n入力: [IN-1](x)\n出典: cli\n帰属候補: なし\n')).toBe('本文');
+  // 見出しや出典の行に見える本人の言葉も、要約として読む（短いメモは本人の言葉をそのまま要約にするため）。
+  const body = (summary: string) => `# アイデア（AI生成・未検証）\n\n${summary}\n\n入力: [IN-01JZ0000000000000000000000](../00_inbox/x.md)\n出典: cli\n発生日時: 2026-11-01 09:00 Asia/Tokyo\n受信日時: 2026-11-01 09:00 Asia/Tokyo\n性質: user-note（未検証）\n\n帰属候補: なし\n`;
+  expect(ideaSummary(body('# 見出しのように書いたメモ'))).toBe('# 見出しのように書いたメモ');
+  expect(ideaSummary(body('出典: 新聞で読んだ話を試したい'))).toBe('出典: 新聞で読んだ話を試したい');
+  expect(ideaSummary(body('1行目\n# 2行目\n入力: 3行目'))).toBe('1行目\n# 2行目\n入力: 3行目');
+  // 出典は、本文の最後の「入力: [IN-…」から始まる。要約の中の同じ形の行は要約として読む。
+  expect(ideaSummary(body('入力: [IN-01JZ0000000000000000000000](x) を見直す'))).toBe('入力: [IN-01JZ0000000000000000000000](x) を見直す');
+  expect(ideaSummary('# アイデア（AI生成・未検証）\r\n\r\n入力: 手で書いた行\r\n')).toBe('入力: 手で書いた行');
   const docs = [{ id: 'IDEA-B', summary: 'あいうえおかきくけこ', path: '', occurredAt: '', hash: '' }, { id: 'IDEA-A', summary: 'あいうえおかきくけ', path: '', occurredAt: '', hash: '' }, { id: 'IDEA-C', summary: 'さしすせそたちつてと', path: '', occurredAt: '', hash: '' }];
   expect(similarPairs(docs)).toEqual([{ ideas: ['IDEA-A', 'IDEA-B'], score: 0.941 }]);
+});
+
+test('HOMEの似ているアイデアは、メモに含まれる記法でリンクを作らせない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  const idea = { category: 'idea' as const, summary: 'AIの要約', project_candidates: [], next_action_suggestions: [], extracted: { current: [], next: [], open: [] }, knowledge_candidate: null, new_project_hint: null };
+  // 短いメモは本人の言葉がアイデアの要約になる。「\」で角括弧の無効化を打ち消す書き方。
+  await capture(config, { source: 'cli', text: '献立を週ごとに決める\\](https://example.com/e) [続き', occurredAt: '2026-11-01T00:00:00Z' });
+  await capture(config, { source: 'cli', text: '献立を週ごとに決める仕組みを作る', occurredAt: '2026-11-02T00:00:00Z' });
+  await organize(config, new MockLlm([idea, idea]));
+  await rebuildDashboard(config);
+  const home = (await vault.read('HOME.md'))!;
+  expect(home).toContain('## 似ているアイデア（未確認1件）');
+  expect(home).toContain('[献立を週ごとに決める\\\\\\](https://example.com/e) \\[続き](20_ideas/IDEA-');
 });
 
 test('似ているアイデアをHOMEと索引に出し、アプリからの依頼で束ね、検索では1件にまとめる', async () => {

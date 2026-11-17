@@ -29,7 +29,8 @@ test('HOMEに進行中のプロジェクトの次の一手を最近動いた順�
  await setItemResolution(config,{projectId:'hub',itemKey:first.key,action:'resolve',source:'cli'});
  await rebuildDashboard(config,{now:new Date('2026-11-03T00:00:00Z')});
  const home=(await vault.read('HOME.md'))!,start=home.indexOf('## 次の一手（進行中のプロジェクト）'),section=home.slice(start,home.indexOf('\n## ',start+1));
- expect(start).toBeGreaterThan(home.indexOf('## プロジェクト一覧'));
+ // 行動につながる次の一手は、プロジェクトの一覧より前に置く。
+ expect(start).toBeGreaterThan(0);expect(start).toBeLessThan(home.indexOf('## プロジェクト一覧'));
  expect(section).toContain('プロジェクトごとに3件まで');
  expect(section.indexOf('[別のアプリ](10_projects/side/NOW.md)')).toBeLessThan(section.indexOf('[集約ツール](10_projects/hub/NOW.md)'));
  expect(section).toContain('  - 設定画面を作る');
@@ -63,7 +64,7 @@ test('進行中のプロジェクトがなければ次の一手の節を出さ�
  await addProject(config,{id:'garden',title:'家庭菜園'});await rebuildDashboard(config);
  expect(await vault.read('HOME.md')).toContain('## 次の一手（進行中のプロジェクト）\n進行中のプロジェクトに次の一手はありません。');
 });
-test('HOMEの受領と整理状況は、未整理・失敗と直近の整理済みだけを並べ、残りは件数で示す',async()=>{
+test('HOMEの受領と整理状況は、件数を1行で示し、未整理・失敗と直近の整理済みだけを並べる',async()=>{
  const{config,vault}=await workflowSetup(roots);config.organize.maxItemsPerRun=100;
  const{capture}=await import('../src/capture.js'),{organize}=await import('../src/organize.js'),{MockLlm}=await import('../src/llm.js');
  const ids:string[]=[];for(let i=0;i<30;i++)ids.push((await capture(config,{source:'cli',occurredAt:new Date(Date.UTC(2026,9,1,i)).toISOString(),text:`メモ${i}`})).inputId);
@@ -72,7 +73,8 @@ test('HOMEの受領と整理状況は、未整理・失敗と直近の整理済�
  const waiting=(await capture(config,{source:'cli',occurredAt:'2026-09-02T00:00:00Z',text:'整理待ちのメモ'})).inputId;
  await rebuildDashboard(config);const home=(await vault.read('HOME.md'))!,section=home.split('## 受領と整理状況')[1]!.split('\n## ')[0]!;
  expect(section).toContain(`[${failed}]`);expect(section).toContain('整理失敗');expect(section).toContain(`[${waiting}]`);expect(section).toContain('整理待ち');
- // 整理済みは新しい20件だけを並べ、古い10件は件数で示す。
- expect(section).toContain(`[${ids[29]}]`);expect(section).toContain(`[${ids[10]}]`);expect(section).not.toContain(`[${ids[9]}]`);
- expect(section).toContain('ほかに整理済み10件');
+ expect(section).toContain('受付ファイル 0件（受付待ち・内容変更 0件） / 入力 32件（整理待ち 1件・整理失敗 1件）');
+ // 整理済みは新しい5件だけを並べ、古い25件は件数で示す。
+ expect(section).toContain(`[${ids[29]}]`);expect(section).toContain(`[${ids[25]}]`);expect(section).not.toContain(`[${ids[24]}]`);
+ expect(section).toContain('ほかに整理済み25件');
 });

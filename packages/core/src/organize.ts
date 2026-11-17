@@ -18,6 +18,7 @@ import {recoverKnowledgeApprovalsLocked} from './approvals.js';
 import { PromptTooLargeError } from './infer.js';
 import { candidateProjects } from './project-status.js';
 import { completeRedacted, redactText, secretSettings } from './secrets.js';
+import { shortMemoText } from './short-memo.js';
 
 export interface OrganizeOptions { limit?: number; dryRun?: boolean; retryFailed?: boolean; id?: string }
 export interface OrganizeRunResult { processed: number; failed: number; skipped: number; conflicts: string[]; dryRun: boolean; inputIds: string[]; recovered?:number; reassociated?:number; /** 本人が誤りとして外した項目の入力を読み直した件数。 */ reread?:number }
@@ -68,6 +69,10 @@ async function classify(config: HubConfig, llm: LlmClient, input: Input, project
         for (const c of result.project_candidates) { const id = c.id === owner ? named : c.id; byId.set(id, Math.max(byId.get(id) ?? 0, c.confidence)); }
         result.project_candidates = [...byId].map(([id, confidence]) => ({ id, confidence }));
       }
+      // 訂正のない短いメモは、モデルの言い換えではなく本人の言葉（モデルが見たのと同じ伏せ字の本文）を要約にする。
+      // 短いメモ1件を言い直しただけの恒久知識の候補は作らない。本人が明言した判断・好みの候補は残す。
+      const own = shortMemoText(grounding);
+      if (own !== undefined) { result.summary = own; if (result.knowledge_candidate?.kind === 'knowledge') result.knowledge_candidate = null; }
       return typeof completion.model === 'string' && completion.model ? { result, model: completion.model } : { result };
     }
     catch (error) { if (!(error instanceof InvalidOrganizeOutput) || attempt === 1) throw error; }

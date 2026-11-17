@@ -9,13 +9,15 @@ import { parseMarkdown } from './storage.js';
 import { newProjectIdSchema, projectCreateFieldsSchema } from './project-creations.js';
 import { resolvableTargetSchema } from './conflicts.js';
 import { ideaIdSchema, ideaLinkActionSchema } from './idea-links.js';
+import { PROJECT_COVERS_MAX } from './project-proposals.js';
 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
 const base = { schema_version: z.literal(1), request_id: requestIdSchema, source: z.string().min(1).max(200), occurred_at: intakeTimestamp };
 const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), text: z.string() }).strict();
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
-const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), confirmed: z.literal(true), text: z.string() }).strict();
+// cover_idsは、同じ対象の案として同じ判断にまとめる確認待ちの案。cover_hashesは同じ順で、本人が確認した内容のハッシュ。本体が同じ組の案かを検証する。
+const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), cover_ids: z.array(z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), cover_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), confirmed: z.literal(true), text: z.string() }).strict().refine(v => (v.cover_ids?.length ?? 0) === (v.cover_hashes?.length ?? 0), 'まとめる案のIDとハッシュの数が一致しません');
 const knowledgeBase={...base,candidate_id:z.string().regex(/^CAN-[0-9A-HJKMNP-TV-Z]{26}$/),candidate_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()};
 const knowledgeApprove=z.union([
  z.object({...knowledgeBase,operation:z.literal('knowledge-approve'),scope:z.literal('global')}).strict(),
