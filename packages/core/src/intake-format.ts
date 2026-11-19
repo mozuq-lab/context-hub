@@ -10,6 +10,7 @@ import { newProjectIdSchema, projectCreateFieldsSchema } from './project-creatio
 import { resolvableTargetSchema } from './conflicts.js';
 import { ideaIdSchema, ideaLinkActionSchema } from './idea-links.js';
 import { PROJECT_COVERS_MAX } from './project-proposals.js';
+import { insightItemKeySchema, insightReactionValueSchema, insightRunIdSchema } from './insight-feedback.js';
 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
@@ -41,7 +42,9 @@ const conflictResolve=z.object({...base,operation:z.literal('conflict-resolve'),
 const ideaLink=z.object({...base,operation:z.literal('idea-link'),idea_ids:z.tuple([ideaIdSchema,ideaIdSchema]).refine(([a,b])=>a!==b,'異なる2件のアイデアを指定してください'),idea_hashes:z.tuple([z.string().regex(/^[a-f0-9]{64}$/),z.string().regex(/^[a-f0-9]{64}$/)]),action:ideaLinkActionSchema,confirmed:z.literal(true),text:z.string()}).strict();
 // 統合元（project_id）を統合先（into_id）へまとめる、またはその統合を取り消す。ハッシュは確認した時点の2つのproject.mdのもの。
 const projectMerge=z.object({...base,operation:z.enum(['project-merge','project-unmerge']),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),into_id:projectIdSchema,into_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink]);
+// 今週の気づきの項目への反応。noneは前の反応を外す。問いへの答えは、反応ではなくmeta付きのcaptureで送る。
+const insightReaction=z.object({...base,operation:z.literal('insight-reaction'),run_id:insightRunIdSchema,item_key:insightItemKeySchema,reaction:insightReactionValueSchema,confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

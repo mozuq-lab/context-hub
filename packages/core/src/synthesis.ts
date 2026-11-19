@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { z } from 'zod';
 import { readEffectiveInputs } from './effective-inputs.js';
+import { insightItemRef, readInsightFeedback } from './insight-feedback.js';
 import { PromptTooLargeError } from './infer.js';
 import { logOperation } from './logger.js';
 import { readProjects } from './projects.js';
@@ -159,11 +160,17 @@ async function prepare(config: HubConfig, vault: Vault, now: Date, options: Synt
     : state.problems.length ? 'record-problem' as const
     : !last || (options.retryFailed && last.status === 'failed' && state.failedStreak < SYNTHESIS_MAX_ATTEMPTS) || now.getTime() >= Date.parse(state.nextDueAt!) ? undefined
     : 'not-due' as const;
-  const shown = state.lastWithItems?.items ?? [];
+  const shownRun = state.lastWithItems, shown = shownRun?.items ?? [];
   const previousKeys = new Set(shown.map(i => synthesisRepeatKey(i.section, i.sources.map(s => ({ inputId: s.input_id, latestId: s.latest_id })))));
   if (blocked && !always) return { state, skip: blocked, previousKeys };
-  const brief = buildSynthesisBrief(config, await readEffectiveInputs(config), await readProjects(config), {
-    now, since: state.lastSuccess?.period.until, previous: shown.map(i => ({ section: i.section, text: i.text, sourceIds: i.sources.map(s => s.input_id) })),
+  // 前回の項目に、本人の反応と答えの有無を添える（的外れと言われた方向を避け、答えた問いを聞き直さないため）。
+  const units = await readEffectiveInputs(config), feedback = await readInsightFeedback(vault, units);
+  const brief = buildSynthesisBrief(config, units, await readProjects(config), {
+    now, since: state.lastSuccess?.period.until,
+    previous: shown.map(i => {
+      const ref = insightItemRef(shownRun!.id, i.key), reaction = feedback.reactions.get(ref);
+      return { section: i.section, text: i.text, sourceIds: i.sources.map(s => s.input_id), ...(reaction ? { reaction } : {}), ...(feedback.answers.get(ref)?.length ? { answered: true } : {}) };
+    }),
   });
   const skip = blocked ?? (!brief.plan.refs.size ? 'no-memos' as const : !options.force && state.lastSuccess && brief.plan.newMemos === 0 ? 'no-new-input' as const : undefined);
   return { state, skip, brief, previousKeys };

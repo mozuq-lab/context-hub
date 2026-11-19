@@ -1,3 +1,4 @@
+import { ulid } from 'ulid';
 import { z } from 'zod';
 import { listText } from './markdown-text.js';
 import { Vault } from './storage.js';
@@ -8,6 +9,10 @@ import {
   type SynthesisErrorKind, type SynthesisRun, type SynthesisState,
 } from './synthesis.js';
 import { SYNTHESIS_ITEMS_PER_SECTION, SYNTHESIS_SECTIONS, SYNTHESIS_SECTION_LABELS } from './synthesis-prompt.js';
+import {
+  insightFeedbackTallies, insightItemKeySchema, insightItemRef, insightReactionPath, insightRunIdSchema, insightReactionValueSchema, readInsightFeedback, readInsightReactions,
+  INSIGHT_ANSWERS_MAX, INSIGHT_TALLY_RUNS, type InsightFeedback, type InsightReaction, type InsightReactionValue,
+} from './insight-feedback.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -15,6 +20,7 @@ import type { HubConfig } from './types.js';
  * 週次の統合の記録のうち、最後に成功した回の結果を、根拠のメモの場所・日付と合わせた一覧。HOME・ふりかえり・アプリのホームが同じ内容を示す。
  * 表示だけの派生物で、実行の記録（90_system/synthesis/）から作り直せる。統合を一度も有効にしていなければ作らない。
  * 項目はAI生成・未検証。根拠のメモが後から訂正されたら、訂正ありと示す（項目は作り直さない）。
+ * 項目ごとに、本人の反応（役に立った・的外れ）と、問いへの答えのメモを添える（insight-feedback.ts）。
  */
 export const insightsPath = '90_system/insights.json';
 
@@ -33,6 +39,9 @@ const itemSchema = z.object({
     occurred_at: z.string().refine(s => Number.isFinite(Date.parse(s))),
     /** 気づきを作った後に、このメモへ訂正が届いたか。 */ corrected: z.boolean(),
   }).strict()).min(1),
+  /** 本人の反応。反応がない・外したときはnull。 */ reaction: insightReactionValueSchema.exclude(['none']).nullable(),
+  /** この項目への答えのメモ（古い順。新しいINSIGHT_ANSWERS_MAX件まで）。 */
+  answers: z.array(z.object({ input_id: inputId, path: z.string().regex(/^00_inbox\/.+\.md$/), occurred_at: z.string().refine(s => Number.isFinite(Date.parse(s))) }).strict()).max(INSIGHT_ANSWERS_MAX),
 }).strict();
 export const insightsSchema = z.object({
   schema_version: z.literal(1), generated_at: instant,
@@ -52,7 +61,11 @@ export const insightsSchema = z.object({
 }).strict();
 export type Insights = z.infer<typeof insightsSchema>;
 export type InsightItem = NonNullable<Insights['latest']>['items'][number];
-export interface InsightsBuild { insights: Insights; /** 統合が無効のときはundefined。 */ state?: SynthesisState }
+export interface InsightsBuild {
+  insights: Insights;
+  /** 統合が無効のときはundefined。 */ state?: SynthesisState;
+  /** 本人の反応と答え。統合が無効のときはundefined。 */ feedback?: InsightFeedback;
+}
 
 /**
  * 開始の記録だけがあり、まだ実行中かもしれないか。時間の上限に余裕を足した時間が過ぎるまでは、失敗と示さない。
@@ -63,14 +76,19 @@ export function synthesisMayBeRunning(config: HubConfig, run: SynthesisRun | und
 }
 const RUNNING_GRACE_MS = 60_000;
 
-/** 実行の記録と、いまの入力（根拠のメモの場所と訂正の有無）から一覧を組み立てる。根拠のメモが1件も見つからない項目は載せない。 */
-export function buildInsights(config: HubConfig, state: SynthesisState | undefined, units: EffectiveInput[], now = new Date()): Insights {
+const noFeedback: InsightFeedback = { reactions: new Map(), answers: new Map(), problems: [] };
+/**
+ * 実行の記録と、いまの入力（根拠のメモの場所と訂正の有無）、本人の反応と答えから一覧を組み立てる。根拠のメモが1件も見つからない項目は載せない。
+ */
+export function buildInsights(config: HubConfig, state: SynthesisState | undefined, units: EffectiveInput[], now = new Date(), feedback: InsightFeedback = noFeedback): Insights {
   const head = { schema_version: 1 as const, generated_at: now.toISOString() }, interval_days = config.synthesis.intervalDays;
   if (!config.synthesis.enabled || !state) return { ...head, enabled: false, interval_days, latest: null, last_attempt: null, next_due_at: null, record_problems: 0 };
   const chains = new Map(units.map(u => [u.chain.root.id, u.chain])), latest = state.lastShown, last = state.lastAttempt;
   const items = (latest?.items ?? []).flatMap((item): InsightItem[] => {
     const sources = item.sources.flatMap(s => { const chain = chains.get(s.input_id); return chain ? [{ input_id: s.input_id, path: chain.root.path, occurred_at: chain.root.occurred_at, corrected: chain.latest.id !== s.latest_id }] : []; });
-    const built = { key: item.key, section: item.section, text: item.text, ...(item.first_step ? { first_step: item.first_step } : {}), sources };
+    const ref = insightItemRef(latest!.id, item.key);
+    const answers = (feedback.answers.get(ref) ?? []).slice(-INSIGHT_ANSWERS_MAX).map(a => ({ input_id: a.inputId, path: a.path, occurred_at: a.occurredAt }));
+    const built = { key: item.key, section: item.section, text: item.text, ...(item.first_step ? { first_step: item.first_step } : {}), sources, reaction: feedback.reactions.get(ref) ?? null, answers };
     // 形式に合わない項目は載せない。一覧のファイルを、読む側がいつも検証できる形に保つ。
     return itemSchema.safeParse(built).success ? [built] : [];
   });
@@ -83,10 +101,11 @@ export function buildInsights(config: HubConfig, state: SynthesisState | undefin
   } satisfies Insights);
 }
 
-/** 一覧を組み立てる（書き込まない）。統合が無効のときは、実行の記録を読まない。 */
+/** 一覧を組み立てる（書き込まない）。統合が無効のときは、実行の記録と反応を読まない。 */
 export async function readInsights(config: HubConfig, vault: Vault, units: EffectiveInput[], now = new Date()): Promise<InsightsBuild> {
-  const state = config.synthesis.enabled ? synthesisState(config, await readSynthesisRuns(vault)) : undefined;
-  return { insights: buildInsights(config, state, units, now), state };
+  if (!config.synthesis.enabled) return { insights: buildInsights(config, undefined, units, now) };
+  const state = synthesisState(config, await readSynthesisRuns(vault)), feedback = await readInsightFeedback(vault, units);
+  return { insights: buildInsights(config, state, units, now, feedback), state, feedback };
 }
 
 /**
@@ -163,4 +182,66 @@ export function insightsNotices(config: HubConfig, build: InsightsBuild, now = n
   }
   for (const path of state.problems) lines.push(`- [週次の統合の記録が不正です](${destination(path)})（直すか別の場所へ移すまで、自動では実行しません）`);
   return lines;
+}
+
+/** 反応の依頼を断る理由。知らない実行・項目への反応は、同じ依頼を何度試しても同じ結果になる。 */
+export class InsightReactionError extends Error {
+  constructor(readonly reason: { code: 'insight-missing' }) {
+    super('今週の気づきが見つかりません。同期してから、今週の気づきを確かめ直してください');
+    this.name = 'InsightReactionError';
+  }
+}
+const reactionRequestSchema = z.object({
+  runId: insightRunIdSchema, itemKey: insightItemKeySchema, reaction: insightReactionValueSchema,
+  source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
+  /** 本人が判断した日時。省略時は記録した日時。 */ decidedAt: z.string().datetime({ offset: true }).optional(),
+}).strict();
+export type InsightReactionRequest = z.input<typeof reactionRequestSchema>;
+export interface InsightReactionResult { reactionId: string; runId: string; itemKey: string; reaction: InsightReactionValue; deduped: boolean }
+
+/**
+ * 今週の気づきの項目への反応を記録する（アプリの依頼 insight-reaction）。
+ * 実行の記録にその項目があるときだけ記録する。読めない実行の記録があるときは、その中にあるかもしれないので断らず、後で試し直せる失敗にする。
+ * 一覧（insights.json）への反映は、次のHOMEの作り直し（cycle）で行う。
+ */
+export async function setInsightReaction(config: HubConfig, request: InsightReactionRequest): Promise<InsightReactionResult> {
+  const r = reactionRequestSchema.parse(request), vault = new Vault(config);
+  return vault.withLock(async () => {
+    if (r.sourceEventId) {
+      const previous = (await readInsightReactions(vault)).records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
+      if (previous) {
+        if (previous.run_id !== r.runId || previous.item_key !== r.itemKey || previous.reaction !== r.reaction) throw new Error('同じ受付IDで別の反応が記録されています');
+        return { reactionId: previous.id, runId: previous.run_id, itemKey: previous.item_key, reaction: previous.reaction, deduped: true };
+      }
+    }
+    const { runs, problems } = await readSynthesisRuns(vault);
+    if (!runs.some(run => run.id === r.runId && run.items.some(item => item.key === r.itemKey))) {
+      if (problems.length) throw new Error('週次の統合の記録を読めないため、反応を記録できません。doctorで確認してください');
+      throw new InsightReactionError({ code: 'insight-missing' });
+    }
+    const now = new Date().toISOString();
+    const record: InsightReaction = {
+      schema_version: 1, id: `IRX-${ulid()}`, run_id: r.runId, item_key: r.itemKey, reaction: r.reaction, decided_at: new Date(r.decidedAt ?? now).toISOString(),
+      source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: now,
+    };
+    if (!await vault.create(insightReactionPath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('反応の記録が競合しました');
+    return { reactionId: record.id, runId: record.run_id, itemKey: record.item_key, reaction: record.reaction, deduped: false };
+  });
+}
+
+/**
+ * ふりかえりの「今週の気づきへの反応」（前後の空行は含めない）。項目を出した実行がなければ空文字。
+ * 実行ごとに、項目数と、役に立った・的外れ・答えた項目の数を示す。件数は、段階3（テーマの抽出など）へ進むかの判断に使う。
+ */
+export function insightFeedbackSection(config: HubConfig, build: InsightsBuild): string {
+  if (!build.state || !build.feedback) return '';
+  const tallies = insightFeedbackTallies(build.state.runs, build.feedback);
+  if (!tallies.length) return '';
+  const day = (iso: string) => dateLabel(iso, config.timezone).slice(0, 10);
+  return [
+    '## 今週の気づきへの反応',
+    `アプリで付けた反応と、問いへの答えのメモの件数です（項目を出した直近${INSIGHT_TALLY_RUNS}回まで、新しい順）。反応は最後に付けたものを数えます。`,
+    '',
+    ...tallies.map(t => `- ${day(t.createdAt)}の回: ${t.items}件のうち、役に立った${t.useful}件・的外れ${t.offTarget}件・答えた項目${t.answered}件`),
+  ].join('\n');
 }
