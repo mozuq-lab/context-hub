@@ -8,7 +8,7 @@ import { buildReviewIndex } from './candidate-review.js';
 import { lifecycleOf, projectStatusLabels } from './project-status.js';
 import { daysSince } from './dashboard.js';
 import { lastEvidenceAt } from './views.js';
-import { insightsSection, readInsights } from './insights.js';
+import { insightFeedbackSection, insightsSection, readInsights } from './insights.js';
 import { activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions } from './item-resolutions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
 
@@ -57,13 +57,15 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   const unassigned = recent.filter(u => u.unit.receipt?.result && !u.projects.length).length;
 
   // 週次の統合の結果（今週の気づき）を、件数の集計より前に置く。設定で有効にしたときだけ出す。記録を読めないときは出さず、HOMEの「失敗と競合」で示す。
-  let insights = '';
-  if (config.synthesis.enabled) try { insights = insightsSection(config, (await readInsights(config, vault, effective, now)).insights, now); } catch { /* HOMEで示す。 */ }
+  // 続けて、気づきへの本人の反応と答えの件数を出す（ふりかえりだけに出す）。
+  let insights = '', feedback = '';
+  if (config.synthesis.enabled) try { const build = await readInsights(config, vault, effective, now); insights = insightsSection(config, build.insights, now); feedback = insightFeedbackSection(config, build); } catch { /* HOMEで示す。 */ }
   const lines: string[] = [
     `# 直近${days}日のふりかえり`, '',
     `期間: ${label(start.toISOString())} 〜 ${label(now.toISOString())} ${config.timezone}`,
     '受領・整理の記録から決定的に集計した一覧です。要約と抽出はAI生成・未検証です。判断の前にリンク先の原文と出典を確認してください。', '',
     ...(insights ? [insights, ''] : []),
+    ...(feedback ? [feedback, ''] : []),
     '## 概要',
     `- この期間に届いた入力: ${recent.length}件（整理済み ${count('organized')} / 整理待ち ${count('waiting')} / 整理失敗 ${count('failed')}）`,
     `- プロジェクト未帰属（整理済みのうち）: ${unassigned}件`,

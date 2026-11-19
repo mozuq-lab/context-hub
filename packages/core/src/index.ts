@@ -47,3 +47,4 @@ export * from './unassigned-actions.js';
 export * from './synthesis-prompt.js';
 export * from './synthesis.js';
 export * from './insights.js';
+export * from './insight-feedback.js';

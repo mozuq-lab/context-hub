@@ -109,7 +109,7 @@ describe('週次の統合', () => {
 
     const [run] = await runs(vault);
     expect(synthesisRunSchema.parse(run)).toEqual(run);
-    expect(run).toMatchObject({ status: 'ok', mode: 'first', created_at: '2026-11-15T00:00:00.000Z', period: { since: null, until: '2026-11-15T00:00:00.000Z' }, llm: { provider: 'mock', model: 'test/model-a', thinking: 'medium', prompt_version: 1 }, counts: { new_memos: 0, focus: 4, context: 0, omitted: 0 }, error: null });
+    expect(run).toMatchObject({ status: 'ok', mode: 'first', created_at: '2026-11-15T00:00:00.000Z', period: { since: null, until: '2026-11-15T00:00:00.000Z' }, llm: { provider: 'mock', model: 'test/model-a', thinking: 'medium', prompt_version: 2 }, counts: { new_memos: 0, focus: 4, context: 0, omitted: 0 }, error: null });
     expect(run!.calls).toHaveLength(1);
     expect(run!.calls[0]).toMatchObject({ attempts: 1, error: null });
     expect(run!.items.map(i => [i.section, i.text, i.sources.map(s => s.input_id)])).toEqual([
@@ -137,7 +137,7 @@ describe('週次の統合', () => {
     expect(insights.latest!.items[0]).toEqual({ key: run!.items[0]!.key, section: 'connections', text: '11/03の関心が、11/10には受ける必要へ進んでいるように見えます', sources: [
       { input_id: a, path: expect.stringMatching(new RegExp(`^00_inbox/2026-11-03_${a}\\.md$`)), occurred_at: '2026-11-03T09:00:00+09:00', corrected: false },
       { input_id: b, path: expect.stringMatching(new RegExp(`^00_inbox/2026-11-10_${b}\\.md$`)), occurred_at: '2026-11-10T09:00:00+09:00', corrected: false },
-    ] });
+    ], reaction: null, answers: [] });
     const home = (await vault.read('HOME.md'))!, review = (await vault.read('REVIEW.md'))!;
     for (const text of [home, review]) {
       expect(text).toContain('## 今週の気づき（AI生成・未検証）');
