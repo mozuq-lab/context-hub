@@ -108,7 +108,9 @@ export function groundExtractedStatuses(input: Input, result: OrganizeResult): O
   return { ...result, extracted: { current: ground('current'), next: ground('next'), open: ground('open') } };
 }
 
-const dataMarker = '\n入力データ(JSON):\n';
+/** プロンプトの指示と、末尾に付ける入力データ（JSON）の境目。伏せ字の処理（secrets.ts）も、この後ろをJSONとして読む。 */
+export const PROMPT_DATA_MARKER = '\n入力データ(JSON):\n';
+const dataMarker = PROMPT_DATA_MARKER;
 export function groundExtractedHistory(chain: CorrectionChain, result: OrganizeResult): OrganizeResult {
   const evidence = [chain.root,...chain.revisions];
   const extracted = { current:[] as ExtractedItem[], next:[] as ExtractedItem[], open:[] as ExtractedItem[] };
@@ -153,6 +155,23 @@ export function buildOrganizePrompt(input: Input, projects: Project[], retry = f
   ].join('\n') + dataMarker + JSON.stringify({ metadata: { id: input.id, kind: chain?.root.kind ?? input.kind, source: input.source, occurred_at: chain?.root.occurred_at ?? input.occurred_at, project: chain?.root.project ?? input.project ?? null, tool: input.tool ?? null, origin: input.origin }, existing_projects: projects.map(({ id, title, aliases, keywords }) => ({ id, title, aliases, keywords })), ...(openItems.length ? { open_items: openItems.map(({ ref, section, text }) => ({ ref, section, text })) } : {}), ...(excludedItems.length ? { excluded_items: excludedItems.map(({ project, section, reason, text, note, own }) => ({ project, section, reason, text, ...(note ? { note } : {}), own })) } : {}), source_text: input.text, ...(chain?.revisions.length ? { original_input:chain.root, correction_history:chain.revisions } : {}) });
 }
 
+interface MockSynthesisPayload { memos?: { ref: string; text: string; form: string; new?: boolean }[] }
+/**
+ * デモ・検証用: 週次の統合の依頼へ、渡されたメモから決まった形の応答を作る。
+ * 全文で渡されたメモ（新しく届いたメモがあればその中）の最後の2件をつながりとして挙げ、最後の1件について問いを1つ返す。
+ */
+function mockSynthesis(payload: MockSynthesisPayload): string {
+  const memos = payload.memos ?? [], full = memos.filter((m) => m.form !== 'head');
+  const pool = full.some((m) => m.new) ? full.filter((m) => m.new) : full;
+  const last = pool.at(-1), other = pool.at(-2) ?? memos.filter((m) => m !== last).at(-1);
+  const quote = (m: { text: string }) => `「${[...m.text.trim().replace(/\s+/g, ' ')].slice(0, 20).join('')}」`;
+  return JSON.stringify({
+    connections: last && other ? [{ refs: [other.ref, last.ref], text: `${quote(other)}と${quote(last)}は、同じ話題の続きに見えます（mock）` }] : [],
+    shifts: [], stalled: [], actions: [],
+    questions: last ? [{ refs: [last.ref], text: `${quote(last)}について、次に確かめたいことは何ですか（mock）` }] : [],
+  });
+}
+
 export class MockLlm implements LlmClient {
   private readonly fixtures: (string | OrganizeResult | Error)[];
   constructor(fixtures: (string | OrganizeResult | Error)[] = []) { this.fixtures = [...fixtures]; }
@@ -161,6 +180,7 @@ export class MockLlm implements LlmClient {
     if (fixture instanceof Error) throw fixture;
     if (fixture !== undefined) return { text: typeof fixture === 'string' ? fixture : JSON.stringify(fixture), model: 'mock' };
     const payload = JSON.parse(prompt.slice(prompt.indexOf(dataMarker) + dataMarker.length)) as { operation?:string; metadata: { kind: string }; existing_projects: Pick<Project, 'id' | 'title' | 'aliases' | 'keywords'>[]; source_text: string; open_items?: { ref: string; text: string }[]; excluded_items?: { text: string; reason: string; own: boolean }[] };
+    if (payload.operation === 'synthesis') return { text: mockSynthesis(payload as unknown as MockSynthesisPayload), model: 'mock' };
     const text = payload.source_text;
     const result: OrganizeResult = { category: 'unclassified', summary: text.trim().replace(/\s+/g, ' ').slice(0, 200), project_candidates: [], next_action_suggestions: [], extracted: { current: [], next: [], open: [] }, knowledge_candidate: null, new_project_hint: null };
     if (payload.metadata.kind === 'work-summary') {

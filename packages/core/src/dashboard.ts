@@ -19,6 +19,7 @@ import type { HubConfig, Input } from './types.js';
 import { describeFindings, findSecrets, secretSettings, writePrivacyPatternsLocked } from './secrets.js';
 import { rebuildIdeaIndexLocked, ideaSection } from './idea-links.js';
 import { rebuildUnassignedActionsLocked, unassignedActionsSection } from './unassigned-actions.js';
+import { insightsNotices, insightsSection, rebuildInsightsLocked } from './insights.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readExclusionOverlays, rereadResolutionIds } from './item-rereads.js';
 import { backupHomeLine, backupStatus, readBackupChecks } from './backup-check.js';
@@ -148,8 +149,12 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const statusSummary=intakeRows.length||inputRows.length?`受付ファイル ${intakeRows.length}件（受付待ち・内容変更 ${waitingIntake}件） / 入力 ${inputRows.length}件（整理待ち ${waitingInputs}件・整理失敗 ${failedInputs}件）。受領済み・整理済みは新しい${STATUS_ROWS}件ずつを並べます。全件はアプリの「受付状況」で確認できます。\n`:'';
   // どのプロジェクトにも結び付いていないメモから出たタスクの分類とAIの提案。アプリが読む一覧も同時に書く（内容が変わったときだけ）。
   const unassignedActions=unassignedActionsSection(config,await rebuildUnassignedActionsLocked(config,vault,effective,clock));
-  // 行動につながる欄（次の一手）を、プロジェクトの一覧より前に置く。
-  const lead=[nextSection,unassignedActions].filter(Boolean).map(x=>x+'\n\n').join('');
+  // 週次の統合の結果（今週の気づき）。設定で有効にしたときだけ出す。記録を読めなくてもHOMEは作り、「失敗と競合」に示す。
+  let insightsText='',insightsLines:string[]=[];
+  try{const built=await rebuildInsightsLocked(config,vault,effective,clock);insightsText=insightsSection(config,built.insights,clock);insightsLines=insightsNotices(config,built,clock);}
+  catch{if(config.synthesis.enabled)insightsLines=['- 週次の統合の記録を読めません（`ctx doctor`で確認してください）'];}
+  // 今週の気づきと、行動につながる欄（次の一手）を、プロジェクトの一覧より前に置く。
+  const lead=[insightsText,nextSection,unassignedActions].filter(Boolean).map(x=>x+'\n\n').join('');
   // 秘密情報らしい文字列を含むメモ。原文は変えずモデルへ渡す前に伏せているが、同期先の端末には原文のまま残る。
   const secretRows=secretInputRows(config,effective.flatMap(u=>[u.chain.root,...u.chain.revisions]));
   // 似ているアイデアの索引。束ねの記録が壊れていてもHOMEは作り、壊れた記録を示す。
@@ -168,6 +173,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const issue of mergeIssues(projects))errors.push(`- ${plain(issue)}（project.mdのmerged_intoを直すか外してください）`);
   for(const path of draftRecords.problems)errors.push(`- [作業記録の下書きの記録が不正です](${path})`);
   errors.push(...nextProblems);
+  errors.push(...insightsLines);
   for(const project of projects)if(await historyStopped(vault,project.id))errors.push(`- [経緯の更新が止まっています](${historyPath(project.id)}): ${plain(project.title)} — HISTORY.mdが手で変更されています。経緯は根拠から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const project of projects)if(await referencesStopped(vault,project.id))errors.push(`- [資料の更新が止まっています](${referencesPath(project.id)}): ${plain(project.title)} — REFERENCES.mdが手で変更されています。資料は整理結果から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);

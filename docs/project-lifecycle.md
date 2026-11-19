@@ -144,7 +144,7 @@ node packages/core/dist/cli.js --config "<設定ファイル>" digest
 node packages/core/dist/cli.js --config "<設定ファイル>" digest --days 30
 ```
 
-既定の期間は直近`retrieve.digestDays`日（既定7日）です。次の内容を含みます。
+既定の期間は直近`retrieve.digestDays`日（既定7日）です。次の内容を含みます。[週次の統合](weekly-synthesis.md)を有効にしている場合は、「概要」の前に「今週の気づき」を出します。
 
 - 期間内に届いた入力の件数（整理済み・整理待ち・整理失敗）と、プロジェクト未帰属の件数
 - 動きのあったプロジェクトごとの新しい入力、主な入力の要約、「現在地」「次の一手」の変化
