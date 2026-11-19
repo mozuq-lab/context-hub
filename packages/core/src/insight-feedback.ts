@@ -19,7 +19,7 @@ export type InsightReactionValue = (typeof INSIGHT_REACTIONS)[number];
 export const insightReactionValueSchema = z.enum(INSIGHT_REACTIONS);
 export const insightReactionSchema = z.object({
   schema_version: z.literal(1), id: insightReactionIdSchema, run_id: insightRunIdSchema, item_key: insightItemKeySchema, reaction: insightReactionValueSchema,
-  /** 本人が判断した日時（アプリの依頼の発生日時）。同じ項目の反応はこの順で最後のものを有効にする。 */
+  /** 本人が判断した日時（アプリの依頼の発生日時。記録した日時より後にはしない）。同じ項目の反応はこの順で最後のものを有効にする。 */
   decided_at: z.string().datetime({ offset: true }),
   source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(200).optional(), created_at: z.string().datetime({ offset: true }),
 }).strict();
@@ -71,7 +71,7 @@ export function insightAnswers(units: EffectiveInput[]): Map<string, InsightAnsw
   const result = new Map<string, InsightAnswer[]>();
   for (const { chain } of units) {
     const root = chain.root, meta = root.meta;
-    if (root.kind === 'correction' || meta?.capture_mode !== INSIGHT_ANSWER_MODE) continue;
+    if (meta?.capture_mode !== INSIGHT_ANSWER_MODE) continue;
     const run = insightRunIdSchema.safeParse(meta.insight_run), key = insightItemKeySchema.safeParse(meta.insight_key);
     if (!run.success || !key.success) continue;
     const ref = insightItemRef(run.data, key.data), list = result.get(ref) ?? [];
@@ -84,9 +84,13 @@ export function insightAnswers(units: EffectiveInput[]): Map<string, InsightAnsw
 
 /** 本人の反応と答え。週次の統合と一覧の両方が使う。 */
 export interface InsightFeedback { reactions: Map<string, Exclude<InsightReactionValue, 'none'>>; answers: Map<string, InsightAnswer[]>; problems: string[] }
+/**
+ * 反応の記録の場所を走査できない（symlinkなど）ときは、反応なしとして扱い、今週の気づきや週次の統合を止めない（doctorで示す）。
+ */
 export async function readInsightFeedback(vault: Vault, units: EffectiveInput[]): Promise<InsightFeedback> {
-  const { records, problems } = await readInsightReactions(vault);
-  return { reactions: latestInsightReactions(records), answers: insightAnswers(units), problems };
+  let read: { records: InsightReaction[]; problems: string[] };
+  try { read = await readInsightReactions(vault); } catch { read = { records: [], problems: [insightReactionDir] }; }
+  return { reactions: latestInsightReactions(read.records), answers: insightAnswers(units), problems: read.problems };
 }
 
 /** 実行ごとの件数（ふりかえりに出す。段階3へ進むかの判断の材料）。 */

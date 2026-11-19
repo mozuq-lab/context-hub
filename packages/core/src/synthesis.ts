@@ -163,13 +163,14 @@ async function prepare(config: HubConfig, vault: Vault, now: Date, options: Synt
   const shownRun = state.lastWithItems, shown = shownRun?.items ?? [];
   const previousKeys = new Set(shown.map(i => synthesisRepeatKey(i.section, i.sources.map(s => ({ inputId: s.input_id, latestId: s.latest_id })))));
   if (blocked && !always) return { state, skip: blocked, previousKeys };
-  // 前回の項目に、本人の反応と答えの有無を添える（的外れと言われた方向を避け、答えた問いを聞き直さないため）。
+  // 前回の項目に、本人の反応と答えのメモを添える（的外れと言われた方向を避け、答えた問いを聞き直さないため）。
   const units = await readEffectiveInputs(config), feedback = await readInsightFeedback(vault, units);
+  const itemTexts = new Map(state.runs.flatMap(run => run.items.map(item => [insightItemRef(run.id, item.key), item.text] as const)));
   const brief = buildSynthesisBrief(config, units, await readProjects(config), {
-    now, since: state.lastSuccess?.period.until,
+    now, since: state.lastSuccess?.period.until, itemTexts,
     previous: shown.map(i => {
-      const ref = insightItemRef(shownRun!.id, i.key), reaction = feedback.reactions.get(ref);
-      return { section: i.section, text: i.text, sourceIds: i.sources.map(s => s.input_id), ...(reaction ? { reaction } : {}), ...(feedback.answers.get(ref)?.length ? { answered: true } : {}) };
+      const ref = insightItemRef(shownRun!.id, i.key), reaction = feedback.reactions.get(ref), answers = feedback.answers.get(ref) ?? [];
+      return { section: i.section, text: i.text, sourceIds: i.sources.map(s => s.input_id), ...(reaction ? { reaction } : {}), ...(answers.length ? { answerIds: answers.map(a => a.inputId) } : {}) };
     }),
   });
   const skip = blocked ?? (!brief.plan.refs.size ? 'no-memos' as const : !options.force && state.lastSuccess && brief.plan.newMemos === 0 ? 'no-new-input' as const : undefined);

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from 'vitest';
-import { rm } from 'node:fs/promises';
+import { mkdir, rm, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { correctInput } from '../src/corrections.js';
 import { packet, workflowSetup } from './workflow-fixtures.js';
 import { capture } from '../src/capture.js';
 import { organize } from '../src/organize.js';
@@ -175,9 +178,69 @@ describe('今週の気づきの問いへの答え', () => {
     await rebuildDashboard(config, { now: at('2026-11-16T03:00:00Z') });
     const review = (await vault.read('REVIEW.md'))!;
     expect(review).toContain('## 今週の気づきへの反応');
-    expect(review).toContain('- 2026-11-15の回: 2件のうち、役に立った1件・的外れ1件・答えた項目1件');
+    expect(review).toContain('- 2026-11-15 09:00の回: 2件のうち、役に立った1件・的外れ1件・答えた項目1件');
     expect(review.indexOf('## 今週の気づき（AI生成・未検証）')).toBeLessThan(review.indexOf('## 今週の気づきへの反応'));
     expect(review.indexOf('## 今週の気づきへの反応')).toBeLessThan(review.indexOf('## 概要'));
     expect(await vault.read('HOME.md')).not.toContain('気づきへの反応');
+  });
+});
+
+describe('反応と答えの扱いの境界', () => {
+  test('反応の記録の場所を読めなくても、今週の気づき・ふりかえり・週次の統合を止めず、doctorで示す', async () => {
+    const { config, vault } = await setup();
+    await mkdir(join(config.vaultPath, insightReactionDir), { recursive: true });
+    await symlink(tmpdir(), join(config.vaultPath, insightReactionDir, 'IRX-01JZ0000000000000000000000.json'));
+    await rebuildDigest(config, { now: at('2026-11-16T03:00:00Z') });
+    await rebuildDashboard(config, { now: at('2026-11-16T03:00:00Z') });
+    expect(await vault.read('HOME.md')).toContain('## 今週の気づき（AI生成・未検証）');
+    expect(await vault.read('HOME.md')).not.toContain('週次の統合の記録を読めません');
+    expect(await vault.read('REVIEW.md')).toContain('## 今週の気づき（AI生成・未検証）');
+    expect((await view(vault)).latest!.items.every(i => i.reaction === null)).toBe(true);
+    expect((await doctor(config)).issues).toContain('今週の気づきへの反応の記録を走査できません');
+    await capture(config, { source: 'cli', occurredAt: '2026-11-18T09:00:00+09:00', receivedAt: '2026-11-18T09:00:00+09:00', text: '講習の申込期限を調べた' });
+    await organize(config, new MockLlm());
+    expect(await runSynthesis(config, fake(() => answer({})).llm, { now: at('2026-11-23T00:00:00Z') })).toMatchObject({ ran: true, status: 'empty' });
+  });
+
+  test('答えている問いは実行の記録の本文を渡し、記録がないときだけmetaの本文を使う', async () => {
+    const { config, run, question } = await setup();
+    await packet(config, { source: 'context-hub-flutter', occurred_at: '2026-11-16T09:00:00+09:00', meta: { capture_mode: 'insight-answer', insight_run: run.id, insight_key: question.key, insight_question: '書き換えられた問い' } }, '字幕の付け方を試したい');
+    await packet(config, { source: 'context-hub-flutter', occurred_at: '2026-11-16T09:10:00+09:00', meta: { capture_mode: 'insight-answer', insight_run: 'SYN-01JZ0000000000000000000000', insight_key: 'c'.repeat(64), insight_question: '消えた実行の問い' } }, '消えた実行への答え');
+    await ingest(config);
+    await organize(config, new MockLlm());
+    const second = fake(() => answer({}));
+    await runSynthesis(config, second.llm, { now: at('2026-11-23T00:00:00Z') });
+    const payload = payloadOf(second.prompts[0]!);
+    expect(payload.memos.find(m => m.text.includes('字幕'))!.question).toBe(question.text);
+    expect(payload.memos.find(m => m.text.includes('消えた実行への答え'))!.question).toBe('消えた実行の問い');
+    // 止まっている意図への答えもあるので、問いに限らない言い方にする。
+    expect(second.prompts[0]).toContain('以前あなたが示した項目（問いや止まっている意図）');
+  });
+
+  test('答えのメモを渡せない回は、前回の項目を答え済みとして伝えない', async () => {
+    const { config, run, question } = await setup();
+    await packet(config, { source: 'context-hub-flutter', occurred_at: '2026-11-16T09:00:00+09:00', meta: { capture_mode: 'insight-answer', insight_run: run.id, insight_key: question.key, insight_question: question.text } }, '字幕の付け方を試したい');
+    await ingest(config);
+    await organize(config, new MockLlm());
+    // 答えのメモに訂正が届き、その整理を待っている（古い解釈を渡さないため、この回は渡さない）。
+    const answerId = (await readIntakeReceipts(config)).map(r => r.result).find(r => 'inputId' in r)!;
+    await correctInput(config, (answerId as { inputId: string }).inputId, { source: 'cli', occurredAt: '2026-11-17T09:00:00+09:00', receivedAt: '2026-11-17T09:00:00+09:00', text: '字幕より先に音声を整えたい' });
+    for (const [text, when] of [['講習の申込期限を調べた', '2026-11-18T09:00:00+09:00'], ['動画を3本撮った', '2026-11-19T09:00:00+09:00']] as const)
+      await capture(config, { source: 'cli', occurredAt: when, receivedAt: when, text });
+    const second = fake(() => answer({}));
+    await runSynthesis(config, second.llm, { now: at('2026-11-23T00:00:00Z') });
+    const payload = payloadOf(second.prompts[0]!);
+    expect(payload.memos.some(m => m.text.includes('字幕'))).toBe(false);
+    expect(payload.previous.find(p => p.section === 'questions')).not.toHaveProperty('answered');
+  });
+
+  test('判断した日時が記録した日時より後の反応は、記録した日時として扱う（端末の時計の進みで後の反応を覆さない）', async () => {
+    const { config, vault, run, question } = await setup();
+    const ahead = await setInsightReaction(config, { runId: run.id, itemKey: question.key, reaction: 'off-target', source: 'device-a', decidedAt: '2030-01-01T00:00:00Z' }, { now: at('2026-11-16T00:00:00Z') });
+    const [record] = (await readInsightReactions(vault)).records;
+    expect(record).toMatchObject({ id: ahead.reactionId, decided_at: '2026-11-16T00:00:00.000Z', created_at: '2026-11-16T00:00:00.000Z' });
+    await setInsightReaction(config, { runId: run.id, itemKey: question.key, reaction: 'useful', source: 'device-b', decidedAt: '2026-11-16T01:00:00Z' }, { now: at('2026-11-16T01:00:00Z') });
+    await rebuildDashboard(config, { now: at('2026-11-16T03:00:00Z') });
+    expect((await view(vault)).latest!.items.find(i => i.key === question.key)!.reaction).toBe('useful');
   });
 });

@@ -204,7 +204,7 @@ export interface InsightReactionResult { reactionId: string; runId: string; item
  * 実行の記録にその項目があるときだけ記録する。読めない実行の記録があるときは、その中にあるかもしれないので断らず、後で試し直せる失敗にする。
  * 一覧（insights.json）への反映は、次のHOMEの作り直し（cycle）で行う。
  */
-export async function setInsightReaction(config: HubConfig, request: InsightReactionRequest): Promise<InsightReactionResult> {
+export async function setInsightReaction(config: HubConfig, request: InsightReactionRequest, options: { /** 記録する日時（検証用）。 */ now?: Date } = {}): Promise<InsightReactionResult> {
   const r = reactionRequestSchema.parse(request), vault = new Vault(config);
   return vault.withLock(async () => {
     if (r.sourceEventId) {
@@ -219,9 +219,11 @@ export async function setInsightReaction(config: HubConfig, request: InsightReac
       if (problems.length) throw new Error('週次の統合の記録を読めないため、反応を記録できません。doctorで確認してください');
       throw new InsightReactionError({ code: 'insight-missing' });
     }
-    const now = new Date().toISOString();
+    const clock = options.now ?? new Date(), now = clock.toISOString();
+    // 端末の時計が進んでいると、判断した日時が未来になり、その日時まで後の反応を覆してしまう。記録した日時を上限にする。
+    const decided = r.decidedAt === undefined ? clock.getTime() : Math.min(Date.parse(r.decidedAt), clock.getTime());
     const record: InsightReaction = {
-      schema_version: 1, id: `IRX-${ulid()}`, run_id: r.runId, item_key: r.itemKey, reaction: r.reaction, decided_at: new Date(r.decidedAt ?? now).toISOString(),
+      schema_version: 1, id: `IRX-${ulid(clock.getTime())}`, run_id: r.runId, item_key: r.itemKey, reaction: r.reaction, decided_at: new Date(decided).toISOString(),
       source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: now,
     };
     if (!await vault.create(insightReactionPath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('反応の記録が競合しました');
@@ -237,7 +239,8 @@ export function insightFeedbackSection(config: HubConfig, build: InsightsBuild):
   if (!build.state || !build.feedback) return '';
   const tallies = insightFeedbackTallies(build.state.runs, build.feedback);
   if (!tallies.length) return '';
-  const day = (iso: string) => dateLabel(iso, config.timezone).slice(0, 10);
+  // 同じ日に複数回実行しても見分けられるよう、時刻まで示す。
+  const day = (iso: string) => dateLabel(iso, config.timezone);
   return [
     '## 今週の気づきへの反応',
     `アプリで付けた反応と、問いへの答えのメモの件数です（項目を出した直近${INSIGHT_TALLY_RUNS}回まで、新しい順）。反応は最後に付けたものを数えます。`,
