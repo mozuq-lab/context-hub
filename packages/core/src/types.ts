@@ -15,6 +15,14 @@ export interface HubConfig {
   git: { enabled: boolean; repos: { projectId: string; path: string; name?: string }[]; maxCommits: number; lookbackDays: number };
   /** バックアップから復元できるかの確認。dirは scripts/vault-backup.sh の保存先（Vaultの外）。確かめた復元点がverifyMaxAgeDaysより古いとHOMEで知らせる。 */
   backup?: { dir: string | null; verifyMaxAgeDays: number };
+  /**
+   * 週次の統合。たまったメモをモデルがまとめて読み、メモ1件を読むだけでは分からないこと（つながり・考えの変化・止まっている意図・次の一手・問い）を返す。
+   * 既定では無効。有効にすると、cycleがintervalDaysごとに1回だけ実行する。モデルの接続先はorganize.llmを使い、思考の深さ（thinking）は整理と別に決める。
+   * 1回の呼び出しに渡すメモは、全文で渡す件数（maxFocusMemos）と1行にして渡す件数（maxContextMemos）で区切る。
+   * timeoutSecは、形式の作り直しと分けた呼び出しを含む、1回の実行全体の時間の上限。
+   * maxCallsを2以上にしたときだけ、全文で渡すメモを複数回の呼び出しに分ける。
+   */
+  synthesis: { enabled: boolean; intervalDays: number; thinking: ThinkingLevel; timeoutSec: number; maxFocusMemos: number; maxContextMemos: number; maxCalls: number };
   /** 秘密情報らしい文字列（APIキー・トークン・パスワード等）を、モデルへ渡す前と別AI向けのcontextで伏せる。原文は変えない。 */
   privacy?: { redactSecrets: boolean; /** 追加の検出規則。labelは伏せ字に出す種類名、patternはJavaScriptの正規表現。 */ patterns: { label: string; pattern: string }[] };
 }

@@ -10,6 +10,8 @@ import type { HubConfig } from './types.js';
 export function expandPath(value: string): string {
   return resolve(value === '~' ? homedir() : value.startsWith('~/') ? join(homedir(), value.slice(2)) : value);
 }
+/** 週次の統合の既定値。既定では無効で、有効にしても呼び出しは間隔ごとに1回。 */
+const defaultSynthesis = (): HubConfig['synthesis'] => ({ enabled: false, intervalDays: 7, thinking: 'medium', timeoutSec: 150, maxFocusMemos: 30, maxContextMemos: 100, maxCalls: 1 });
 export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Library/Application Support/context-hub')): HubConfig {
   return {
     schema_version: 1, vaultPath: expandPath(vaultPath), statePath: expandPath(statePath), timezone: 'Asia/Tokyo',
@@ -20,6 +22,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
     retrieve: { contextMaxChars: 6000, discordMaxChars: 1900, staleDays: 14, digestDays: 7 },
     logging: { dir: join(expandPath(statePath), 'logs'), retentionDays: 14 },
     git: { enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 },
+    synthesis: defaultSynthesis(),
     privacy: { redactSecrets: true, patterns: [] },
     backup: { dir: null, verifyMaxAgeDays: 7 },
   };
@@ -38,6 +41,9 @@ const configSchema = z.object({
   // 既定では無効。本人が明示したローカルリポジトリだけを読み取り専用で参照する。
   git: z.object({ enabled: z.boolean(), repos: z.array(z.object({ projectId: projectIdSchema, path: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です'), name: z.string().min(1).max(100).regex(/^[^\r\n]+$/).optional() }).strict()).max(100),
     maxCommits: positive.max(200), lookbackDays: positive.max(366) }).strict().refine(g => new Set(g.repos.map(r => expandPath(r.path))).size === g.repos.length, '同じリポジトリを重ねて設定できません').default({ enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 }),
+  // 既定では無効。有効にしたときだけ、cycleが間隔ごとに1回、たまったメモをまとめてモデルへ渡す。
+  synthesis: z.object({ enabled: z.boolean(), intervalDays: positive.max(90), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high']), timeoutSec: positive.max(600),
+    maxFocusMemos: positive.max(100), maxContextMemos: z.number().int().min(0).max(500), maxCalls: positive.max(4) }).strict().default(defaultSynthesis()),
   // 既定で有効。追加の規則は読み込み時に正規表現として組み立てられることを確かめる。
   privacy: z.object({ redactSecrets: z.boolean(), patterns: z.array(z.object({ label: z.string().min(1).max(40).regex(/^[^\]\r\n]+$/), pattern: z.string().min(1).max(500).refine(v => { try { new RegExp(v, 'gu'); return true; } catch { return false; } }, '正規表現が不正です').superRefine((v, ctx) => { const problem = dartPatternProblem(v); if (problem) ctx.addIssue({ code: 'custom', message: problem }); }) }).strict()).max(50) }).strict().default({ redactSecrets: true, patterns: [] }),
   // 既定では未設定。バックアップ先を書くと、ctx backup verify が最新のアーカイブを確かめ、HOMEが復元点の古さを知らせる。
@@ -60,7 +66,8 @@ function patternReasons(error: ZodError): string {
   return reasons.length ? `（${[...new Set(reasons)].slice(0, 5).join('／')}）` : '';
 }
 /** 設定ファイルへ上書きする値。入れ子は部分指定でよい。 */
-export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'privacy' | 'backup'>> & {
+export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'synthesis' | 'privacy' | 'backup'>> & {
+  synthesis?: Partial<HubConfig['synthesis']>;
   backup?: Partial<NonNullable<HubConfig['backup']>>; capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; privacy?: Partial<HubConfig['privacy']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
   organize?: Partial<Omit<HubConfig['organize'], 'llm'>> & { llm?: Partial<HubConfig['organize']['llm']> };
 };
@@ -81,6 +88,7 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
     retrieve: { ...defaults.retrieve, ...raw.retrieve, ...overrides.retrieve },
     logging: { ...defaults.logging, ...raw.logging, ...overrides.logging },
     git: { ...defaults.git, ...raw.git, ...overrides.git },
+    synthesis: { ...defaults.synthesis, ...raw.synthesis, ...overrides.synthesis },
     privacy: { ...defaults.privacy, ...raw.privacy, ...overrides.privacy },
     backup: { ...defaults.backup, ...raw.backup, ...overrides.backup },
   };

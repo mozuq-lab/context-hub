@@ -44,3 +44,6 @@ export * from './secrets.js';
 export * from './idea-links.js';
 export * from './short-memo.js';
 export * from './unassigned-actions.js';
+export * from './synthesis-prompt.js';
+export * from './synthesis.js';
+export * from './insights.js';
