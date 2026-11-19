@@ -95,7 +95,9 @@ export function synthesisCandidates(config: HubConfig, units: EffectiveInput[], 
     const owners = receipt ? associatedProjects(root, receipt, config) : root.project ? [root.project] : [];
     candidates.push({
       inputId: root.id, latestId: chain.latest.id, path: root.path, occurredAt: root.occurred_at, date: localDate(root.occurred_at, config.timezone),
-      isNew: after !== undefined && [root, ...chain.revisions].some(i => Date.parse(i.received_at) > after),
+      // 訂正が前回の成功より前に届いていても、整理が後に済んだ（前回は整理を待つため外した）メモは、新しいメモとして扱う。
+      isNew: after !== undefined && ([root, ...chain.revisions].some(i => Date.parse(i.received_at) > after)
+        || (chain.revisions.length > 0 && receipt !== undefined && Date.parse(receipt.organized_at) > after)),
       kind: root.kind, category: receipt?.result?.category ?? null, project: owners.length ? owners.map(id => titles.get(id) ?? id).join('、') : null,
       form, text, head,
     });
@@ -181,17 +183,26 @@ export function buildSynthesisPrompt(brief: SynthesisBrief, chunk: number, retry
     `5. 各欄は${SYNTHESIS_ITEMS_PER_SECTION}件まで。質の低い項目で数を埋めない。足せることがなければ空配列にする。`,
     '6. text は120文字以内、first_step は80文字以内。日本語で、1行で書く。',
     '7. 同じ内容を複数の欄に重ねて書かない。previous と同じ内容を繰り返さない。新しいメモで進展があったときだけ、その進展として書く。',
-    ...(retry ? ['', '前回の応答は形式不正です。上の形のJSONだけを、一度だけ作り直してください。'] : []),
+    ...(retry ? ['', '前回の応答は形式不正です（JSONとして読めない、またはrefsが渡したメモのrefと一致しない）。上の形のJSONだけを、一度だけ作り直してください。'] : []),
   ].join('\n') + PROMPT_DATA_MARKER + JSON.stringify({ operation: 'synthesis', mode: plan.mode, today: brief.today, projects: brief.projects, previous: brief.previous, memos });
 }
 
-export type SynthesisDropReason = 'malformed' | 'empty-text' | 'too-long' | 'no-refs' | 'unknown-ref' | 'too-few-refs' | 'no-new-memo' | 'repeated' | 'duplicate' | 'over-limit';
-export const SYNTHESIS_DROP_REASONS = ['malformed', 'empty-text', 'too-long', 'no-refs', 'unknown-ref', 'too-few-refs', 'no-new-memo', 'repeated', 'duplicate', 'over-limit'] as const satisfies readonly SynthesisDropReason[];
+export type SynthesisDropReason = 'malformed' | 'empty-text' | 'too-long' | 'no-refs' | 'unknown-ref' | 'too-few-refs' | 'too-many-refs' | 'no-new-memo' | 'repeated' | 'duplicate' | 'over-limit';
+export const SYNTHESIS_DROP_REASONS = ['malformed', 'empty-text', 'too-long', 'no-refs', 'unknown-ref', 'too-few-refs', 'too-many-refs', 'no-new-memo', 'repeated', 'duplicate', 'over-limit'] as const satisfies readonly SynthesisDropReason[];
+/** 1つの項目に挙げられる根拠のメモの上限。超えた項目は落とす。 */
+export const SYNTHESIS_MAX_SOURCES = 20;
+/** 応答の項目がすべてこれらの理由で落ちたときは、応答の形式の不正として作り直させる（参照名の書き方の誤りなど）。 */
+const FORMAT_DROPS: readonly SynthesisDropReason[] = ['malformed', 'empty-text', 'no-refs', 'unknown-ref'];
 /** 検証を通った項目。根拠は入力へ対応付け済み。 */
 export interface SynthesisDraft { section: SynthesisSection; text: string; firstStep?: string; sources: SynthesisCandidate[] }
 export interface SynthesisDrop { section: SynthesisSection; reason: SynthesisDropReason }
 /** 同じ欄・同じ根拠の組み合わせかを比べる鍵。 */
 export const synthesisSourceKey = (section: SynthesisSection, inputIds: string[]): string => `${section}|${[...inputIds].sort().join(',')}`;
+/** 繰り返しの判定に使うキー。根拠のメモに後から訂正が届いていれば、同じ欄・同じ根拠でも別の項目として扱う。 */
+export const synthesisRepeatKey = (section: SynthesisSection, sources: { inputId: string; latestId: string }[]): string =>
+  `${section}|${sources.map(s => `${s.inputId}@${s.latestId}`).sort().join(',')}`;
+/** 制御文字と、表示の向きを変える文字を除く（改行とタブは、1行にする処理で空白になる）。 */
+const stripControls = (text: string): string => text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
 
 export class InvalidSynthesisOutput extends Error {
   constructor() { super('週次の統合の応答の形式が不正です'); this.name = 'InvalidSynthesisOutput'; }
@@ -227,24 +238,27 @@ export function validateSynthesisOutput(raw: string, plan: SynthesisPlan, option
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) { drop('malformed'); continue; }
       const { refs, text: rawText, first_step: rawStep } = entry as Record<string, unknown>;
       if (typeof rawText !== 'string' || !Array.isArray(refs)) { drop('malformed'); continue; }
-      const text = oneLine(options.hide(rawText));
+      // 制御文字は伏せる前に除く（秘密情報らしい文字列の途中に挟まれて、伏せ字を逃れないようにする）。
+      const text = oneLine(options.hide(stripControls(rawText)));
       if (!text) { drop('empty-text'); continue; }
       if ([...text].length > SYNTHESIS_TEXT_CHARS) { drop('too-long'); continue; }
       const names = [...new Set(refs.filter((r): r is string => typeof r === 'string').map(r => r.trim()))];
       if (!names.length) { drop('no-refs'); continue; }
       if (names.some(name => !plan.refs.has(name))) { drop('unknown-ref'); continue; }
       const sources = [...new Set(names.map(name => plan.refs.get(name)!))];
+      if (sources.length > SYNTHESIS_MAX_SOURCES) { drop('too-many-refs'); continue; }
       if (TWO_SOURCE_SECTIONS.includes(section) && sources.length < 2) { drop('too-few-refs'); continue; }
       if (plan.mode === 'weekly' && NEW_MEMO_SECTIONS.includes(section) && !sources.some(s => s.isNew)) { drop('no-new-memo'); continue; }
       const key = synthesisSourceKey(section, sources.map(s => s.inputId));
-      if (options.previousKeys.has(key)) { drop('repeated'); continue; }
+      if (options.previousKeys.has(synthesisRepeatKey(section, sources))) { drop('repeated'); continue; }
       if (seen.has(key)) { drop('duplicate'); continue; }
       if (kept >= SYNTHESIS_ITEMS_PER_SECTION) { drop('over-limit'); continue; }
-      const step = section === 'stalled' && typeof rawStep === 'string' ? oneLine(options.hide(rawStep)) : '';
+      const step = section === 'stalled' && typeof rawStep === 'string' ? oneLine(options.hide(stripControls(rawStep))) : '';
       seen.add(key); kept++;
       items.push({ section, text, ...(step && [...step].length <= SYNTHESIS_FIRST_STEP_CHARS ? { firstStep: step } : {}), sources });
     }
   }
+  if (!items.length && dropped.length && dropped.every(d => FORMAT_DROPS.includes(d.reason))) throw new InvalidSynthesisOutput();
   return { items, dropped };
 }
 

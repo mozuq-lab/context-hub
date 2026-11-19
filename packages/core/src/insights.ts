@@ -67,7 +67,7 @@ const RUNNING_GRACE_MS = 60_000;
 export function buildInsights(config: HubConfig, state: SynthesisState | undefined, units: EffectiveInput[], now = new Date()): Insights {
   const head = { schema_version: 1 as const, generated_at: now.toISOString() }, interval_days = config.synthesis.intervalDays;
   if (!config.synthesis.enabled || !state) return { ...head, enabled: false, interval_days, latest: null, last_attempt: null, next_due_at: null, record_problems: 0 };
-  const chains = new Map(units.map(u => [u.chain.root.id, u.chain])), latest = state.lastSuccess, last = state.lastAttempt;
+  const chains = new Map(units.map(u => [u.chain.root.id, u.chain])), latest = state.lastShown, last = state.lastAttempt;
   const items = (latest?.items ?? []).flatMap((item): InsightItem[] => {
     const sources = item.sources.flatMap(s => { const chain = chains.get(s.input_id); return chain ? [{ input_id: s.input_id, path: chain.root.path, occurred_at: chain.root.occurred_at, corrected: chain.latest.id !== s.latest_id }] : []; });
     const built = { key: item.key, section: item.section, text: item.text, ...(item.first_step ? { first_step: item.first_step } : {}), sources };
@@ -107,6 +107,14 @@ const DAY = 86_400_000;
 const daysAgo = (iso: string, now: Date): number => Math.max(0, Math.floor((now.getTime() - Date.parse(iso)) / DAY));
 /** リンク先。空白や括弧を含むパスは、リンクが途中で切れないよう山括弧で囲む。 */
 const destination = (path: string) => /[\s()]/.test(path) ? `<${path}>` : path;
+/**
+ * 箇条書きの行頭に置くモデルの本文。行頭の記号が、見出し・引用・入れ子の箇条書き・区切り線・コードブロックとして読まれないよう、
+ * バックスラッシュで打ち消す（「1. 」のような番号は、点の前に入れる）。
+ */
+const leadText = (text: string): string => {
+  const safe = listText(text);
+  return /^[#>+\-*=_~`]/.test(safe) ? `\\${safe}` : safe.replace(/^(\d{1,9})([.)])/, '$1\\$2');
+};
 
 /**
  * HOMEとふりかえりの「今週の気づき」（前後の空行は含めない）。示す項目がなければ空文字。
@@ -116,7 +124,7 @@ export function insightsSection(config: HubConfig, insights: Insights, now = new
   const latest = insights.latest;
   if (!insights.enabled || !latest?.items.length) return '';
   const day = (iso: string) => dateLabel(iso, config.timezone).slice(0, 10), age = daysAgo(latest.created_at, now), { counts } = latest;
-  const row = (item: InsightItem) => `- ${listText(item.text)}${item.first_step ? `（最初の一歩: ${listText(item.first_step)}）` : ''} — 根拠: ${item.sources.map(s => `[${day(s.occurred_at)}のメモ](${destination(s.path)})${s.corrected ? '（訂正あり）' : ''}`).join('、')}`;
+  const row = (item: InsightItem) => `- ${leadText(item.text)}${item.first_step ? `（最初の一歩: ${listText(item.first_step)}）` : ''} — 根拠: ${item.sources.map(s => `[${day(s.occurred_at)}のメモ](${destination(s.path)})${s.corrected ? '（訂正あり）' : ''}`).join('、')}`;
   const blocks = SYNTHESIS_SECTIONS.flatMap(section => {
     const rows = latest.items.filter(item => item.section === section).map(row);
     return rows.length ? [`### ${SYNTHESIS_SECTION_LABELS[section]}\n${rows.join('\n')}`] : [];
@@ -140,7 +148,7 @@ export function insightsNotices(config: HubConfig, build: InsightsBuild, now = n
   const when = (iso: string) => dateLabel(iso, config.timezone);
   if (last?.status === 'failed' && !synthesisMayBeRunning(config, last, now)) {
     const next = state.nextDueAt ? `次の自動実行は${when(state.nextDueAt)}以降です。` : '';
-    const kept = state.lastSuccess?.items.length ? '前回までの気づきは表示したままにしています。' : '';
+    const kept = state.lastShown?.items.length ? '前回までの気づきは表示したままにしています。' : '';
     lines.push(`- 週次の統合に失敗しました（${errorLabels[last.error ?? 'llm-error']}）。${when(last.created_at)}の実行です。${kept}${next}${state.failedStreak < SYNTHESIS_MAX_ATTEMPTS
       ? `すぐにやり直すには \`ctx cycle --retry-failed\`（連続${SYNTHESIS_MAX_ATTEMPTS}回まで）か \`ctx synthesize --force\` を実行してください。`
       : `${state.failedStreak}回続けて失敗しています。設定のsynthesisとモデルの状態を確かめてから \`ctx synthesize --force\` でやり直せます。`}`);
@@ -149,8 +157,8 @@ export function insightsNotices(config: HubConfig, build: InsightsBuild, now = n
     const warnings = synthesisWarnings(last);
     if (warnings.includes('partial')) lines.push(`- 週次の統合で、${last.calls.length}回の呼び出しのうち${last.calls.filter(c => c.error !== null).length}回が失敗しました。成功した分だけを載せています。`);
     if (warnings.includes('slow')) {
-      const slowest = Math.max(...last.calls.map(c => c.elapsed_ms));
-      lines.push(`- 週次の統合の所要時間が${Math.round(slowest / 1000)}秒で、OpenClawの待ち時間（${OPENCLAW_WAIT_MS / 1000}秒）${slowest >= OPENCLAW_WAIT_MS ? 'を超えています' : 'に近づいています'}。設定のsynthesis.maxFocusMemos・synthesis.maxContextMemosを減らすか、synthesis.thinkingを下げてください。`);
+      const slowest = Math.max(...last.calls.map(c => c.slowest_ms));
+      lines.push(`- 週次の統合で、モデルの応答に${Math.round(slowest / 1000)}秒かかりました。OpenClawの待ち時間（${OPENCLAW_WAIT_MS / 1000}秒）${slowest >= OPENCLAW_WAIT_MS ? 'を超えています' : 'に近づいています'}。設定のsynthesis.maxFocusMemos・synthesis.maxContextMemosを減らすか、synthesis.thinkingを下げてください。`);
     }
   }
   for (const path of state.problems) lines.push(`- [週次の統合の記録が不正です](${destination(path)})（直すか別の場所へ移すまで、自動では実行しません）`);

@@ -5,10 +5,10 @@ import { PromptTooLargeError } from './infer.js';
 import { logOperation } from './logger.js';
 import { readProjects } from './projects.js';
 import { completeRedacted, redactPrompt, redactText, secretSettings } from './secrets.js';
-import { hash, Vault } from './storage.js';
+import { hash, LockTimeoutError, Vault } from './storage.js';
 import {
-  buildSynthesisBrief, buildSynthesisPrompt, InvalidSynthesisOutput, mergeSynthesisDrafts, synthesisSourceKey, validateSynthesisOutput,
-  SYNTHESIS_DROP_REASONS, SYNTHESIS_FIRST_STEP_CHARS, SYNTHESIS_ITEMS_PER_SECTION, SYNTHESIS_MAX_OUTPUT_CHARS, SYNTHESIS_PROMPT_VERSION, SYNTHESIS_SECTIONS, SYNTHESIS_TEXT_CHARS,
+  buildSynthesisBrief, buildSynthesisPrompt, InvalidSynthesisOutput, mergeSynthesisDrafts, synthesisRepeatKey, validateSynthesisOutput,
+  SYNTHESIS_DROP_REASONS, SYNTHESIS_FIRST_STEP_CHARS, SYNTHESIS_MAX_SOURCES, SYNTHESIS_ITEMS_PER_SECTION, SYNTHESIS_MAX_OUTPUT_CHARS, SYNTHESIS_PROMPT_VERSION, SYNTHESIS_SECTIONS, SYNTHESIS_TEXT_CHARS,
   type SynthesisBrief, type SynthesisDraft, type SynthesisDrop, type SynthesisMode,
 } from './synthesis-prompt.js';
 import type { HubConfig, LlmClient, LlmCompletion } from './types.js';
@@ -46,7 +46,7 @@ const runItemSchema = z.object({
   /** モデルが書いた本文（AI生成・未検証）。1行。 */ text: z.string().min(1).max(SYNTHESIS_TEXT_CHARS * 2),
   /** 止まっている意図の、最初の一歩。 */ first_step: z.string().min(1).max(SYNTHESIS_FIRST_STEP_CHARS * 2).optional(),
   /** 根拠のメモ。latest_idは実行時点での訂正チェーンの最新の入力で、後から訂正が届いたかの判定に使う。 */
-  sources: z.array(z.object({ input_id: inputId, latest_id: inputId }).strict()).min(1).max(20),
+  sources: z.array(z.object({ input_id: inputId, latest_id: inputId }).strict()).min(1).max(SYNTHESIS_MAX_SOURCES),
 }).strict();
 export const synthesisRunSchema = z.object({
   schema_version: z.literal(1),
@@ -60,9 +60,10 @@ export const synthesisRunSchema = z.object({
   counts: z.object({ new_memos: count, focus: count, context: count, omitted: count }).strict(),
   /**
    * モデルの呼び出しごとの記録。開始だけを記録した時点では空。
+   * elapsed_msは形式の作り直しを含む所要時間、slowest_msは最も長くかかった1回の試行（OpenClawの待ち時間と比べる）。
    * attemptsは形式の作り直しを含む回数（時間が足りず始めなかった呼び出しは0）、prompt_bytesは最後に送ったプロンプトの大きさ、focusは全文で渡したメモの件数。
    */
-  calls: z.array(z.object({ elapsed_ms: count, attempts: z.number().int().min(0).max(2), prompt_bytes: count, focus: count, error: errorKind.nullable() }).strict()).max(4),
+  calls: z.array(z.object({ elapsed_ms: count, slowest_ms: count, attempts: z.number().int().min(0).max(2), prompt_bytes: count, focus: count, error: errorKind.nullable() }).strict()).max(4),
   items: z.array(runItemSchema).max(SYNTHESIS_SECTIONS.length * SYNTHESIS_ITEMS_PER_SECTION),
   /** 検証で落とした項目の欄と理由。本文は残さない。 */ dropped: z.array(z.object({ section: z.enum(SYNTHESIS_SECTIONS), reason: z.enum(SYNTHESIS_DROP_REASONS) }).strict()).max(600),
   error: errorKind.nullable(),
@@ -89,6 +90,11 @@ export interface SynthesisState {
   /** 最後の実行（失敗を含む）。次に自動で実行する時刻の基準。 */ lastAttempt?: SynthesisRun;
   /** 最後に成功した実行（項目がなかった回を含む）。この後に届いたメモを新しいメモとして扱う。 */ lastSuccess?: SynthesisRun;
   /** 最後に項目を出した実行。同じ項目を繰り返さないための基準。 */ lastWithItems?: SynthesisRun;
+  /**
+   * HOMEとアプリに出す実行。ふつうは最後に成功した実行で、項目がなかった回の後は欄を出さない。
+   * ただし、前回と同じ項目しか返らず繰り返しとして落とした回の後は、前回までの項目がいまも当てはまるので、最後に項目を出した実行を出す。
+   */
+  lastShown?: SynthesisRun;
   /** 末尾で続いている失敗の回数。 */ failedStreak: number;
   /** 次に自動で実行する時刻。まだ実行していなければnull。 */ nextDueAt: string | null;
 }
@@ -96,8 +102,10 @@ export function synthesisState(config: HubConfig, records: { runs: SynthesisRun[
   const { runs, problems } = records, lastAttempt = runs.at(-1);
   let failedStreak = 0;
   for (let i = runs.length - 1; i >= 0 && runs[i]!.status === 'failed'; i--) failedStreak++;
+  const lastSuccess = runs.findLast(r => r.status !== 'failed'), lastWithItems = runs.findLast(r => r.status === 'ok');
+  const onlyRepeated = lastSuccess?.status === 'empty' && lastSuccess.dropped.length > 0 && lastSuccess.dropped.every(d => d.reason === 'repeated');
   return {
-    runs, problems, lastAttempt, lastSuccess: runs.findLast(r => r.status !== 'failed'), lastWithItems: runs.findLast(r => r.status === 'ok'), failedStreak,
+    runs, problems, lastAttempt, lastSuccess, lastWithItems, lastShown: onlyRepeated ? lastWithItems : lastSuccess, failedStreak,
     nextDueAt: lastAttempt ? new Date(Date.parse(lastAttempt.created_at) + config.synthesis.intervalDays * DAY).toISOString() : null,
   };
 }
@@ -107,7 +115,7 @@ export type SynthesisWarning = 'partial' | 'slow';
 export function synthesisWarnings(run: SynthesisRun): SynthesisWarning[] {
   return [
     ...(run.status !== 'failed' && run.calls.some(c => c.error !== null) ? ['partial' as const] : []),
-    ...(run.calls.some(c => c.elapsed_ms >= SYNTHESIS_SLOW_MS) ? ['slow' as const] : []),
+    ...(run.calls.some(c => c.slowest_ms >= SYNTHESIS_SLOW_MS) ? ['slow' as const] : []),
   ];
 }
 
@@ -152,7 +160,7 @@ async function prepare(config: HubConfig, vault: Vault, now: Date, options: Synt
     : !last || (options.retryFailed && last.status === 'failed' && state.failedStreak < SYNTHESIS_MAX_ATTEMPTS) || now.getTime() >= Date.parse(state.nextDueAt!) ? undefined
     : 'not-due' as const;
   const shown = state.lastWithItems?.items ?? [];
-  const previousKeys = new Set(shown.map(i => synthesisSourceKey(i.section, i.sources.map(s => s.input_id))));
+  const previousKeys = new Set(shown.map(i => synthesisRepeatKey(i.section, i.sources.map(s => ({ inputId: s.input_id, latestId: s.latest_id })))));
   if (blocked && !always) return { state, skip: blocked, previousKeys };
   const brief = buildSynthesisBrief(config, await readEffectiveInputs(config), await readProjects(config), {
     now, since: state.lastSuccess?.period.until, previous: shown.map(i => ({ section: i.section, text: i.text, sourceIds: i.sources.map(s => s.input_id) })),
@@ -225,7 +233,7 @@ export async function runSynthesis(config: HubConfig, llm: LlmClient, options: S
     // 呼び出しは1つずつ順に行う。全文で渡すメモが1回の上限に収まれば1回だけ。
     for (let chunk = 0; chunk < plan.chunks.length; chunk++) {
       const begun = performance.now();
-      let attempts = 0, bytes = 0, error: SynthesisErrorKind | null = null;
+      let attempts = 0, bytes = 0, slowest = 0, error: SynthesisErrorKind | null = null;
       try {
         for (;;) {
           // 最初の呼び出しのほかは、残りの時間が足りなければ始めない。
@@ -236,7 +244,8 @@ export async function runSynthesis(config: HubConfig, llm: LlmClient, options: S
             // 形式が崩れた応答は、理由を添えて1回だけ作り直させる。
             const prompt = buildSynthesisPrompt(brief, chunk, attempts === 2);
             bytes = sentBytes(config, prompt);
-            const completion = await complete(config, llm, prompt, Math.max(1, left));
+            const tried = performance.now();
+            const completion = await complete(config, llm, prompt, Math.max(1, left)).finally(() => { slowest = Math.max(slowest, Math.round(performance.now() - tried)); });
             model = completion.model ?? model;
             const result = validateSynthesisOutput(completion.text, plan, { previousKeys: prepared.previousKeys, hide });
             perCall.push(result.items); dropped.push(...result.dropped);
@@ -244,20 +253,26 @@ export async function runSynthesis(config: HubConfig, llm: LlmClient, options: S
           } catch (failure) { if (!(failure instanceof InvalidSynthesisOutput) || attempts === 2) throw failure; }
         }
       } catch (failure) { error = errorKindOf(failure); }
-      calls.push({ elapsed_ms: attempts ? Math.round(performance.now() - begun) : 0, attempts, prompt_bytes: bytes, focus: plan.chunks[chunk]!.length, error });
+      calls.push({ elapsed_ms: attempts ? Math.round(performance.now() - begun) : 0, slowest_ms: slowest, attempts, prompt_bytes: bytes, focus: plan.chunks[chunk]!.length, error });
     }
     const merged = perCall.length > 1 ? mergeSynthesisDrafts(perCall) : { items: perCall[0] ?? [], dropped: [] };
-    const failed = calls.every(c => c.error !== null);
-    const run = synthesisRunSchema.parse({
-      ...opened, status: failed ? 'failed' : merged.items.length ? 'ok' : 'empty', llm: { ...opened.llm, model: model ?? opened.llm.model }, calls,
+    const failed = calls.every(c => c.error !== null), llmUsed = { ...opened.llm, model: model ? [...model].slice(0, 400).join('') : opened.llm.model };
+    const result = synthesisRunSchema.safeParse({
+      ...opened, status: failed ? 'failed' : merged.items.length ? 'ok' : 'empty', llm: llmUsed, calls,
       items: merged.items.map(item => ({
         key: hash([opened.id, item.section, item.sources.map(s => s.inputId).sort().join(','), item.text].join('\n')), section: item.section, text: item.text,
         ...(item.firstStep ? { first_step: item.firstStep } : {}), sources: item.sources.map(s => ({ input_id: s.inputId, latest_id: s.latestId })),
       })),
       dropped: [...dropped, ...merged.dropped].slice(0, 600), error: failed ? calls[0]!.error : null,
     } satisfies SynthesisRun);
-    // 開始の記録を、結果で置き換える。
-    await vault.withLock(() => vault.write(synthesisRunPath(run.id), save(run)));
+    // 結果が記録の形に収まらないときも例外で止めず、応答の不正として失敗を記録する（途中で止まった扱いのまま残さない）。
+    const run = result.success ? result.data
+      : synthesisRunSchema.parse({ ...opened, status: 'failed', llm: llmUsed, calls, items: [], dropped: [], error: 'invalid-output' } satisfies SynthesisRun);
+    // 開始の記録を、結果で置き換える。ほかの書き込みでロックを待ちきれないときは、数回まで待ち直す（検証済みの結果を捨てない）。
+    for (let tries = 1; ; tries++) {
+      try { await vault.withLock(() => vault.write(synthesisRunPath(run.id), save(run))); break; }
+      catch (failure) { if (!(failure instanceof LockTimeoutError) || tries >= 3) throw failure; }
+    }
     return { ran: true, id: run.id, status: run.status, mode: run.mode, items: run.items.length, dropped: run.dropped.length, calls: run.calls.length, warnings: synthesisWarnings(run), ...(run.error ? { error: run.error } : {}) };
   }, 'organize');
   if (outcome.ran && !await logOperation(config, { op: 'synthesize', ms: Date.now() - started, ...(outcome.status === 'failed' ? { error_kind: 'llm' as const } : {}), counts: { processed: outcome.items, failed: outcome.status === 'failed' ? 1 : 0, skipped: outcome.dropped } })) process.stderr.write('警告: 運用ログを書き込めませんでした。処理結果は保持されています。\n');

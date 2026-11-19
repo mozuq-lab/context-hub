@@ -452,11 +452,108 @@ describe('週次の統合', () => {
     await runSynthesis(config, fake(ref => answer({ stalled: [{ refs: [ref('土')], text: '続きが見当たりません' }] })).llm, { now: at('2026-11-08T00:00:00Z') });
     const run = (await runs(vault))[0]!;
     expect(synthesisWarnings(run)).toEqual([]);
-    const slow: SynthesisRun = { ...run, calls: [{ ...run.calls[0]!, elapsed_ms: SYNTHESIS_SLOW_MS + 5000 }] };
+    // 形式の作り直しを含めた合計ではなく、1回の試行の長さで判定する。
+    const retried: SynthesisRun = { ...run, calls: [{ ...run.calls[0]!, attempts: 2, elapsed_ms: SYNTHESIS_SLOW_MS + 5000, slowest_ms: 50_000 }] };
+    expect(synthesisWarnings(retried)).toEqual([]);
+    const slow: SynthesisRun = { ...run, calls: [{ ...run.calls[0]!, elapsed_ms: SYNTHESIS_SLOW_MS + 5000, slowest_ms: SYNTHESIS_SLOW_MS + 5000 }] };
     expect(synthesisWarnings(slow)).toEqual(['slow']);
     await vault.write(`${synthesisDir}/${run.id}.json`, JSON.stringify(slow, null, 2) + '\n');
     await rebuildDashboard(config, { now: at('2026-11-08T01:00:00Z') });
-    expect(await vault.read('HOME.md')).toMatch(/## 失敗と競合\n[\s\S]*週次の統合の所要時間が95秒で、OpenClawの待ち時間（120秒）に近づいています/);
+    expect(await vault.read('HOME.md')).toMatch(/## 失敗と競合\n[\s\S]*週次の統合で、モデルの応答に95秒かかりました。OpenClawの待ち時間（120秒）に近づいています/);
+  });
+
+  test('根拠が20件を超える項目は落とし、ほかの項目は残す', async () => {
+    const { config, vault } = await setup();
+    for (let n = 0; n < 22; n++) await memo(config, `連番のメモ${String(n).padStart(2, '0')}番`, `2026-11-0${1 + (n % 7)}T${String(n).padStart(2, '0')}:00:00+09:00`);
+    const { llm } = fake((ref, payload) => answer({
+      connections: [{ refs: payload.memos.map(m => m.ref), text: 'すべてのメモがつながっています' }],
+      questions: [{ refs: [ref('連番のメモ03番')], text: '3番目のメモの続きはありますか' }],
+    }));
+    expect(await runSynthesis(config, llm, { now: at('2026-11-08T00:00:00Z') })).toMatchObject({ ran: true, status: 'ok', items: 1 });
+    const run = (await runs(vault))[0]!;
+    expect(run.items.map(i => i.section)).toEqual(['questions']);
+    expect(run.dropped).toEqual([{ section: 'connections', reason: 'too-many-refs' }]);
+  });
+
+  test('訂正の整理を待つ間に外したメモは、整理が済んだ後の回で新しいメモとして渡す', async () => {
+    const { config, vault } = await setup();
+    const a = await memo(config, '菜園の土を調べたい', '2025-01-01T09:00:00+09:00');
+    await runSynthesis(config, fake(() => answer({})).llm, { now: at('2025-01-02T00:00:00Z') });
+    await memo(config, '資格の講習に関心がある', '2025-01-03T09:00:00+09:00');
+    // 訂正が届いたが、次の回までに整理されなかった。
+    await correctInput(config, a, { source: 'cli', occurredAt: '2025-01-04T09:00:00+09:00', receivedAt: '2025-01-04T09:00:00+09:00', text: '菜園の土はもう調べた。次は肥料を選ぶ' });
+    const second = fake(() => answer({}));
+    await runSynthesis(config, second.llm, { now: at('2025-01-09T00:00:00Z') });
+    expect(payloadOf(second.prompts[0]!).memos.map(m => m.text)).toEqual(['資格の講習に関心がある']);
+    // 訂正の整理が済んだ後の回では、訂正を重ねたメモを新しいメモとして渡す。
+    await organize(config, new MockLlm([organized({ summary: '肥料を選ぶ段階に進んだ' })]));
+    const third = fake(() => answer({}));
+    expect(await runSynthesis(config, third.llm, { now: at('2025-01-16T00:00:00Z') })).toMatchObject({ ran: true });
+    const corrected = payloadOf(third.prompts[0]!).memos.find(m => m.text === '肥料を選ぶ段階に進んだ');
+    expect(corrected).toMatchObject({ new: true });
+    expect((await runs(vault))[2]!.counts.new_memos).toBe(1);
+  });
+
+  test('前回の項目の根拠に訂正が届いた後は、同じ欄・同じ根拠の項目を繰り返しとして落とさない', async () => {
+    const { config, vault } = await setup();
+    const a = await memo(config, '菜園の土を調べたい', '2026-11-01T09:00:00+09:00');
+    await runSynthesis(config, fake(ref => answer({ stalled: [{ refs: [ref('土')], text: '土を調べる続きが見当たりません' }] })).llm, { now: at('2026-11-02T00:00:00Z') });
+    await correctInput(config, a, { source: 'cli', occurredAt: '2026-11-05T09:00:00+09:00', receivedAt: '2026-11-05T09:00:00+09:00', text: '菜園の土はもう調べた。次は肥料を選ぶ' });
+    await organize(config, new MockLlm([organized({ summary: '肥料を選ぶ段階に進んだ' })]));
+    const { llm } = fake(ref => answer({ stalled: [{ refs: [ref('肥料')], text: '肥料を選ぶ続きが見当たりません' }] }));
+    expect(await runSynthesis(config, llm, { now: at('2026-11-09T00:00:00Z') })).toMatchObject({ ran: true, status: 'ok', items: 1 });
+    expect((await runs(vault))[1]!.dropped).toEqual([]);
+  });
+
+  test('参照の誤りで応答の項目がすべて落ちたときは、形式の不正として1回だけ作り直させる', async () => {
+    const { config, vault } = await setup();
+    await memo(config, '菜園の土を調べたい', '2026-11-04T09:00:00+09:00');
+    const wrong = () => answer({ stalled: [{ refs: ['M1'], text: '続きが見当たりません' }] });
+    const fixed = fake((ref, _payload, call) => call === 1 ? wrong() : answer({ stalled: [{ refs: [ref('土')], text: '続きが見当たりません' }] }));
+    expect(await runSynthesis(config, fixed.llm, { now: at('2026-11-08T00:00:00Z') })).toMatchObject({ ran: true, status: 'ok', items: 1 });
+    expect(fixed.prompts).toHaveLength(2);
+    expect(fixed.prompts[1]).toContain('前回の応答は形式不正です');
+    // 作り直しても同じなら、失敗として記録する（前回の成功の時刻を進めない）。
+    const again = fake(() => wrong());
+    expect(await runSynthesis(config, again.llm, { now: at('2026-11-15T00:00:00Z'), force: true })).toMatchObject({ ran: true, status: 'failed', error: 'invalid-output' });
+    expect(again.prompts).toHaveLength(2);
+    expect((await runs(vault))[1]!.calls[0]).toMatchObject({ attempts: 2, error: 'invalid-output' });
+  });
+
+  test('前回と同じ項目しか返らなかった回の後も、前回までの気づきを出したままにする', async () => {
+    const { config, vault } = await setup();
+    await memo(config, '菜園の土を調べたい', '2026-11-04T09:00:00+09:00');
+    const same = () => fake(ref => answer({ stalled: [{ refs: [ref('土')], text: '続きが見当たりません' }] })).llm;
+    await runSynthesis(config, same(), { now: at('2026-11-08T00:00:00Z') });
+    expect(await runSynthesis(config, same(), { now: at('2026-11-08T01:00:00Z'), force: true })).toMatchObject({ ran: true, status: 'empty' });
+    await rebuildDashboard(config, { now: at('2026-11-08T02:00:00Z') });
+    const insights = await view(vault);
+    expect(insights.latest?.id).toBe((await runs(vault))[0]!.id);
+    expect(insights.latest?.items).toHaveLength(1);
+    expect(await vault.read('HOME.md')).toContain('## 今週の気づき（AI生成・未検証）');
+    // 足せる項目がなかった回（繰り返しも落とした項目もない）の後は、欄を出さない。
+    await runSynthesis(config, fake(() => answer({})).llm, { now: at('2026-11-08T03:00:00Z'), force: true });
+    await rebuildDashboard(config, { now: at('2026-11-08T04:00:00Z') });
+    expect((await view(vault)).latest?.items).toEqual([]);
+    expect(await vault.read('HOME.md')).not.toContain('## 今週の気づき');
+  });
+
+  test('モデルの本文の制御文字を除き、行頭の記号がMarkdownの見出しや引用として読まれないようにする', async () => {
+    const { config, vault } = await setup();
+    await memo(config, '菜園の土を調べたい', '2026-11-04T09:00:00+09:00');
+    const { llm } = fake(ref => answer({
+      stalled: [{ refs: [ref('土')], text: '1. 番号のような意図‮', first_step: '> 引用のような一歩\u0007' }],
+      questions: [{ refs: [ref('土')], text: '# 見出しのような\u001b問い' }],
+    }));
+    await runSynthesis(config, llm, { now: at('2026-11-08T00:00:00Z') });
+    const run = (await runs(vault))[0]!;
+    expect(run.items.map(i => i.text)).toEqual(['1. 番号のような意図', '# 見出しのような問い']);
+    expect(run.items[0]!.first_step).toBe('> 引用のような一歩');
+    await rebuildDashboard(config, { now: at('2026-11-08T01:00:00Z') });
+    const home = (await vault.read('HOME.md'))!;
+    expect(home).toContain('\n- 1\\. 番号のような意図（最初の一歩: > 引用のような一歩）');
+    expect(home).toContain('\n- \\# 見出しのような問い — 根拠:');
+    expect(home).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f‪-‮⁦-⁩]/);
   });
 
   test('壊れた記録があれば自動では実行せず、HOMEとdoctorで示す', async () => {
