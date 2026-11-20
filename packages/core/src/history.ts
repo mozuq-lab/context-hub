@@ -121,12 +121,14 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
   }
   for (const [key, units] of inputsByMonth) {
     const shown = units.slice(0, INPUTS_PER_MONTH).map(u => {
-      const input = u.chain.root, summary = u.receipt?.result?.summary, s = state(u);
-      const flags = [u.chain.revisions.length ? (u.pendingCorrection ? '訂正未反映' : '訂正あり') : '', input.project !== id ? '関連候補（AI推定）' : ''].filter(Boolean);
-      return `  - ${day(input.occurred_at)} ${input.kind === 'work-summary' ? '作業要約' : 'メモ'} ${ref(input)} ${summary ? clip(summary) : s === 'failed' ? '（整理失敗）' : '（整理待ち）'}${flags.length ? ` / ${flags.join(' / ')}` : ''}`;
+      const input = u.chain.root, s = state(u);
+      // 本人が直接追加した行動は整理しないため、最新の文面（訂正があれば訂正）を本人の言葉のまま示す。
+      const summary = input.kind === 'action' ? u.chain.latest.text : u.receipt?.result?.summary;
+      const flags = [u.chain.revisions.length ? (u.pendingCorrection ? '訂正未反映' : '訂正あり') : '', input.project !== id ? (input.kind === 'action' ? '統合元へ追加' : '関連候補（AI推定）') : ''].filter(Boolean);
+      return `  - ${day(input.occurred_at)} ${input.kind === 'work-summary' ? '作業要約' : input.kind === 'action' ? '本人が追加した行動' : 'メモ'} ${ref(input)} ${summary ? clip(summary) : s === 'failed' ? '（整理失敗）' : '（整理待ち）'}${flags.length ? ` / ${flags.join(' / ')}` : ''}`;
     });
-    const summaries = units.filter(u => u.chain.root.kind === 'work-summary').length;
-    events.push({ at: `${key}-01T00:00:00Z`, order: -1, line: [`- 届いた入力: ${units.length}件（作業要約 ${summaries} / メモ ${units.length - summaries}）`, ...shown, ...(units.length > INPUTS_PER_MONTH ? [`  - ほか${units.length - INPUTS_PER_MONTH}件（検索で絞り込めます）`] : [])].join('\n') });
+    const summaries = units.filter(u => u.chain.root.kind === 'work-summary').length, actions = units.filter(u => u.chain.root.kind === 'action').length;
+    events.push({ at: `${key}-01T00:00:00Z`, order: -1, line: [`- 届いた入力: ${units.length}件（作業要約 ${summaries} / メモ ${units.length - summaries - actions}${actions ? ` / 本人が追加した行動 ${actions}` : ''}）`, ...shown, ...(units.length > INPUTS_PER_MONTH ? [`  - ほか${units.length - INPUTS_PER_MONTH}件（検索で絞り込めます）`] : [])].join('\n') });
   }
 
   // 月ごとにまとめる。入力の一覧は月の先頭に置き、ほかの出来事は日時の順に並べる。

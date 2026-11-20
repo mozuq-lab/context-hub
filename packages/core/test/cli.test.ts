@@ -108,3 +108,21 @@ test('CLIでバックアップを確かめると結果を記録し、復元で�
  const failed=await cli(config,['backup','verify']);expect(failed.code).toBe(1);expect(JSON.parse(failed.out).check.status).toBe('failed');
  expect(JSON.parse((await cli(config,['backup','status'])).out).restore_point.archive).toBe(name);
 },30000);
+test('CLIで本人の行動を次の一手に追加し、作業要約の次の一手を行動にできる',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ expect((await cli(config,['project','add','hub','--title','集約ツール'])).code).toBe(0);
+ expect((await cli(config,['item','add','hub','請求書を送る'])).code).not.toBe(0);
+ const added=await cli(config,['item','add','hub','請求書を送る','--confirm']);expect(added.code).toBe(0);
+ expect(JSON.parse(added.out)).toMatchObject({deduped:false,projectId:'hub'});
+ expect(await readFile(join(root,'vault/HOME.md'),'utf8')).toContain('  - 本人が追加: 請求書を送る');
+ expect((await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-30T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n')).code).toBe(0);
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ let items=JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string;text:string;added_by_person?:boolean;from?:unknown}[];
+ expect(items.map(i=>[i.text,i.added_by_person??false])).toEqual([['本人が追加: 請求書を送る',true],['利用者に見せる',false]]);
+ const ai=items.find(i=>i.text==='利用者に見せる')!;
+ expect((await cli(config,['item','add','hub','--from-key',ai.key,'--confirm'])).code).toBe(0);
+ items=JSON.parse((await cli(config,['item','list','hub'])).out);
+ expect(items.map(i=>i.text)).toEqual(['本人が追加: 請求書を送る','本人が追加: 利用者に見せる']);
+ expect(items[1]!.from).toMatchObject({text:'利用者に見せる',key:ai.key});
+ expect((await cli(config,['item','add','hub','x','--from','IN-01M7WSZTS5GZJ4A16AYVW0T46Z','--confirm'])).code).not.toBe(0);
+},20000);

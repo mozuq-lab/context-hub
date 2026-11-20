@@ -29,11 +29,11 @@ export interface HubConfig {
 
 export interface CaptureRequest {
   source: string; sourceEventId?: string; text: string; occurredAt: string; receivedAt?: string;
-  kind?: 'memo' | 'work-summary'; project?: string; tool?: string; meta?: Record<string, string>;
+  kind?: 'memo' | 'work-summary' | 'action'; project?: string; tool?: string; meta?: Record<string, string>;
 }
 export interface CaptureResult { inputId: string; deduped: boolean; path: string; receivedAt: string }
 export interface Input {
-  schema_version: 1; id: string; kind: 'memo' | 'work-summary' | 'correction'; source: string; source_event_id: string; corrects_input_id?: string;
+  schema_version: 1; id: string; /** actionは本人が直接追加した次の一手（モデルで整理しない）。 */ kind: 'memo' | 'work-summary' | 'action' | 'correction'; source: string; source_event_id: string; corrects_input_id?: string;
   occurred_at: string; received_at: string; project?: string; tool?: string;
   meta?: Record<string, string>; origin: 'user-note' | 'ai-self-report'; text: string; path: string;
 }

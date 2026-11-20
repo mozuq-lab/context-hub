@@ -66,12 +66,13 @@ export function activeSchedules(records: ItemSchedule[], projectId?: string): Ma
  * 作業要約が届くたびに次の一手の根拠（入力ID）が変わり、同じ本文でも別の項目になるため。
  * 引き継ぎ先のない記録だけを付け直しの対象として返す。解決済み・完了の項目の記録は返さない。
  */
-export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: { key: string; section: string; text: string; resolution: unknown }[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
+export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: { key: string; section: string; text: string; resolution: unknown; input_id?: string; action?: unknown }[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
   const active = activeSchedules(records, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, ItemSchedule>();
   // 項目自身のキーで記録があれば（日付を外した記録を含む）、それが本人の最新の判断なので引き継ぎより優先する。
   const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
   const loose = [...active.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
-  const same = (r: ItemSchedule, i: { section: string; text: string }) => r.section === i.section && r.text === i.text;
+  // 本人が追加した行動は、文面を直しても同じ行動（同じ入力）なので、直す前の文面に付けた日付を引き継ぐ。
+  const same = (r: ItemSchedule, i: { section: string; text: string; input_id?: string; action?: unknown }) => r.section === i.section && (r.text === i.text || (i.action !== undefined && r.input_id === i.input_id));
   // 引き継ぎの候補は、NOWから外れた同じ欄・同じ本文の記録のうち、日付を外した記録も含めて最新のもの。
   // 最新が日付を外した記録なら、それより前の古い日付を引き継がない（K1で付けK2で外した後、K3へ移った場合など）。
   const latestPerKey = new Map<string, ItemSchedule>();

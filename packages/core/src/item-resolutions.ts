@@ -43,6 +43,8 @@ const nowItemSchema = z.object({
   schedule: z.object({ id: z.string().regex(/^SCH-[0-9A-HJKMNP-TV-Z]{26}$/), due: z.string().nullable(), review_after: z.string().nullable() }).strict().nullable().optional(),
   // 本人がプロジェクトを指定したメモから、AIが「片付いたかも」と示したもの。未確認で、完了・解決ではない。片付いていない項目にだけ付く。
   hints: z.array(z.object({ input_id: inputIdSchema, quote: z.string().min(1).max(200), at: z.string().datetime({ offset: true }) }).strict()).max(20).optional(),
+  // 本人が直接追加した行動（入力の種類action）。fromはAIが読み取った行を行動にしたときの元の行（根拠の入力ID・直す前の本文・項目キー）。旧版の一覧にはない。
+  action: z.object({ from: z.object({ input_id: inputIdSchema, text: z.string().min(1).max(2000), key: digest.optional() }).strict().optional() }).strict().optional(),
 }).strict();
 export type NowItem = z.infer<typeof nowItemSchema>;
 export const nowItemsSchema = z.object({ schema_version: z.literal(1), project: projectIdSchema, generated_at: z.string().datetime({ offset: true }), items: z.array(nowItemSchema) }).strict();

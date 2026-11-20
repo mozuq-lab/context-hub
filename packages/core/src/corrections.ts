@@ -2,6 +2,7 @@ import { ulid } from 'ulid';
 import { eventMarker, inputIdSchema, inputSchema, readInputRecords, readInputs } from './capture.js';
 import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
 import { readProjects } from './projects.js';
+import { actionTextSchema } from './actions.js';
 import { readReceipts,rebuildNowLocked } from './views.js';
 import type { CaptureRequest, CaptureResult, HubConfig, Input } from './types.js';
 
@@ -69,6 +70,8 @@ export async function correctInput(config: HubConfig, targetId: string, request:
     const chain = chains.find(c => [c.root,...c.revisions].some(i => i.id === targetId));
     if (!chain) throw new CorrectionTargetError({code:'missing-correction-target'});
     if (chain.latest.id !== targetId) throw new CorrectionTargetError({code:'stale-correction-target',latest_input_id:chain.latest.id});
+    // 行動の文面を直すときも、行動と同じく1行・200文字以内にする（元の文面は元の入力に残る）。
+    if (chain.root.kind === 'action') { const text = actionTextSchema.safeParse(request.text); if (!text.success) throw new Error(text.error.issues[0]?.message ?? '行動の文面が不正です'); }
     if (chain.revisions.length >= 32 || [chain.root,...chain.revisions].reduce((n,i) => n+i.text.length,request.text.length) > config.capture.maxInputChars*4) throw new Error('訂正履歴の上限を超えています');
     const meta = inputSchema.omit({ text:true,path:true }).parse({ schema_version:1,id:`IN-${ulid()}`,kind:'correction',corrects_input_id:targetId,source:request.source,source_event_id:request.sourceEventId??ulid(),occurred_at:request.occurredAt,received_at:request.receivedAt??new Date().toISOString(),origin:chain.root.origin,tool:chain.root.tool,meta:request.meta });
     const marker = eventMarker(meta.source,meta.source_event_id);
