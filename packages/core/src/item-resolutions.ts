@@ -228,6 +228,8 @@ export async function setItemResolution(config: HubConfig, request: ItemResoluti
     const active = activeResolutions(records, r.projectId).get(r.itemKey);
     if (r.action !== 'reopen' && active) throw new ItemTargetError({ code: 'item-closed', state: active.action === 'exclude' ? 'excluded' : 'resolved' }, active.action === 'exclude' ? 'この項目は既に誤りとして外しています。変えるときは未解決に戻してから操作してください' : 'この項目は既に解決済みです');
     if (r.action === 'reopen' && !active) throw new ItemTargetError({ code: 'item-open' }, 'この項目は解決済みではありません');
+    // 本人が追加した行動はAIの読み取りではないため、読み違い・別のプロジェクトの話としては外さない（その例をモデルへ渡さないため）。
+    if (r.action === 'exclude' && item.action && r.reason !== 'outdated') throw new Error('本人が追加した行動は、「もう古い」としてだけ外せます（読み違い・別のプロジェクトの話はAIの読み取りに使います）');
     const record: ItemResolution = {
       schema_version: 1, id: `RES-${ulid()}`, project_id: r.projectId, item_key: r.itemKey, section: item.section, text: item.text, input_id: item.input_id,
       action: r.action, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),

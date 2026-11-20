@@ -125,4 +125,13 @@ test('CLIで本人の行動を次の一手に追加し、作業要約の次の�
  expect(items.map(i=>i.text)).toEqual(['本人が追加: 請求書を送る','本人が追加: 利用者に見せる']);
  expect(items[1]!.from).toMatchObject({text:'利用者に見せる',key:ai.key});
  expect((await cli(config,['item','add','hub','x','--from','IN-01M7WSZTS5GZJ4A16AYVW0T46Z','--confirm'])).code).not.toBe(0);
+ // 未解決の項目は行動にできない。同じ受付IDの再送は重複せず、別の内容なら断る。
+ expect((await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-31T00:00:00Z'],'## 未解決\n- 認証をどうするか\n')).code).toBe(0);
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const open=(JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string;section:string}[]).find(i=>i.section==='open')!;
+ const refused=await cli(config,['item','add','hub','--from-key',open.key,'--confirm']);expect(refused.code).not.toBe(0);expect(refused.err).toContain('未解決は行動にできません');
+ const first=JSON.parse((await cli(config,['item','add','hub','見積もりを取る','--event-id','e1','--confirm'])).out);
+ const again=JSON.parse((await cli(config,['item','add','hub','見積もりを取る','--event-id','e1','--confirm'])).out);
+ expect(again).toMatchObject({inputId:first.inputId,deduped:true,itemKey:first.itemKey});
+ expect((await cli(config,['item','add','hub','別の文面','--event-id','e1','--confirm'])).code).not.toBe(0);
 },20000);

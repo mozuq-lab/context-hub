@@ -85,7 +85,8 @@ export function effectiveSchedules(records: ItemSchedule[], projectId: string, i
     const direct = active.get(item.key), carried = latest && !isCleared(latest) ? latest : undefined;
     if (direct ?? carried) byKey.set(item.key, (direct ?? carried)!);
   }
-  const orphaned = loose.filter(r => !items.some(i => !i.resolution && same(r, i)));
+  // 行動の日付は、文面を直した後の行動を完了・外したときも、その行動のものとして付け直しを求めない（同じ入力の記録）。
+  const orphaned = loose.filter(r => !items.some(i => same(r, i) && (!i.resolution || (i.action !== undefined && r.input_id === i.input_id))));
   return { byKey, orphaned };
 }
 

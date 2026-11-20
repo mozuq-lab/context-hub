@@ -124,7 +124,7 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
       const input = u.chain.root, s = state(u);
       // 本人が直接追加した行動は整理しないため、最新の文面（訂正があれば訂正）を本人の言葉のまま示す。
       const summary = input.kind === 'action' ? u.chain.latest.text : u.receipt?.result?.summary;
-      const flags = [u.chain.revisions.length ? (u.pendingCorrection ? '訂正未反映' : '訂正あり') : '', input.project !== id ? (input.kind === 'action' ? '統合元へ追加' : '関連候補（AI推定）') : ''].filter(Boolean);
+      const flags = [u.chain.revisions.length ? (u.pendingCorrection ? '訂正未反映' : '訂正あり') : '', input.kind !== 'action' && input.project !== id ? '関連候補（AI推定）' : ''].filter(Boolean);
       return `  - ${day(input.occurred_at)} ${input.kind === 'work-summary' ? '作業要約' : input.kind === 'action' ? '本人が追加した行動' : 'メモ'} ${ref(input)} ${summary ? clip(summary) : s === 'failed' ? '（整理失敗）' : '（整理待ち）'}${flags.length ? ` / ${flags.join(' / ')}` : ''}`;
     });
     const summaries = units.filter(u => u.chain.root.kind === 'work-summary').length, actions = units.filter(u => u.chain.root.kind === 'action').length;

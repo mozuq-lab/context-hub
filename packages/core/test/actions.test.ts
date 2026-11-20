@@ -84,6 +84,8 @@ test('追加した行動に、完了報告・未解決へ戻す・誤りとし�
   expect(await now()).toContain(done.resolutionId);
   await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'reopen', source: 'cli' });
   expect(section(await now(), '次の一手')).toContain('本人が追加: 請求書を送る');
+  // 行動はAIの読み取りではないため、読み違い・別のプロジェクトの話としては外せない（その例をモデルへ渡さない）。
+  for (const reason of ['misread', 'wrong-project'] as const) await expect(setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'exclude', reason, source: 'cli' })).rejects.toThrow('もう古い');
   await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'exclude', reason: 'outdated', note: '別の方法にした', source: 'cli' });
   expect(section(await now(), '次の一手')).not.toContain('請求書を送る');
   expect(await now()).toContain('# 誤りとして外した項目（本人報告）\n');
@@ -140,6 +142,14 @@ test('行動の文面を直すと元の文面は残り、NOWは直した文面�
   const llm = counting();
   expect((await organize(config, llm)).processed).toBe(0);
   expect(llm.calls).toBe(0);
+  // 直した行動を完了にしても、直す前の文面に付けた日付の付け直しを求めない。
+  await setItemResolution(config, { projectId: 'hub', itemKey: item.key, action: 'resolve', source: 'cli' });
+  await rebuildDashboard(config);
+  expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
+  // ファイルから渡した文面の末尾の改行1つは含めない。
+  await setItemResolution(config, { projectId: 'hub', itemKey: item.key, action: 'reopen', source: 'cli' });
+  await correctInput(config, fixed.inputId, { source: 'cli', occurredAt: '2026-11-03T00:00:00Z', text: '請求書だけ送る\n' });
+  expect(section(await now(), '次の一手')).toContain('本人が追加: 請求書だけ送る [');
 });
 
 test('行動の文面・プロジェクト・元の行の参照を検証し、統合済みのプロジェクトには追加しない', async () => {
@@ -149,6 +159,8 @@ test('行動の文面・プロジェクト・元の行の参照を検証し、�
   await expect(capture(config, { ...base, project: 'hub', text: 'あ'.repeat(201) })).rejects.toThrow('200文字以内');
   await expect(capture(config, { ...base, project: 'hub', text: '一行目\n二行目' })).rejects.toThrow('1行');
   await expect(capture(config, { ...base, project: 'hub', text: ' 前に空白' })).rejects.toThrow('空白');
+  // 行区切り・段落区切りと、文字の向きを変える制御も1行の文面に含めない。
+  for (const c of ['\u2028', '\u2029', '\u202E', '\u2066']) await expect(capture(config, { ...base, project: 'hub', text: `送る${c}受け取る` })).rejects.toThrow('1行');
   await expect(capture(config, { ...base, project: 'hub', text: '送る', tool: 'codex' })).rejects.toThrow('作業ツール');
   await expect(capture(config, { ...base, project: 'hub', text: '送る', meta: { action_from_input: 'IN-x', action_from_text: '送る' } })).rejects.toThrow('元の行の参照');
   await expect(capture(config, { ...base, project: 'hub', text: '送る', meta: { session: 'x' } })).rejects.toThrow('元の行の参照');
@@ -198,4 +210,17 @@ test('ふりかえり・経緯・検索・未整理の一覧・contextに、行�
   const ctx = await context(config, 'hub');
   expect(ctx).toContain('本人が追加: 請求書を送る');
   expect(ctx).toContain('## 未整理・失敗\nなし');
+});
+
+test('AIの読み取りを行動にすると、同じ行が載っているほかのプロジェクトのNOWからも外す', async () => {
+  const { config, vault } = await fixture();
+  await addProject(config, { id: 'web', title: 'ウェブ' });
+  // プロジェクトを指定しないメモが、両方のプロジェクトの帰属候補になる。
+  const memoResult: OrganizeResult = { category: 'task', summary: '問い合わせに返す', project_candidates: [{ id: 'hub', confidence: 0.9 }, { id: 'web', confidence: 0.9 }], next_action_suggestions: ['返信の下書きを書く'], extracted: { current: [], next: [], open: [] }, knowledge_candidate: null, new_project_hint: null };
+  const memo = await capture(config, { source: 'cli', occurredAt: '2026-11-02T00:00:00Z', text: '問い合わせに返す' });
+  await organize(config, new MockLlm([memoResult]));
+  const web = async () => (await vault.read('10_projects/web/NOW.md'))!;
+  expect(section(await web(), '提案')).toContain('AI提案: 返信の下書きを書く');
+  await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-03T00:00:00Z', text: '返信の下書きを書く', meta: { action_from_input: memo.inputId, action_from_text: '返信の下書きを書く' } });
+  expect(section(await web(), '提案')).not.toContain('返信の下書きを書く');
 });

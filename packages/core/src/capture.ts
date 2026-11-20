@@ -4,8 +4,8 @@ import { join, resolve } from 'node:path';
 import { logOperation } from './logger.js';
 import { z } from 'zod';
 import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
-import { readProjects, projectIdSchema, assertNotMerged } from './projects.js';
-import { actionTextSchema, assertActionMeta } from './actions.js';
+import { readProjects, projectIdSchema, assertNotMerged, resolveProject } from './projects.js';
+import { actionSource, actionTextSchema, assertActionMeta } from './actions.js';
 import type { CaptureRequest, CaptureResult, HubConfig, Input } from './types.js';
 export const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
 const timestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
@@ -124,8 +124,13 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
     // 行動はモデルの整理を待たずにNOWへ載せる。保存の後、NOWの再生成前に停止しても、同じイベントの再送で再生成だけを行う。
     if (request.kind === 'action') {
       // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
-      const { rebuildNowLocked, readReceipts } = await import('./views.js');
-      await rebuildNowLocked(vault, config, request.project!, await readInputs(config), await readReceipts(config));
+      const { rebuildNowLocked, rebuildNowsForInputLocked, readReceipts } = await import('./views.js');
+      // 再送のときにプロジェクトが統合済みになっていれば、行動が載る統合先のNOWを作り直す。
+      const projects = await readProjects(config), target = resolveProject(projects, request.project!), inputs = await readInputs(config), receipts = await readReceipts(config);
+      // AIの読み取りを行動にしたときは、元の行が載っているほかのプロジェクトのNOWからも外す。
+      const from = actionSource({ kind: 'action', meta: request.meta });
+      if (from) await rebuildNowsForInputLocked(vault, config, projects.map(p => p.id), from.input_id, target, inputs, receipts);
+      else await rebuildNowLocked(vault, config, target, inputs, receipts);
     }
     return saved;
   });
