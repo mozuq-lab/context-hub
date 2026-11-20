@@ -164,7 +164,7 @@ test('引き継いだ日付の項目に自分の日付を付けてから外す�
   expect((await readNowItems(vault, 'alpha'))!.items.find(i => i.key === k2.key)!.schedule).toMatchObject({ due: '2026-12-01' });
   await setItemSchedule(config, { projectId: 'alpha', itemKey: k2.key, due: null, reviewAfter: null, source: 'cli' });
   expect((await readNowItems(vault, 'alpha'))!.items.find(i => i.key === k2.key)!.schedule).toBeNull();
-  expect(await vault.read('10_projects/alpha/NOW.md')).not.toContain('2026-11-20');
+  expect(await vault.read('10_projects/alpha/NOW.md')).not.toContain('期日 2026-11-20');
 });
 test('日付を外した項目が次の作業要約で別の項目に移っても、外す前の古い日付を引き継がない（K1→K2→K3）', async () => {
   const { effectiveSchedules } = await import('../src/item-schedules.js');
