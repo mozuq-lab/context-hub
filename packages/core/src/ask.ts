@@ -330,10 +330,12 @@ export async function answerPending(config: HubConfig, llm: LlmClient, options: 
     const pending = records.filter(r => r.status === 'pending');
     const recent = records.filter(r => r.last_attempt_at && now().getTime() - Date.parse(r.last_attempt_at) < DAY).reduce((n, r) => n + Math.max(1, r.attempts), 0);
     let budget = Math.max(0, config.ask.dailyLimit - recent), taken = 0;
-    const projectIds = new Set((await readProjects(config)).map(p => p.id));
+    // プロジェクトを選んだ問いがあるときだけ定義を読む。定義を読めない回は確かめず、プロジェクトなしの問いには答える。
+    let projectIds: Set<string> | undefined;
+    if (pending.some(r => r.project !== null)) try { projectIds = new Set((await readProjects(config)).map(p => p.id)); } catch { projectIds = undefined; }
     for (const record of pending) {
       // 受け付けた後に選んだプロジェクトがなくなった問いは、モデルを呼ばずに閉じる。
-      if (record.project !== null && !projectIds.has(record.project)) {
+      if (record.project !== null && projectIds && !projectIds.has(record.project)) {
         await write({ ...record, status: 'failed', answered_at: now().toISOString(), error: 'project-missing' }); result.failed++; continue;
       }
       if (record.attempts >= ASK_MAX_ATTEMPTS) {

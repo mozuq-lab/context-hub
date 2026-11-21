@@ -397,7 +397,8 @@ export async function rebuildPeople(config: HubConfig): Promise<PeopleWrite[]> {
   // すべての入力の読み取りはWriterロックの外で行い、ロックを持つ時間を短くする（受付を待たせない）。
   // 読んだ後に届いた入力は次の作り直し（cycle）で反映される。人を登録していなければ入力を読まない。
   const { people, issues } = await inspectPeople(vault);
-  const units = people.length || issues.length ? await readEffectiveInputs(config) : [];
+  // 人がいなければ読まず、ロック内で人が増えていたときはロック内で読む。
+  const units = people.length || issues.length ? await readEffectiveInputs(config) : undefined;
   return vault.withLock(() => rebuildPeopleLocked(config, vault, units));
 }
 /** 手で書き換えて更新を止めている人の画面・一覧。doctorとHOMEで示す。 */

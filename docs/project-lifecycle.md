@@ -16,7 +16,7 @@ confirmed: true
 ```
 
 - IDは依頼側がプロジェクト案の採用と同じ`project-<ULID>`形式で決めます。
-- 名前・別名が既存のプロジェクトのID・名前・別名と重なる場合（大文字小文字・全角半角を区別しない）や、同じIDがある場合は作らず、HOMEの「失敗と競合」とアプリの受付状況に理由を表示します。
+- 名前・別名が既存のプロジェクトのID・名前・別名と重なる場合（大文字小文字・全角半角を区別しない）や、同じIDがある場合は作らず、HOMEの「失敗と競合」（断ってから7日間）とアプリの受付状況に理由を表示します。
 - 本文は任意の最初のメモです。空でなければ、作ったプロジェクトの入力（`memo`）として同じ出典・日時で保存します。
 - 作成は`90_system/project-creations/PCR-*.json`に記録し、定義の書き込み前に停止しても同じ受付IDで回復します。最初のメモも同じ受付の再送では重複保存しません。
 
@@ -41,7 +41,7 @@ node packages/core/dist/cli.js --config "<設定ファイル>" project list
 node packages/core/dist/cli.js --config "<設定ファイル>" project status <project-id> --set paused --hash <sha256> --confirm
 ```
 
-[Mac・Androidアプリ](https://github.com/mozuq-lab/context-hub-flutter-client)の対応版からは`operation: project-status`の受付ファイルとして依頼し、次の`cycle`（または`ingest`）で反映します。0.3.0までのアプリは状態変更の依頼とREVIEW.mdの表示に対応していません。定義が確認後に変わっていた場合や、すでに同じ状態の場合は受け付けず、HOMEの「失敗と競合」に表示します。
+[Mac・Androidアプリ](https://github.com/mozuq-lab/context-hub-flutter-client)の対応版からは`operation: project-status`の受付ファイルとして依頼し、次の`cycle`（または`ingest`）で反映します。0.3.0までのアプリは状態変更の依頼とREVIEW.mdの表示に対応していません。定義が確認後に変わっていた場合や、すでに同じ状態の場合は受け付けず、HOMEの「失敗と競合」（断ってから7日間）とアプリの受付状況に表示します。
 
 変更は`project.md`のfrontmatterの`status`行だけを書き換え、ほかの行・コメント・改行は保持します。変更ごとに`90_system/project-status/PST-*.json`へ変更前後のハッシュを記録し、書き込み途中で停止しても、同じ受付ID（CLIでは同じ引数での再実行）で回復します。
 
@@ -59,7 +59,7 @@ node packages/core/dist/cli.js --config "<設定ファイル>" project edit <pro
 
 `--title`で名前を変え、`--add-alias`・`--remove-alias`・`--add-keyword`・`--remove-keyword`は何度でも指定できます。前後の空白を除き、大文字小文字や全角・半角だけが違う重複は最初の1つにまとめます。名前は1〜200文字、別名とキーワードはそれぞれ50件まで・1件100文字までです。定義にない語の削除や、変更のない指定は受け付けません。
 
-[Mac・Androidアプリ](https://github.com/mozuq-lab/context-hub-flutter-client)の対応版からは`operation: project-definition`の受付ファイル（`project_id`・確認した`project_hash`・変更後の`title`・`aliases`・`keywords`の全体・`confirmed: true`、本文なし）として依頼し、次の`cycle`（または`ingest`）で反映します。定義が確認後に変わっていた場合は受け付けず、HOMEの「失敗と競合」に表示します。
+[Mac・Androidアプリ](https://github.com/mozuq-lab/context-hub-flutter-client)の対応版からは`operation: project-definition`の受付ファイル（`project_id`・確認した`project_hash`・変更後の`title`・`aliases`・`keywords`の全体・`confirmed: true`、本文なし）として依頼し、次の`cycle`（または`ingest`）で反映します。定義が確認後に変わっていた場合は受け付けず、HOMEの「失敗と競合」（断ってから7日間）とアプリの受付状況に表示します。
 
 書き換えるのは`title`・`aliases`・`keywords`だけで、ほかのキー・コメント・本文は保持します。変更ごとに`90_system/project-definitions/PDEF-*.json`へ変更前後の定義とハッシュを記録し、書き込み途中で停止しても、同じ受付ID（CLIでは同じ引数での再実行）で回復します。
 

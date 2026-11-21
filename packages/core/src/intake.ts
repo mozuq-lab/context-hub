@@ -129,9 +129,14 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   try{const ack=intakeReceiptSchema.parse(JSON.parse(raw));return ack.request_id===id&&ack.path===path&&ack.request_hash===requestHash;}catch{return false;/* 不正な受領記録は通常の受付で競合として扱う。 */}
  };
  // 理由付きの拒否は同じ内容では結果が変わらず、停止回復も要らない。停止回復記録を残すと「回復待ち」がdoctorに残り続けるため片付ける。
- const dropPending=async(id:string,requestHash:string)=>{
+ // 拒否の記録（今の内容への理由付きの拒否）が書けていることを同じロック内で確かめてから消し、依頼の痕跡を失わない。
+ const dropPending=async(id:string,path:string,requestHash:string)=>{
   if(options.dryRun||await vault.read(pendingPath(id))===undefined)return;
-  try{await vault.withLock(async()=>{const old=await vault.read(pendingPath(id));if(old===undefined)return;try{if(pendingSchema.parse(JSON.parse(old)).request_hash!==requestHash)return;}catch{return;/* 不正な記録はdoctorで示す。 */}await vault.remove(pendingPath(id));});}
+  try{await vault.withLock(async()=>{
+   const old=await vault.read(pendingPath(id)),refusal=await vault.read(`90_system/intake-errors/${hash(path)}.json`);if(old===undefined||refusal===undefined)return;
+   try{const error=intakeErrorSchema.parse(JSON.parse(refusal));if(pendingSchema.parse(JSON.parse(old)).request_hash!==requestHash||error.path!==path||error.file_hash!==requestHash||!isIntakeRefusal(error))return;}catch{return;/* 不正な記録はdoctorで示す。 */}
+   await vault.remove(pendingPath(id));
+  });}
   catch(error){if(!(error instanceof LockTimeoutError))throw error;/* Writerの混雑で片付けられない回は、次の受付で片付ける。 */}
  };
  const done=new Set<string>();
@@ -169,7 +174,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   let permanent=false;
   if(raw)try{const error=intakeErrorSchema.parse(JSON.parse(raw));if(error.file_hash===hash(item.raw)&&error.status==='error'){failedAt=Date.parse(error.updated_at);permanent=error.reason!==undefined;}}catch{ /* 不正な記録は通常受付で検証・報告する。 */ }
   // 理由付きの拒否（古い訂正対象・既にあるプロジェクトなど）は、同じ内容で再実行しても同じ結果になる。内容が変われば再び受け付ける。
-  if(permanent){outcome.deduped++;await dropPending(item.packet.request_id,hash(item.raw));continue;}
+  if(permanent){outcome.deduped++;await dropPending(item.packet.request_id,item.path,hash(item.raw));continue;}
   ordered.push({...item,failedAt});
  }
  // 未試行を先に受け付け、失敗の再試行は古い試行から順に回す。
@@ -232,7 +237,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    const reason=error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof InsightReactionError||error instanceof HappenedOnError||error instanceof PolicyReviewError||error instanceof ProjectMergeError||error instanceof ProjectMergedError||error instanceof ItemTargetError||error instanceof OccurrenceError||error instanceof PreferencesError||error instanceof AskError||error instanceof PersonDefinitionError?error.reason:undefined;
    await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':error instanceof ItemTargetError?itemTargetMessage(error.reason):error instanceof PersonDefinitionError?personReasonMessage(error.reason):error instanceof OccurrenceError?occurrenceMessage(error.reason):error instanceof PreferencesError?preferencesMessage(error.reason):error instanceof AskError?askReasonMessage(error.reason):error instanceof HappenedOnError||error instanceof PolicyReviewError?error.message:'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,reason);
    // 理由付きの拒否は同じ内容では結果が変わらず、停止回復も要らない。停止回復記録を残すと「回復待ち」がdoctorに残り続けるため片付ける。
-   if(reason&&!conflict)await dropPending(id,requestHash);
+   if(reason&&!conflict)await dropPending(id,path,requestHash);
   }
  }
  return outcome;

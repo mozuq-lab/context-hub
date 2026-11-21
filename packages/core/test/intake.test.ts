@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { workflowSetup,packet } from './workflow-fixtures.js';
-import { Vault } from '../src/storage.js';
+import { Vault, hash, LockTimeoutError } from '../src/storage.js';
 import { readInputs } from '../src/capture.js';
 import { ingest, REFUSAL_NOTICE_DAYS } from '../src/intake.js';
 import { doctor } from '../src/doctor.js';
@@ -57,7 +57,31 @@ test('古い対象への訂正の拒否理由と最新IDをHOMEとdoctorへ伝�
  await rebuildDashboard(config);const home=await vault.read('HOME.md'),checked=await doctor(config),notices=(checked.notices??[]).join('\n');
  for(const display of [home,notices]){expect(display).toContain('訂正対象が古く');expect(display).toContain(latest.inputId);expect(display).toContain('新しい訂正');}
  // 理由付きの拒否は依頼への答えで、Vaultの異常（終了コード1）には数えない。
- expect(home).toContain('断った依頼');expect(checked.issues.join('\n')).not.toContain(stale.requestId);
+ expect(home!.split('## 失敗と競合')[1]).toContain(`断った依頼（${REFUSAL_NOTICE_DAYS}日間表示）`);expect(checked.issues.join('\n')).not.toContain(stale.requestId);
+});
+test('断った依頼の停止回復記録は、拒否の記録を確かめてから片付け、別の内容の記録は残す',async()=>{
+ const{config,vault}=await workflowSetup(roots);
+ const original=await capture(config,{source:'cli',occurredAt:'2026-10-01T10:00:00Z',text:'元のメモ'});
+ await correctInput(config,original.inputId,{source:'quickadd',occurredAt:'2026-10-02T10:00:00Z',text:'最初の訂正'});
+ const stale=await packet(config,{operation:'correct',target_id:original.inputId},'別端末からの矛盾する訂正');
+ const pending=`90_system/intake/pending/${stale.requestId}.json`,raw=(await vault.read(stale.path))!;
+ await ingest(config);expect(await vault.read(pending)).toBeUndefined();
+ // 以前の版が残した停止回復記録（同じ内容）は、次の受付で片付ける。
+ await vault.write(pending,JSON.stringify({schema_version:1,request_id:stale.requestId,request_hash:hash(raw),path:stale.path,raw})+'\n');
+ expect((await doctor(config)).issues).toContain(`受付の停止回復待ち: ${stale.requestId}`);
+ await ingest(config);expect(await vault.read(pending)).toBeUndefined();expect((await doctor(config)).issues.join('\n')).not.toContain(stale.requestId);
+ // 拒否の記録が書けていなければ、停止回復記録を消さない（Inputがなく停止回復記録だけの依頼の痕跡を失わない）。
+ const other=await packet(config,{operation:'correct',target_id:original.inputId},'もう一つの古い訂正');
+ const otherPending=`90_system/intake/pending/${other.requestId}.json`,otherRaw=(await vault.read(other.path))!;
+ await vault.write(otherPending,JSON.stringify({schema_version:1,request_id:other.requestId,request_hash:hash(otherRaw),path:other.path,raw:otherRaw})+'\n');
+ await vault.remove(other.path);
+ const write=Vault.prototype.write;
+ vi.spyOn(Vault.prototype,'write').mockImplementation(async function(this:Vault,path,text){if(path.startsWith('90_system/intake-errors/'))throw new LockTimeoutError('writer');return write.call(this,path,text);});
+ await ingest(config);vi.restoreAllMocks();
+ expect(await vault.read(otherPending)).toBeDefined();
+ // 次の受付で拒否を記録し、停止回復記録を片付ける。注意に示し、異常には数えない。
+ await ingest(config);expect(await vault.read(otherPending)).toBeUndefined();
+ const checked=await doctor(config);expect(checked.issues.join('\n')).not.toContain(other.requestId);expect((checked.notices??[]).join('\n')).toContain(other.requestId);
 });
 test('理由付きの拒否は数日だけHOMEとdoctorの注意に示し、記録は依頼の結果として残す',async()=>{
  const{config,vault}=await workflowSetup(roots);
