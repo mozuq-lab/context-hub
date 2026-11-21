@@ -27,7 +27,11 @@ jobs:
           package-manager-cache: false
       - run: npm ci
       - run: npm run check
+      # 暗号化したバックアップの試験に使う。
+      - run: sudo apt-get update && sudo apt-get install -y age
       - run: npm test
+        env:
+          CTX_REQUIRE_AGE: '1'
       - run: npm run build
       - run: npm run demo
       - run: npm audit --audit-level=moderate
