@@ -162,6 +162,8 @@ test('行動の文面・プロジェクト・元の行の参照を検証し、�
   // 行区切り・段落区切りと、文字の向きを変える制御も1行の文面に含めない。
   for (const c of ['\u2028', '\u2029', '\u202E', '\u2066']) await expect(capture(config, { ...base, project: 'hub', text: `送る${c}受け取る` })).rejects.toThrow('1行');
   await expect(capture(config, { ...base, project: 'hub', text: '送る', tool: 'codex' })).rejects.toThrow('作業ツール');
+  // 行動は出来事の記録ではないため、出来事の日付は付けられない。
+  await expect(capture(config, { ...base, project: 'hub', text: '送る', happenedOn: '2026-10-30' })).rejects.toThrow('出来事の日付');
   await expect(capture(config, { ...base, project: 'hub', text: '送る', meta: { action_from_input: 'IN-x', action_from_text: '送る' } })).rejects.toThrow('元の行の参照');
   await expect(capture(config, { ...base, project: 'hub', text: '送る', meta: { session: 'x' } })).rejects.toThrow('元の行の参照');
   await expect(capture(config, { ...base, project: 'missing', text: '送る' })).rejects.toThrow('指定プロジェクトがありません');

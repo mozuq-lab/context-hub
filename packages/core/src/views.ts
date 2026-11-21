@@ -10,6 +10,7 @@ import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
 import { activeResolutions, closedMergeWindows, withinMergeWindow, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
+import { evidenceBound, inputWhen } from './happened.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import { appliedReread, readExclusionOverlays } from './item-rereads.js';
 import { ACTION_LABEL, actionSource, sourceRef } from './actions.js';
@@ -125,7 +126,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const converted = new Set<string>(), convertedKeys = new Set<string>();
   for (const unit of units) { const from = actionSource(unit.chain.root); if (from) { converted.add(sourceRef(from.input_id, from.text)); if (from.key) convertedKeys.add(from.key); } }
   const notices = new Map([...evidence.map(e => [e.input.id, e.notice] as const), ...actions.map(u => [u.chain.root.id, correctionNotice(u)] as const)]), unitsById = new Map(units.map(u => [u.chain.root.id, u])), occurredAt = new Map(inputs.map(i => [i.id, i.occurred_at]));
-  const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${dateLabel(input.occurred_at, config.timezone)} ${config.timezone} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.kind === 'action' ? '本人が追加した行動' : input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${notices.get(input.id) ? ' '+notices.get(input.id)!.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
+  const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${inputWhen(input, iso => `${dateLabel(iso, config.timezone)} ${config.timezone}`)} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.kind === 'action' ? '本人が追加した行動' : input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${notices.get(input.id) ? ' '+notices.get(input.id)!.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
   // AIの読み違いなどの「誤り」として外した項目も欄から外すが、完了・解決とは分けて理由と一緒に示す。
@@ -210,7 +211,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
       const item = items.get(hint.item_key) ?? items.get(alias.get(hint.item_key) ?? '');
       if (!item || item.resolution || item.input_id === chain.root.id || dismissed.has(dismissalKey(projectId, item.key, chain.root.id))) continue;
       // このメモより後の根拠で改めて挙がった項目は、このメモでは片付いていない。
-      if (Date.parse(chain.root.occurred_at) < Date.parse(occurredAt.get(item.input_id) ?? chain.root.occurred_at)) continue;
+      if (evidenceBound(chain.root) < Date.parse(occurredAt.get(item.input_id) ?? chain.root.occurred_at)) continue;
       if (Date.parse(receipt.organized_at) <= (reopenedAt.get(item.key) ?? Number.NEGATIVE_INFINITY)) continue;
       if ((item.hints ??= []).some(h => h.input_id === chain.root.id) || item.hints.length >= 20) continue;
       item.hints.push({ input_id: chain.root.id, quote: hint.quote, at: receipt.organized_at });
