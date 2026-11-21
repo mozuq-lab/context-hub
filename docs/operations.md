@@ -93,6 +93,39 @@ CTX_VAULT="<Vaultの絶対パス>" CTX_BACKUP_DIR="<Vault外のバックアッ�
 
 launchd例を使う場合は、EnvironmentVariablesの`__VAULT_PATH__`と`__BACKUP_DIR__`へ、上の手動実行と同じ値を指定し、保持日数も確認してから登録します。バックアップには個人情報が含まれるため、ソースrepoや同期Vaultへ保存しません。
 
+## バックアップを暗号化する（任意）
+
+暗号化しないtar.gzには、メモの原文などの個人情報がそのまま入ります。クラウドストレージや持ち出す外付けドライブなど、Mac miniの外にも置きたいときは、[age](https://github.com/FiloSottile/age)の公開鍵で暗号化します。暗号化は任意で、次の`CTX_BACKUP_AGE_RECIPIENTS`を指定しなければ、今までどおり暗号化しない`vault-YYYYMMDD-HHMMSS.tar.gz`を作ります。
+
+1. ageを入れ（例: `brew install age`）、鍵の組を作ります。秘密鍵（`AGE-SECRET-KEY-1…`）と公開鍵（`age1…`）が分かれます。
+
+   ```sh
+   age-keygen -o "<秘密鍵のファイル>"
+   age-keygen -y "<秘密鍵のファイル>" > "<公開鍵のファイル>"
+   chmod 600 "<秘密鍵のファイル>"
+   ```
+
+2. 秘密鍵は、Vault・同期フォルダー・バックアップ先のどれにも入らない場所に置きます。同じ秘密鍵を、パスワードマネージャーや紙など、Mac miniとは別の場所にも必ず保管してください。秘密鍵をなくすと、暗号化したバックアップからは誰も復元できません。Mac miniが壊れたときに復元するのも、この別の場所の秘密鍵です。
+3. バックアップのスクリプトに公開鍵のファイルを渡します。
+
+   ```sh
+   CTX_VAULT="<Vaultの絶対パス>" CTX_BACKUP_DIR="<Vault外のバックアップ先>" CTX_BACKUP_AGE_RECIPIENTS="<公開鍵のファイル>" sh scripts/vault-backup.sh
+   ```
+
+   `vault-YYYYMMDD-HHMMSS.tar.gz.age`ができます。スクリプトは、平文のtar.gzを一時フォルダー（`CTX_BACKUP_WORK_DIR`、既定はOSの一時フォルダー）で作って読めることを確かめ、暗号化したものだけを保存先へ置き、平文は消します。一時フォルダーがVaultや保存先の中にあるとき、受取人のファイルに秘密鍵が入っているとき、公開鍵がないとき、ageが見つからないときは、何も作らずに止めます。launchdはPATHが短いため、EnvironmentVariablesに`CTX_BACKUP_AGE_RECIPIENTS`と、`CTX_BACKUP_AGE`（ageの絶対パス。例: `/opt/homebrew/bin/age`）を追加します。保持日数は、暗号化したものとしないものの両方に同じように当てます。
+
+4. 暗号化したバックアップを`backup verify`で確かめるには、設定に秘密鍵のファイルを書きます。設定がなければ、暗号化したアーカイブは「確かめられない」として、確認結果を記録せずに止まります（終了コードは0以外です）。
+
+   ```json
+   "backup": { "dir": "<Vault外のバックアップ先>", "verifyMaxAgeDays": 7, "ageIdentity": "<秘密鍵のファイル>", "ageCommand": "/opt/homebrew/bin/age" }
+   ```
+
+   `ageIdentity`はVaultの中にもバックアップ先の中にも設定できません。`ageCommand`は省略すると`age`です。確認ではageで復号した出力をそのまま展開し、平文のアーカイブをファイルとしては残しません。鍵が違う、壊れている、途中で切れているアーカイブは「暗号化したアーカイブを復号できません」として、復元できない確認として記録します。復号できたときの確認の内容は、暗号化しないアーカイブと同じです。HOMEの1行は「最後に確かめた復元点: 2026-11-01 03:30の暗号化したバックアップ（…）」になり、確認記録に`encrypted: true`を残します。秘密鍵の中身と場所は記録しません。
+
+秘密鍵をMac miniに置くと、Mac miniを使える人は暗号化したバックアップも読めます。Mac miniにはもともと平文のVaultがあるため、暗号化で守るのは、Mac miniの外に置いたバックアップです。`backup verify`をMac miniで動かさない場合は、`ageIdentity`を書かず、秘密鍵のある別のMacでバックアップを写してから確かめることもできます。
+
+別の場所へ写すときは、暗号化した`.tar.gz.age`だけを写します（例: rcloneやクラウドストレージの同期フォルダーへのコピー）。暗号化しないtar.gzをMac miniの外へ置かないでください。暗号化しても、ファイルの大きさとバックアップの日時は隠れません。
+
 ## バックアップから復元できるかを確かめる
 
 バックアップは、展開して中身を確かめるまで復元できるか分かりません。`backup verify`は、アーカイブをVaultの外の一時フォルダーへ展開して確かめ、結果を`90_system/backup-checks/BKC-*.json`へ記録します。元のVaultは読むだけで、アーカイブも書き換えません。モデルは呼びません。
@@ -103,7 +136,7 @@ node packages/core/dist/cli.js --config "<設定ファイル>" backup verify --a
 node packages/core/dist/cli.js --config "<設定ファイル>" backup status
 ```
 
-`--archive`を省くと、設定の`backup.dir`にある`vault-YYYYMMDD-HHMMSS.tar.gz`のうち、いちばん新しいものを確かめます。設定には次を追加します（どちらも任意）。
+`--archive`を省くと、設定の`backup.dir`にある`vault-YYYYMMDD-HHMMSS.tar.gz`と、暗号化した`vault-YYYYMMDD-HHMMSS.tar.gz.age`のうち、いちばん新しいものを確かめます。暗号化したものの確かめ方は[バックアップを暗号化する](#バックアップを暗号化する任意)を参照してください。設定には次を追加します（どちらも任意）。
 
 ```json
 "backup": { "dir": "<Vault外のバックアップ先>", "verifyMaxAgeDays": 7 }

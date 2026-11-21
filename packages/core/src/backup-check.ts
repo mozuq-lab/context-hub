@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { createReadStream } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, statfs } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream';
@@ -36,14 +37,18 @@ export const backupCheckSchema = z.object({
   issues: z.array(z.string().max(300)).max(50),
   // 判断には使わない参考（復元先でのdoctorの指摘、読み飛ばした付加メタデータなど）。
   notes: z.array(z.string().max(300)).max(50),
+  // ageで暗号化したアーカイブ（.tar.gz.age）を復号して確かめたときだけtrue。暗号化していないアーカイブでは書かない。
+  encrypted: z.literal(true).optional(),
 }).strict().refine(r => r.status === 'ok' ? r.issues.length === 0 : r.issues.length > 0);
 export type BackupCheck = z.infer<typeof backupCheckSchema>;
 const checkDir = '90_system/backup-checks';
 export const backupCheckPath = (id: string) => `${checkDir}/${id}.json`;
 /** 残す確認結果の件数。古いものから消す。 */
 const KEEP_CHECKS = 30;
-/** scripts/vault-backup.sh が作るアーカイブの名前。名前の日時は、バックアップを作った端末の時刻。 */
-const archiveName = /^vault-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.tar\.gz$/;
+/** scripts/vault-backup.sh が作るアーカイブの名前。名前の日時は、バックアップを作った端末の時刻。ageで暗号化したものは末尾に.ageが付く。 */
+const archiveName = /^vault-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.tar\.gz(?:\.age)?$/;
+/** ageで暗号化したアーカイブか（名前の末尾で判断する）。 */
+export const isEncryptedArchive = (name: string): boolean => name.endsWith('.age');
 /** 指定のタイムゾーンでの年月日・時刻を時点へ直す。 */
 function zonedTime(parts: number[], timezone: string): number {
   const [y, mo, d, h, mi, sec] = parts as [number, number, number, number, number, number], wall = Date.UTC(y, mo - 1, d, h, mi, sec);
@@ -70,8 +75,11 @@ export function restorePointOf(records: BackupCheck[]): BackupCheck | undefined 
 const LIST_MAX = 50, TEXT_MAX = 300;
 const clipText = (text: string) => { const a = Array.from(text.replace(/[\r\n]+/g, ' ')); return a.length > TEXT_MAX ? a.slice(0, TEXT_MAX - 1).join('') + '…' : a.join(''); };
 
-export interface BackupSettings { dir: string | null; verifyMaxAgeDays: number }
-export function backupSettings(config: HubConfig): BackupSettings { return config.backup ?? { dir: null, verifyMaxAgeDays: 7 }; }
+export interface BackupSettings { dir: string | null; verifyMaxAgeDays: number; ageIdentity: string | null; ageCommand: string }
+export function backupSettings(config: HubConfig): BackupSettings {
+  const b = config.backup;
+  return { dir: b?.dir ?? null, verifyMaxAgeDays: b?.verifyMaxAgeDays ?? 7, ageIdentity: b?.ageIdentity ?? null, ageCommand: b?.ageCommand ?? 'age' };
+}
 
 export async function readBackupChecks(vault: Vault): Promise<{ records: BackupCheck[]; problems: string[] }> {
   const records: BackupCheck[] = [], problems: string[] = [];
@@ -104,7 +112,7 @@ export function backupHomeLine(config: HubConfig, status: BackupStatus, now: Dat
   const point = status.restorePoint;
   if (!point) return '';
   const checkedDays = Math.max(0, Math.floor((now.getTime() - Date.parse(point.checked_at)) / DAY));
-  return `\n最後に確かめた復元点: ${dateLabel(point.archive_created_at, config.timezone)}のバックアップ（${status.restorePointAgeDays}日前 / ${checkedDays === 0 ? '今日' : `${checkedDays}日前に`}復元できることを確認）`;
+  return `\n最後に確かめた復元点: ${dateLabel(point.archive_created_at, config.timezone)}の${point.encrypted ? '暗号化した' : ''}バックアップ（${status.restorePointAgeDays}日前 / ${checkedDays === 0 ? '今日' : `${checkedDays}日前に`}復元できることを確認）`;
 }
 
 /** tarの1エントリー。展開するのは通常ファイルとディレクトリだけ。 */
@@ -142,6 +150,10 @@ function paxRecords(data: Buffer): Map<string, string> {
 }
 export interface ExtractOutcome { files: number; bytes: number; /** 展開しなかった危険なエントリー（絶対パス・親へ抜けるパス・リンク・特殊ファイル）。 */ rejected: string[]; /** macOSの付加メタデータ（._で始まるファイル）。原文と混同しないよう展開しない。 */ appleDouble: number }
 export interface ExtractLimits { maxFiles: number; maxBytes: number }
+/** ageで暗号化したアーカイブを復号しながら展開するときの、コマンドと秘密鍵のファイル。 */
+export interface AgeDecrypt { command: string; identity: string }
+/** ageのコマンドを起動できない（見つからない・実行できない）。バックアップの問題ではないため、確認結果には記録しない。 */
+export class AgeCommandError extends Error {}
 /** 圧縮を解いた後の上限。バックアップ先の取り違えや壊れたアーカイブで一時フォルダーを埋めないための安全弁。 */
 const defaultLimits: ExtractLimits = { maxFiles: 2_000_000, maxBytes: 64 * 1024 ** 3 };
 const MiB = 1024 ** 2;
@@ -172,7 +184,7 @@ const SPECIAL_MAX = 8 * 1024 * 1024;
  * tar.gzを指定の空フォルダーへ展開する。外部のtarコマンドは使わず、通常ファイルとディレクトリだけを、
  * 展開先の中に収まるパスへ書く。リンク・特殊ファイル・展開先の外を指すパスは書かずに報告する。
  */
-export async function extractArchive(archive: string, dest: string, limits: ExtractLimits = defaultLimits): Promise<ExtractOutcome> {
+export async function extractArchive(archive: string, dest: string, limits: ExtractLimits = defaultLimits, decrypt?: AgeDecrypt): Promise<ExtractOutcome> {
   const outcome: ExtractOutcome = { files: 0, bytes: 0, rejected: [], appleDouble: 0 };
   const reject = (path: string, why: string) => { if (outcome.rejected.length < LIST_MAX) outcome.rejected.push(clipText(`${why}: ${path}`)); else if (outcome.rejected.length === LIST_MAX) outcome.rejected.push('ほかにも展開しなかったエントリーがあります'); };
   const made = new Set<string>([dest]);
@@ -194,9 +206,19 @@ export async function extractArchive(archive: string, dest: string, limits: Extr
     if (entry.kind === 'pax') { const records = paxRecords(Buffer.concat(entry.collect!)); if (records.has('path')) nextPath = records.get('path'); if (records.has('size')) { const size = Number(records.get('size')); if (!Number.isSafeInteger(size) || size < 0) throw new BackupArchiveError('アーカイブの拡張見出しを読めません'); nextSize = size; } }
     if (entry.kind === 'longname') nextPath = cstring(Buffer.concat(entry.collect!));
   };
+  // 暗号化したアーカイブはageで復号した出力を解凍する。ageは認証できた部分だけを書き出し、鍵違い・改ざん・途中で切れたものは0以外で終わる。
+  let age: ReturnType<typeof spawn> | undefined, ageExit: Promise<number | 'spawn-error'> | undefined;
+  const ageFailed = () => new BackupArchiveError('暗号化したアーカイブを復号できません（鍵が違う、壊れている、または途中で切れています）');
+  const ageMissing = () => new AgeCommandError(`ageのコマンドを起動できません（${decrypt!.command}）。設定のbackup.ageCommandにageの絶対パスを指定してください`);
   try {
-    // 読み込み側の失敗も解凍側へ伝え、反復を止める。
-    const gunzip = createGunzip(); pipeline(createReadStream(archive), gunzip, () => undefined);
+    const gunzip = createGunzip();
+    if (decrypt) {
+      age = spawn(decrypt.command, ['-d', '-i', decrypt.identity, archive], { stdio: ['ignore', 'pipe', 'ignore'] });
+      const child = age;
+      ageExit = new Promise(done => { child.once('error', () => done('spawn-error')); child.once('close', code => done(code ?? 1)); });
+      // 読み込み側の失敗も解凍側へ伝え、反復を止める。
+      pipeline(child.stdout!, gunzip, () => undefined);
+    } else pipeline(createReadStream(archive), gunzip, () => undefined);
     for await (const chunk of gunzip) {
       pending = pending.length ? Buffer.concat([pending, chunk as Buffer]) : chunk as Buffer;
       for (;;) {
@@ -247,9 +269,13 @@ export async function extractArchive(archive: string, dest: string, limits: Extr
         if (!size && !padding) await finish();
       }
     }
+    if (ageExit) { const exit = await ageExit; if (exit === 'spawn-error') throw ageMissing(); if (exit !== 0) throw ageFailed(); }
   } catch (error) {
     if (current?.handle) await current.handle.close().catch(() => undefined);
-    if (error instanceof BackupArchiveError) throw error;
+    if (age && age.exitCode === null && age.signalCode === null) age.kill();
+    if (error instanceof BackupArchiveError || error instanceof AgeCommandError) throw error;
+    // 復号が途中で止まると、解凍側は「途中で切れた」と見える。ageの終わり方を先に見て、起動できなかったのか復号できなかったのかを示す。
+    if (ageExit) { const exit = await ageExit; if (exit === 'spawn-error') throw ageMissing(); if (exit !== 0) throw ageFailed(); }
     const code = (error as NodeJS.ErrnoException).code;
     // 圧縮の破損・途中で切れたファイルはzlibのエラーになる。展開先への書き込みの失敗などはそのまま伝える。
     if (typeof code === 'string' && (code.startsWith('Z_') || code === 'ERR_BUFFER_TOO_LARGE')) throw new BackupArchiveError('アーカイブの圧縮を解けません（壊れているか、途中で切れています）');
@@ -281,12 +307,21 @@ export interface BackupVerifyResult { check: BackupCheck; /** keepのときだ�
 export async function verifyBackup(config: HubConfig, options: BackupVerifyOptions = {}): Promise<BackupVerifyResult> {
   const settings = backupSettings(config), now = options.now ?? new Date(), vault = new Vault(config);
   const archive = options.archive ? resolve(options.archive) : settings.dir ? await latestArchive(settings.dir) : undefined;
-  if (!archive) throw new Error(options.archive || settings.dir ? '確かめるバックアップが見つかりません。バックアップ先とファイル名（vault-日付-時刻.tar.gz）を確認してください' : 'バックアップ先が設定されていません。設定のbackup.dirを指定するか、--archiveでアーカイブを指定してください');
+  if (!archive) throw new Error(options.archive || settings.dir ? '確かめるバックアップが見つかりません。バックアップ先とファイル名（vault-日付-時刻.tar.gz、暗号化したものは.tar.gz.age）を確認してください' : 'バックアップ先が設定されていません。設定のbackup.dirを指定するか、--archiveでアーカイブを指定してください');
   let info; try { info = await lstat(archive); } catch { throw new Error('確かめるバックアップを読めません'); }
   if (!info.isFile()) throw new Error('確かめるバックアップが通常のファイルではありません');
   if (!archiveFileSchema.safeParse(basename(archive)).success) throw new Error('確かめるバックアップのファイル名を記録できません（200文字以内で、制御文字を含まない名前にしてください）');
   const createdAt = archiveCreatedAt(basename(archive), info.mtimeMs, config.timezone);
   const vaultRoot = await realpath(resolve(config.vaultPath));
+  // 暗号化したアーカイブは、秘密鍵がないと中身を確かめられない。確かめられなかったことは「復元できない」とは記録せずに止める。
+  const encrypted = isEncryptedArchive(basename(archive));
+  let decrypt: AgeDecrypt | undefined;
+  if (encrypted) {
+    if (!settings.ageIdentity) throw new Error('暗号化したバックアップ（.tar.gz.age）を確かめるには、設定のbackup.ageIdentityにageの秘密鍵のファイルを指定してください');
+    let key; try { key = await lstat(settings.ageIdentity); } catch { throw new Error('設定のbackup.ageIdentityの秘密鍵のファイルを読めません'); }
+    if (!key.isFile()) throw new Error('設定のbackup.ageIdentityが通常のファイルではありません');
+    decrypt = { command: settings.ageCommand, identity: settings.ageIdentity };
+  }
   const parent = await realpath(resolve(options.workDir ?? tmpdir()));
   if (await inside(vaultRoot, parent)) throw new Error('展開先はVaultの外に指定してください');
   // 現在のVaultを読めないときは、展開を始める前に止める（展開先を残さない）。
@@ -308,14 +343,14 @@ export async function verifyBackup(config: HubConfig, options: BackupVerifyOptio
     let free: number | undefined;
     try { const fs = await statfs(parent); free = Number(fs.bavail) * Number(fs.bsize); } catch { free = undefined; }
     const limits = backupExtractLimits(await treeBytes(vaultRoot), free);
-    try { extracted = await extractArchive(archive, restoredRoot, limits); }
+    try { extracted = await extractArchive(archive, restoredRoot, limits, decrypt); }
     catch (error) { if (!(error instanceof BackupArchiveError)) throw error; issue(error.message); }
     if (extracted) {
       for (const r of extracted.rejected) issue(`展開しなかったエントリー — ${r}`);
       if (extracted.appleDouble) note(`macOSの付加メタデータ（._で始まるファイル）${extracted.appleDouble}件は展開していません`);
       // 復元先は架空の設定で読む。モデル・Git・バックアップ先は使わず、状態とログは一時フォルダーに置く。
       const state = join(work, 'state');
-      const copy: HubConfig = { ...config, vaultPath: restoredRoot, statePath: state, logging: { ...config.logging, dir: join(state, 'logs') }, organize: { ...config.organize, llm: { ...config.organize.llm, provider: 'mock', model: null } }, git: { ...config.git, enabled: false, repos: [] }, backup: { dir: null, verifyMaxAgeDays: settings.verifyMaxAgeDays } };
+      const copy: HubConfig = { ...config, vaultPath: restoredRoot, statePath: state, logging: { ...config.logging, dir: join(state, 'logs') }, organize: { ...config.organize, llm: { ...config.organize.llm, provider: 'mock', model: null } }, git: { ...config.git, enabled: false, repos: [] }, backup: { dir: null, verifyMaxAgeDays: settings.verifyMaxAgeDays, ageIdentity: null, ageCommand: settings.ageCommand } };
       const copyVault = new Vault(copy);
       for (const dir of VAULT_DIRS) { try { if (!(await lstat(join(restoredRoot, dir))).isDirectory()) issue(`Vaultの構造が不正です: ${dir}`); } catch { issue(`Vaultの構造がありません: ${dir}`); } }
       const inputs: Input[] = []; let badInputs = 0;
@@ -354,6 +389,7 @@ export async function verifyBackup(config: HubConfig, options: BackupVerifyOptio
   const check: BackupCheck = backupCheckSchema.parse({
     schema_version: 1, id: `BKC-${ulid()}`, archive: basename(archive), archive_created_at: new Date(createdAt).toISOString(), archive_bytes: info.size, checked_at: now.toISOString(),
     status: issues.length ? 'failed' : 'ok', restored, live: { inputs: liveInputs.length, projects: liveProjects.length }, verify_max_age_days: backupSettings(config).verifyMaxAgeDays, issues, notes,
+    ...(encrypted ? { encrypted: true as const } : {}),
   });
   await vault.withLock(async () => {
     if (!await vault.create(backupCheckPath(check.id), JSON.stringify(check, null, 2) + '\n')) throw new Error('確認結果の記録が競合しました');
