@@ -34,6 +34,11 @@ test('古くなった案は採用できないが、1件ずつ却下して片付�
  expect((await listProjectCandidates(config))[0].status).toBe('rejected');expect(await readProjects(config)).toHaveLength(1);
  await expect(decideProject(config,request(c))).rejects.toThrow();
 });
+test('根拠か確認情報が未同期の案は、却下も受け付けない',async()=>{
+ const{config,vault}=await setup();const c=await candidate(config);await vault.remove(`90_system/project-confirmations/${c.candidateId}.json`);
+ expect((await listProjectCandidates(config))[0]).toMatchObject({status:'stale',unsynced:true});
+ await expect(decideProject(config,request(c,'reject'))).rejects.toThrow();
+});
 test('承認記録後の停止を同じ定義へ回復する',async()=>{
  const{config,vault}=await setup();const c=await candidate(config);const create=Vault.prototype.create;
  vi.spyOn(Vault.prototype,'create').mockImplementation(async function(this:Vault,path,text){if(path===`10_projects/${c.projectId}/project.md`)throw new Error('停止');return create.call(this,path,text);});

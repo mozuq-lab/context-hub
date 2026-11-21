@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/config.js';
-import { Vault } from '../src/storage.js';
+import { Vault, markdown } from '../src/storage.js';
 import { capture } from '../src/capture.js';
 import { correctInput } from '../src/corrections.js';
 import { organize } from '../src/organize.js';
@@ -12,6 +12,7 @@ import { addProject } from '../src/projects.js';
 import { readEffectiveInputs } from '../src/effective-inputs.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { UNASSIGNED_CLOSED_MAX, UNASSIGNED_HOME_MEMOS, UNASSIGNED_MEMOS_MAX, UNASSIGNED_SUGGESTIONS_PER_MEMO, buildUnassignedActions, unassignedActionsPath, unassignedActionsSchema, unassignedItemKey, unassignedItemsPath } from '../src/unassigned-actions.js';
+import { parseIntake } from '../src/intake-format.js';
 import { ItemTargetError, UNASSIGNED_SCOPE, nowItemsSchema, readItemResolutions, readNowItems, setItemResolution } from '../src/item-resolutions.js';
 import { setItemSchedule } from '../src/item-schedules.js';
 import { ingest } from '../src/intake.js';
@@ -216,6 +217,15 @@ describe('プロジェクト未定の次の一手', () => {
     // 記録はプロジェクトの代わりに置き場を残す。期日は付けられない。
     expect((await readItemResolutions(vault)).every(r => r.project_id === UNASSIGNED_SCOPE)).toBe(true);
     await expect(setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[0]!.key, due: '2026-11-20', reviewAfter: null, source: 'cli' })).rejects.toThrow();
+  });
+
+  test('受付ファイルの形式で、プロジェクト未定の行の却下は「もう古い」だけに限る', () => {
+    const id = 'REQ-' + 'B'.repeat(32), path = `Input/${id}.md`;
+    const fields = { schema_version: 1, request_id: id, source: 'context-hub-flutter', occurred_at: '2026-11-16T10:00:00+09:00', operation: 'item-resolution', project_id: UNASSIGNED_SCOPE, item_key: 'a'.repeat(64), action: 'exclude', reason: 'outdated', confirmed: true };
+    expect(parseIntake(path, markdown(fields, ''), 8000)).toMatchObject({ operation: 'item-resolution', project_id: UNASSIGNED_SCOPE });
+    // 形式の段階で断り、受付を回復待ちのまま繰り返さない。
+    expect(() => parseIntake(path, markdown({ ...fields, reason: 'misread' }, ''), 8000)).toThrow('もう古い');
+    expect(parseIntake(path, markdown({ ...fields, project_id: 'context-hub', reason: 'misread' }, ''), 8000)).toMatchObject({ reason: 'misread' });
   });
 
   test('受付ファイルから完了・却下を受け付ける', async () => {

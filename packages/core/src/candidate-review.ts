@@ -40,6 +40,8 @@ async function projectReview(config:HubConfig,id:string,coverage:ProjectCoverage
   await depend(`90_system/project-confirmations/${id}.json`);
   const chain=(await readCorrectionChains(config)).find(c=>c.root.id===meta.root_input_id);
   if(chain){for(const i of [chain.root,...chain.revisions])await depend(i.path);if(chain.evidenceHash!==meta.evidence_hash)item.warnings.push('根拠に新しい訂正があります。');}
+  // 根拠のメモか確認情報が未同期の案は、採用も却下もできない「確かめられない候補」として示す。
+  if(item.status==='stale'&&candidate?.unsynced){item.status='unavailable';item.warnings.push('根拠のメモか確認情報が未同期です。同期後に確認してください。');}
   if(item.status==='stale')item.warnings.push(coverage.unreadable.length?UNREADABLE_DECISION_WARNING:'候補が古いか、確認情報の同期が不足しています。');
   // 承認の判断記録が、プロジェクト定義へ反映済みかを確かめる。
   const reflect=async(record:NonNullable<typeof decision>,projectId:unknown)=>{

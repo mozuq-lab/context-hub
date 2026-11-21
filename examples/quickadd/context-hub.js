@@ -81,13 +81,14 @@ async function reviewItems(params) {
   }
   return items;
 }
-async function validateReview(params, item) {
-  const project = item.kind === 'project', prefix = project ? 'PCAN' : 'CAN', folder = project ? 'project-candidates' : 'candidates';
-  if (!(new RegExp('^' + prefix + '-[0-9A-HJKMNP-TV-Z]{26}$')).test(item.id) || item.status !== 'pending' || !['project', 'knowledge', 'decision', 'preference'].includes(item.kind) || !/^[a-f0-9]{64}$/.test(item.candidateHash) || item.path !== `90_system/${folder}/${item.id}.md` || !Array.isArray(item.inputIds) || !item.dependencies || item.dependencies[item.path] !== item.candidateHash) throw new Error('候補の情報が不正です');
+// 古くなった候補（stale）は却下だけできる。新しい訂正があるのは古くなった理由そのものなので、却下では確かめない。
+async function validateReview(params, item, action = 'approve') {
+  const project = item.kind === 'project', prefix = project ? 'PCAN' : 'CAN', folder = project ? 'project-candidates' : 'candidates', staleReject = action === 'reject' && item.status === 'stale';
+  if (!(new RegExp('^' + prefix + '-[0-9A-HJKMNP-TV-Z]{26}$')).test(item.id) || !(item.status === 'pending' || staleReject) || !['project', 'knowledge', 'decision', 'preference'].includes(item.kind) || !/^[a-f0-9]{64}$/.test(item.candidateHash) || item.path !== `90_system/${folder}/${item.id}.md` || !Array.isArray(item.inputIds) || !item.dependencies || item.dependencies[item.path] !== item.candidateHash) throw new Error('候補の情報が不正です');
   if (project && !/^[a-f0-9]{64}$/.test(item.confirmationToken)) throw new Error('確認情報が未同期です');
   await validateDependencies(params,item);
   const all = await inputs(params);
-  if (item.inputIds.some(id => !all.some(i => i.id === id)) || all.some(i => item.inputIds.includes(i.corrects_input_id) && !item.inputIds.includes(i.id))) throw new Error('元のメモに未同期または新しい訂正があります。最新の候補を確認してください');
+  if (item.inputIds.some(id => !all.some(i => i.id === id)) || (!staleReject && all.some(i => item.inputIds.includes(i.corrects_input_id) && !item.inputIds.includes(i.id)))) throw new Error('元のメモに未同期または新しい訂正があります。最新の候補を確認してください');
   return all.filter(i => item.inputIds.includes(i.id));
 }
 async function validateDependencies(params,item) {
@@ -99,13 +100,13 @@ async function validateDependencies(params,item) {
   }
 }
 async function decideReview(params, action, project = false) {
-  const candidates = (await reviewItems(params)).filter(i => i.status === 'pending' && (project ? i.kind === 'project' : ['knowledge', 'decision', 'preference'].includes(i.kind)));
+  const candidates = (await reviewItems(params)).filter(i => (i.status === 'pending' || (action === 'reject' && i.status === 'stale')) && (project ? i.kind === 'project' : ['knowledge', 'decision', 'preference'].includes(i.kind)));
   if (!candidates.length) { notify(params, '確認待ち候補がありません。HOMEと同期を確認してください。'); return; }
-  const item = await params.quickAddApi.suggester(candidates.map(i => `${i.title} / ${i.id}`), candidates);
+  const item = await params.quickAddApi.suggester(candidates.map(i => `${i.title}${i.status === 'stale' ? '（古い候補・却下のみ）' : ''} / ${i.id}`), candidates);
   if (!item) return;
   const target = !project && action === 'approve' ? await selectTarget(params,item) : undefined;
   if (!project && action === 'approve' && !target) return;
-  const evidence = await validateReview(params, item);
+  const evidence = await validateReview(params, item, action);
   const originals = [];
   for (const source of evidence) originals.push(`${source.id}\n${await read(params, source.path)}`);
   const proposal = project ? metadata(params, await read(params, item.path)).proposal : undefined;
@@ -115,7 +116,7 @@ async function decideReview(params, action, project = false) {
   const targetDetails=target?`採用先: ${target.scope==='global'?'全ての作業に共通（本人の明示選択）':target.label}\n${item.kind==='knowledge'?'参考知識として必要時に参照します。':'有効な方針として対象のAI作業へ渡します。'}\n`:'';
   const details = `${projectDetails}${targetDetails}主張: ${item.claim}\n理由: ${item.rationale || '不明'}\n種別: ${item.kind}\n候補: ${item.id}\n生成日時: ${item.generatedAt || '不明'}\n\n元のメモ:\n${originals.join('\n\n') || '利用者の提案（原文なし）'}${previous ? '\n\n置き換え元:\n' + previous : ''}\n\n${action === 'approve' ? 'この内容を採用します。' : 'この候補を却下します。'}\n依頼保存後、Mac miniが最新状態を再検証します。`;
   if (!await params.quickAddApi.yesNoPrompt(action === 'approve' ? '知識・方針の候補を採用' : '知識・方針の候補を却下', details)) return;
-  await validateReview(params, item);
+  await validateReview(params, item, action);
   if(target)await validateTarget(params,target);
   return submit(params, `${project ? 'project' : 'knowledge'}-${action}`, { candidate_id: item.id, candidate_hash: item.candidateHash, ...(project ? { confirmation_token: item.confirmationToken } : target ? {scope:target.scope,...(target.scope==='project'?{project_id:target.project_id,project_hash:target.project_hash}:{})} : {}), confirmed: true });
 }
