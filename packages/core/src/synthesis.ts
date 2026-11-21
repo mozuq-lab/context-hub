@@ -217,9 +217,10 @@ export async function runSynthesis(config: HubConfig, llm: LlmClient, options: S
   const vault = new Vault(config), now = options.now ?? new Date(), started = Date.now();
   const save = (run: SynthesisRun) => JSON.stringify(run, null, 2) + '\n';
   const outcome = await vault.withLock(async (): Promise<SynthesisOutcome> => {
-    const prepared = await vault.withLock(async () => {
-      const ready = await prepare(config, vault, now, options, false);
-      if (ready.skip) return { ...ready, opened: undefined };
+    // 渡す内容（すべての入力）はWriterロックの外で組み立てる。整理と週次の統合は同じorganizeロックで1つずつ動くため、
+    // その間に変わりうるのは受付が足す入力・訂正だけで、次の週の統合で拾う。Writerロックは開始の記録を作る間だけ持つ。
+    const ready = await prepare(config, vault, now, options, false);
+    const prepared = ready.skip ? { ...ready, opened: undefined } : await vault.withLock(async () => {
       const provider = config.organize.llm.provider;
       // モデルを呼ぶ前に、実行を始めたことを記録する。途中で止められても1回の実行として数え、次のcycleで呼び出しを重ねない。
       const opened = synthesisRunSchema.parse({

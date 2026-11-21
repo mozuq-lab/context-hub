@@ -38,7 +38,12 @@ export async function intakeFailure(f,id=`REQ-${'a'.repeat(32)}`){
  const path=`Input/${id}.md`,vault=new Vault(f.hub);
  await vault.create(path,markdown({schema_version:1,request_id:id,operation:'correct',source:'fixture',occurred_at:'2026-10-03T10:00:00Z',target_id:`IN-${'0'.repeat(26)}`},'架空の欠損対象への訂正'));
  await utimes(join(f.vault,path),new Date(0),new Date(0));await ingest(f.hub,{limit:1});
- return{requestId:id,paths:{input:join(f.vault,path),pending:join(f.vault,`90_system/intake/pending/${id}.json`),error:join(f.vault,`90_system/intake-errors/${hash(path)}.json`)}};
+ // 理由付きの拒否は答えとして片付き、doctorの異常に数えない。処理の途中で止まった理由のない失敗（再試行される）にするため、
+ // 失敗記録から理由を外し、停止回復記録を置く。
+ const error=join(f.vault,`90_system/intake-errors/${hash(path)}.json`),record=JSON.parse(await readFile(error,'utf8'));delete record.reason;record.code='架空の処理失敗';await writeFile(error,JSON.stringify(record));
+ const raw=await readFile(join(f.vault,path),'utf8'),pending=join(f.vault,`90_system/intake/pending/${id}.json`);
+ await writeFile(pending,JSON.stringify({schema_version:1,request_id:id,request_hash:hash(raw),path,raw})+'\n');
+ return{requestId:id,paths:{input:join(f.vault,path),pending,error}};
 }
 export async function fakeServices(f){
  const serviceState=new Map(),plistValues=new Map(),calls=[];

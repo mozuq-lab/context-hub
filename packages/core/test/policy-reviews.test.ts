@@ -36,6 +36,8 @@ async function fixture() {
 test('採用から日数が過ぎた方針だけを見直しに出し、参考知識は対象にしない', async () => {
   const { config, vault, globalId, projectId } = await fixture();
   expect((await policyReviewItems(config, vault)).items.map(i => [i.knowledgeId, i.due])).toEqual(expect.arrayContaining([[globalId, false], [projectId, false]]));
+  // 本人が次の一手に直接足した行動は、メモ・作業要約ではないので数えない。
+  await capture(config, { source: 'cli', project: 'hub', kind: 'action', occurredAt: new Date().toISOString(), text: '説明を短くする' });
   const { items } = await policyReviewItems(config, vault, { now: later(91), inputs: (await (await import('../src/capture.js')).readInputs(config)) });
   expect(items).toHaveLength(2);
   expect(items.every(i => i.due)).toBe(true);

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { rm } from 'node:fs/promises';
 import { workflowSetup, packet } from './workflow-fixtures.js';
 import { addProject } from '../src/projects.js';
@@ -9,7 +9,7 @@ import { MockLlm } from '../src/llm.js';
 import { ingest, readIntakeReceipts, intakeErrorSchema, intakeErrorMessage } from '../src/intake.js';
 import { hash } from '../src/storage.js';
 import { runCycle } from '../src/cycle.js';
-import { answerPending, answerQuestion, askExcerpt, askTerms, buildAskPrompt, readAskRecords, requestAnswer, selectAskSources, validateAskOutput, ASK_MAX_ATTEMPTS, type AskSource } from '../src/ask.js';
+import { answerPending, answerQuestion, askExcerpt, askExcerptPart, askTerms, buildAskPrompt, readAskRecords, requestAnswer, selectAskSources, validateAskOutput, ASK_MAX_ATTEMPTS, type AskSource } from '../src/ask.js';
 import type { LlmClient, LlmOptions } from '../src/types.js';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
@@ -59,6 +59,14 @@ test('問いの語を2文字ずつ比べ、多くの記録に出る並びと問�
   const excerpt = askExcerpt(long, 'バックアップ', 1500);
   expect(excerpt).toContain('バックアップは外付けへ');
   expect([...excerpt].length).toBeLessThanOrEqual(1502);
+  // 省いた印（…）は本文ではない。印をまたぐ引用は、記録にない文字列なので根拠にしない。
+  const part = askExcerptPart(long, 'バックアップ', 1500);
+  expect(excerpt).toBe(`…${part.body}…`);
+  const source = { ref: 'S1', inputId: 'IN-01JZ0000000000000000000001', rootId: 'IN-01JZ0000000000000000000001', kind: 'memo' as const, occurredAt: '2026-10-12T00:00:00Z', projects: [], text: long, excerpt, excerptBody: part.body };
+  const quotes = (quote: string) => validateAskOutput(JSON.stringify({ sentences: [{ text: '外付けです。', evidence: [{ ref: 'S1', quote }] }] }), [source]).sentences.length;
+  expect(quotes('バックアップは外付けへ')).toBe(1);
+  expect(quotes(`…${part.body.slice(0, 10)}`)).toBe(0);
+  expect(quotes(`${part.body.slice(-10)}…`)).toBe(0);
 });
 
 test('引用が渡した記録にそのまま含まれる文だけを残し、渡していない記録・言い換えた引用・短すぎる引用は落とす', () => {
@@ -136,8 +144,16 @@ test('アプリの問いを受付で答え待ちにし、cycleで答え、上限
   await vault.write(`90_system/answers/${stuck.id}.json`, JSON.stringify({ ...stuck, attempts: ASK_MAX_ATTEMPTS, last_attempt_at: '2026-01-01T00:00:00Z', error: 'interrupted' }));
   expect(await answerPending(config, new MockLlm())).toMatchObject({ failed: 1, answered: 1 });
   expect((await readAskRecords(vault)).records.find(r => r.id === stuck.id)).toMatchObject({ status: 'failed', error: 'interrupted' });
+  // 答える前に選んだプロジェクトがなくなった問いは、モデルを呼ばずにその理由で閉じる。
+  const gone = await requestAnswer(config, { question: 'バックアップの方式', project: 'hub', source: 'flutter', sourceEventId: 'gone' });
+  const record = (await readAskRecords(vault)).records.find(r => r.id === gone.askId)!;
+  await vault.write(`90_system/answers/${gone.askId}.json`, JSON.stringify({ ...record, project: 'nowhere' }));
+  const llm = new MockLlm(), complete = vi.spyOn(llm, 'complete');
+  expect(await answerPending(config, llm)).toMatchObject({ failed: 1, answered: 0 });
+  expect(complete).not.toHaveBeenCalled();
+  expect((await readAskRecords(vault)).records.find(r => r.id === gone.askId)).toMatchObject({ status: 'failed', error: 'project-missing', attempts: 0 });
   // 古い答えは片付ける。
-  expect((await answerPending(config, new MockLlm(), { now: new Date(Date.now() + 40 * 86_400_000) })).removed).toBe(5);
+  expect((await answerPending(config, new MockLlm(), { now: new Date(Date.now() + 40 * 86_400_000) })).removed).toBe(6);
   expect((await readAskRecords(vault)).records).toHaveLength(0);
 
   // 無効にすると受け付けず、アプリにも知らせない。
