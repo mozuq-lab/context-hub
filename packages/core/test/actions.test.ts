@@ -15,7 +15,7 @@ import { rebuildDashboard } from '../src/dashboard.js';
 import { find, pending, context } from '../src/retrieve.js';
 import { mergeProjects } from '../src/project-merges.js';
 import { itemKey, readNowItems, setItemResolution } from '../src/item-resolutions.js';
-import { setItemSchedule } from '../src/item-schedules.js';
+import { setItemSchedule, completeOccurrence } from '../src/item-schedules.js';
 import { hash } from '../src/storage.js';
 import type { LlmClient, OrganizeResult } from '../src/types.js';
 const roots: string[] = [];
@@ -225,4 +225,28 @@ test('AIの読み取りを行動にすると、同じ行が載っているほか
   expect(section(await web(), '提案')).toContain('AI提案: 返信の下書きを書く');
   await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-03T00:00:00Z', text: '返信の下書きを書く', meta: { action_from_input: memo.inputId, action_from_text: '返信の下書きを書く' } });
   expect(section(await web(), '提案')).not.toContain('返信の下書きを書く');
+});
+
+test('引き取った行の日付と繰り返しは行動の文面を直しても残り、前の文面へ戻しても古い回に戻らない', async () => {
+  const { config, vault } = await fixture();
+  const weekly = { unit: 'week' as const, every: 1 };
+  const work = await capture(config, summary(['名前を決める']));
+  await organize(config, new MockLlm());
+  const aiKey = itemKey('hub', 'next', work.inputId, '名前を決める');
+  await setItemSchedule(config, { projectId: 'hub', itemKey: aiKey, due: '2026-12-01', reviewAfter: null, repeat: weekly, source: 'cli' });
+  const added = await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-03T00:00:00Z', text: '名前を決める', meta: { action_from_input: work.inputId, action_from_text: '名前を決める', action_from_key: aiKey } });
+  const item = async () => (await readNowItems(vault, 'hub'))!.items.find(i => i.input_id === added.inputId)!;
+  expect((await item()).schedule).toMatchObject({ due: '2026-12-01', repeat: weekly });
+  // 引き取った行動の文面を直しても、元の行に付けた日付と繰り返しを引き継ぎ、付け直しを求めない。
+  const fixed = await correctInput(config, added.inputId, { source: 'cli', occurredAt: '2026-11-04T00:00:00Z', text: '名前を決めて共有する' });
+  expect((await item()).schedule).toMatchObject({ due: '2026-12-01', repeat: weekly });
+  await rebuildDashboard(config);
+  expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
+  // 今回を完了して次の回へ進めた後、文面を前の形へ戻しても、前の回の期日には戻らない。
+  await completeOccurrence(config, { projectId: 'hub', itemKey: (await item()).key, action: 'done', due: '2026-12-01', source: 'cli' });
+  expect((await item()).schedule).toMatchObject({ due: '2026-12-08', repeat: weekly });
+  await correctInput(config, fixed.inputId, { source: 'cli', occurredAt: '2026-11-05T00:00:00Z', text: '名前を決める' });
+  expect((await item()).schedule).toMatchObject({ due: '2026-12-08', repeat: weekly });
+  await rebuildDashboard(config);
+  expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
 });
