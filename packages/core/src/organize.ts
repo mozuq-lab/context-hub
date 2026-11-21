@@ -19,6 +19,7 @@ import { PromptTooLargeError } from './infer.js';
 import { candidateProjects } from './project-status.js';
 import { completeRedacted, redactText, secretSettings } from './secrets.js';
 import { shortMemoText } from './short-memo.js';
+import { evidenceBound } from './happened.js';
 
 export interface OrganizeOptions { limit?: number; dryRun?: boolean; retryFailed?: boolean; id?: string }
 export interface OrganizeRunResult { processed: number; failed: number; skipped: number; conflicts: string[]; dryRun: boolean; inputIds: string[]; recovered?:number; reassociated?:number; /** 本人が誤りとして外した項目の入力を読み直した件数。 */ reread?:number }
@@ -91,7 +92,7 @@ async function openItemsFor(vault: Vault, chain: CorrectionChain, projects: Proj
   let list;
   try { list = await readNowItems(vault, projectId); } catch { return []; }
   const own = new Set([chain.root, ...chain.revisions].map(i => i.id)), at = new Map(inputs.map(i => [i.id, Date.parse(i.occurred_at)]));
-  const memoAt = Date.parse(chain.root.occurred_at), itemAt = (id: string) => at.get(id) ?? Number.NEGATIVE_INFINITY;
+  const memoAt = evidenceBound(chain.root), itemAt = (id: string) => at.get(id) ?? Number.NEGATIVE_INFINITY;
   const candidates = (list?.items ?? []).filter(i => i.resolution === null && !own.has(i.input_id) && itemAt(i.input_id) <= memoAt);
   const ordered = [...candidates.filter(i => i.section === 'next'), ...candidates.filter(i => i.section === 'open').sort((a, b) => itemAt(b.input_id) - itemAt(a.input_id))];
   return ordered.slice(0, OPEN_ITEMS_MAX)

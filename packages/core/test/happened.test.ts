@@ -10,7 +10,7 @@ import { readNowItems } from '../src/item-resolutions.js';
 import { buildHistory } from '../src/history.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { find } from '../src/retrieve.js';
-import { HappenedOnError, localNoon } from '../src/happened.js';
+import { HappenedOnError, evidenceBound, localNoon } from '../src/happened.js';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
 
@@ -100,4 +100,17 @@ test('端末が出来事の日付と方針の見直しに対応した本体か�
   expect(features.schema_version).toBe(1);
   expect(features.capture_fields).toContain('happened_on');
   expect(features.operations).toEqual(expect.arrayContaining(['capture', 'policy-keep', 'item-schedule']));
+});
+
+test('出来事の日付は同じ日の夕方の根拠より後として比べ、検索とふりかえりでは時刻を出さない', async () => {
+  const { config } = await workflowSetup(roots);
+  await capture(config, { source: 'cli', occurredAt: '2026-11-20T03:00:00Z', happenedOn: '2026-11-18', text: '昨日の会議で配布方法を決めた' });
+  const [input] = await readInputs(config);
+  // 2026-11-18 18:00 JST（09:00Z）の根拠は、11-18の出来事より前として扱う。
+  expect(evidenceBound(input!)).toBeGreaterThan(Date.parse('2026-11-18T09:00:00Z'));
+  expect(evidenceBound(input!)).toBeLessThan(Date.parse('2026-11-18T15:00:00Z'));
+  expect(evidenceBound({ occurred_at: '2026-11-18T09:00:00Z' })).toBe(Date.parse('2026-11-18T09:00:00Z'));
+  const found = await find(config, '配布方法');
+  expect(found).toContain('2026-11-18のこと（記録');
+  expect(found).not.toContain('2026-11-18 12:00');
 });

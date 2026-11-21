@@ -104,3 +104,15 @@ test('長い行はUTF-8の文字の途中で切らずに75オクテットで折�
   expect(lines.slice(1).every(l => l.startsWith(' '))).toBe(true);
   expect(lines.map((l, i) => i ? l.slice(1) : l).join('')).toBe('SUMMARY:' + 'あ'.repeat(40));
 });
+
+test('NOW項目を読めないプロジェクトがある間は、前回のファイルを書き換えない', async () => {
+  const { config, vault, items } = await fixture();
+  await setItemSchedule(config, { projectId: 'hub', itemKey: items[0]!.key, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+  await rebuildDashboard(config);
+  const before = (await vault.read(CALENDAR_PATH))!;
+  expect(events(before)).toBe(1);
+  await vault.write('90_system/now-items/hub.json', '{');
+  await rebuildDashboard(config);
+  expect(await vault.read(CALENDAR_PATH)).toBe(before);
+  expect(await vault.read('HOME.md')).toContain('NOW項目の記録が不正です');
+});

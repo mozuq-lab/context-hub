@@ -65,7 +65,7 @@ async function projectReview(config:HubConfig,id:string,coverage:ProjectCoverage
   return item;
  }catch{item.status='unavailable';item.warnings.push('候補・根拠・承認記録を確認できません。');return item;}
 }
-export async function readReviewCandidates(config:HubConfig):Promise<ReviewCandidate[]>{
+export async function readReviewCandidates(config:HubConfig,options:{now?:Date}={}):Promise<ReviewCandidate[]>{
  const vault=new Vault(config),ids=new Map<string,'knowledge'|'project'>(),coverage=await readProjectCoverage(vault);
  for(const path of await vault.files('90_system/candidates')){const m=/^90_system\/candidates\/(CAN-[0-9A-HJKMNP-TV-Z]{26})\.md$/.exec(path);if(m)ids.set(m[1]!,'knowledge');}
  for(const path of await vault.files('90_system/approvals')){const m=/^90_system\/approvals\/APR-([0-9A-HJKMNP-TV-Z]{26})\.json$/.exec(path);if(m)ids.set(`CAN-${m[1]}`,'knowledge');}
@@ -90,10 +90,10 @@ export async function readReviewCandidates(config:HubConfig):Promise<ReviewCandi
   for(const d of group.duplicates)byId.get(d.id)!.duplicateOf=group.representative.id;
  }
  // 有効な方針に見直しの状態を添える。読めなくても一覧は作る（HOMEの「失敗と競合」に示す）。
- try{const reviewDays=policyReviewDays(config),{items:reviews}=await policyReviewItems(config,vault);for(const r of reviews){const item=byId.get(`CAN-${r.knowledgeId.slice(4)}`);if(item&&item.status==='approved'&&!item.retired)item.policyReview={due:r.due,since:r.since,days:r.days,reviewDays,...(r.confirmedAt?{confirmedAt:r.confirmedAt}:{})};}}catch{/* 方針の集約を読めないときは見直しの状態を付けない。 */}
+ try{const reviewDays=policyReviewDays(config),{items:reviews}=await policyReviewItems(config,vault,{now:options.now});for(const r of reviews){const item=byId.get(`CAN-${r.knowledgeId.slice(4)}`);if(item&&item.status==='approved'&&!item.retired)item.policyReview={due:r.due,since:r.since,days:r.days,reviewDays,...(r.confirmedAt?{confirmedAt:r.confirmedAt}:{})};}}catch{/* 方針の集約を読めないときは見直しの状態を付けない。 */}
  return items.sort((a,b)=>(b.generatedAt??'').localeCompare(a.generatedAt??'')||a.id.localeCompare(b.id));
 }
-export async function buildReviewIndex(config:HubConfig):Promise<ReviewIndex>{return{schema_version:1,generated_at:new Date().toISOString(),projects:await readProjectCatalog(new Vault(config)),items:await readReviewCandidates(config)};}
+export async function buildReviewIndex(config:HubConfig,options:{now?:Date}={}):Promise<ReviewIndex>{return{schema_version:1,generated_at:new Date().toISOString(),projects:await readProjectCatalog(new Vault(config)),items:await readReviewCandidates(config,options)};}
 
 // 端末の1MiB/file上限より小さく分割する。pageは派生物で、rootを最後に置き換える。
 export function encodeReviewIndex(index:ReviewIndex):Map<string,string>{

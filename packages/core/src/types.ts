@@ -23,12 +23,12 @@ export interface HubConfig {
    * maxCallsを2以上にしたときだけ、全文で渡すメモを複数回の呼び出しに分ける。
    */
   synthesis: { enabled: boolean; intervalDays: number; thinking: ThinkingLevel; timeoutSec: number; maxFocusMemos: number; maxContextMemos: number; maxCalls: number };
-  /** 秘密情報らしい文字列（APIキー・トークン・パスワード等）を、モデルへ渡す前と別AI向けのcontextで伏せる。原文は変えない。 */
   /**
    * 本人が付けた期日（と、選んだときは次に見直す日）を、カレンダーに読み込めるファイル（90_system/calendar/contexthub.ics）へ書き出す。既定では無効。
    * titlesがprojectなら、件名と説明に項目の本文を入れず、プロジェクト名と「次の一手」「未解決」だけにする。
    */
   calendar?: { enabled: boolean; reviewDates: boolean; titles: 'item' | 'project' };
+  /** 秘密情報らしい文字列（APIキー・トークン・パスワード等）を、モデルへ渡す前と別AI向けのcontextで伏せる。原文は変えない。 */
   privacy?: { redactSecrets: boolean; /** 追加の検出規則。labelは伏せ字に出す種類名、patternはJavaScriptの正規表現。 */ patterns: { label: string; pattern: string }[] };
 }
 

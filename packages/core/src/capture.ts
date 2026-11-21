@@ -73,12 +73,7 @@ export function eventMarker(source: string, eventId: string): string { return `9
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
 export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
   if (!request.text?.trim() || request.text.length > config.capture.maxInputChars) throw new Error('本文が空か文字数上限を超えています');
-  // 出来事の日付は、記録した日より後と、上限より古いものを理由付きで拒否する。記録した日と同じなら指定がないのと同じに扱う。
-  if (request.happenedOn !== undefined) {
-    calendarDateSchema.parse(request.happenedOn);
-    const maxDays = config.capture.maxBackdateDays ?? DEFAULT_MAX_BACKDATE_DAYS, cause = happenedOnProblem(request.happenedOn, request.occurredAt, config.timezone, maxDays);
-    if (cause) throw new HappenedOnError({ code: 'happened-on-invalid', cause, max_days: maxDays });
-  }
+  if (request.happenedOn !== undefined) calendarDateSchema.parse(request.happenedOn);
   const happenedOn = effectiveHappenedOn(request.happenedOn, request.occurredAt, config.timezone);
   const meta = inputSchema.omit({ text: true, path: true }).parse({ schema_version: 1, id: `IN-${ulid()}`,
     source: request.source, source_event_id: request.sourceEventId ?? ulid(), occurred_at: happenedOn !== undefined ? localNoon(happenedOn, config.timezone) : request.occurredAt,
@@ -108,6 +103,12 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
       const found = matching[0];
       await vault.create(marker, `${found.id}\n`);
       return { inputId: found.id, deduped: true, path: found.path, receivedAt: found.received_at };
+    }
+    // 出来事の日付は、記録した日より後と、上限より古いものを理由付きで拒否する。記録した日と同じなら指定がないのと同じに扱う。
+    // 再送の判定の後で確かめ、保存済みの原文の再送を、後から変えた設定で拒否しない。
+    if (request.happenedOn !== undefined) {
+      const maxDays = config.capture.maxBackdateDays ?? DEFAULT_MAX_BACKDATE_DAYS, cause = happenedOnProblem(request.happenedOn, request.occurredAt, config.timezone, maxDays);
+      if (cause) throw new HappenedOnError({ code: 'happened-on-invalid', cause, max_days: maxDays });
     }
     if (request.project && !(await readProjects(config)).some(p => p.id === request.project)) throw new Error('指定プロジェクトがありません。先にproject addを実行してください');
     const date = new Intl.DateTimeFormat('sv-SE', { timeZone: config.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(meta.occurred_at));

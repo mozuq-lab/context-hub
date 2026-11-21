@@ -106,7 +106,9 @@ export async function keepPolicy(config: HubConfig, request: PolicyKeepRequest):
       throw new PolicyReviewError({ code: 'policy-review-refused', cause: exists ? 'inactive' : 'missing' });
     }
     if (state.dependencies[entry.path] !== r.expectedHash) throw new PolicyReviewError({ code: 'policy-review-refused', cause: 'changed' });
-    const record: PolicyReview = { schema_version: 1, id: `PREV-${ulid()}`, knowledge_id: r.knowledgeId, knowledge_hash: r.expectedHash, source: r.source, ...(r.sourceEventId !== undefined ? { source_event_id: r.sourceEventId } : {}), reviewed_at: r.reviewedAt ?? new Date().toISOString() };
+    // 端末の時計が進んでいても、見直しの日数を未来から数えないよう、記録した日時を上限にする。
+    const now = new Date().toISOString();
+    const record: PolicyReview = { schema_version: 1, id: `PREV-${ulid()}`, knowledge_id: r.knowledgeId, knowledge_hash: r.expectedHash, source: r.source, ...(r.sourceEventId !== undefined ? { source_event_id: r.sourceEventId } : {}), reviewed_at: new Date(Math.min(Date.parse(r.reviewedAt ?? now), Date.parse(now))).toISOString() };
     if (!await vault.create(reviewPath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('見直しの記録が競合しました');
     return { knowledgeId: record.knowledge_id, reviewId: record.id, deduped: false };
   });

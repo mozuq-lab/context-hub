@@ -68,7 +68,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
   }
   const modifiedKnowledge=await rebuildPoliciesLocked(config,vault);
-  const projects=await readProjects(config),review=await buildReviewIndex(config),effective=await readEffectiveInputs(config),receipts=await readReceipts(config),acks=await readIntakeReceipts(config);
+  const projects=await readProjects(config),review=await buildReviewIndex(config,{now:clock}),effective=await readEffectiveInputs(config),receipts=await readReceipts(config),acks=await readIntakeReceipts(config);
   await writeReviewIndexLocked(vault,review);
   // 同じ対象を指す確認待ちのプロジェクト案は、代表の1件にまとめて数える。
   const candidates=review.items,pending=candidates.filter(c=>c.status==='pending'&&!c.duplicateOf),attention=candidates.filter(c=>c.status==='stale'||c.status==='unavailable'),history=candidates.filter(c=>c.status==='approved'||c.status==='rejected');
@@ -149,7 +149,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:!!ack&&!changed,at:ack?Date.parse(ack.received_at):0});
   }
   statuses.push(...recentRoutine(intakeRows,'Mac mini受領済み'));
-  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id);return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:latest?.status==='organized',at:Date.parse(unit.chain.root.occurred_at)};});
+  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id);return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:latest?.status==='organized',at:Date.parse(unit.chain.root.received_at)};});
   statuses.push(...recentRoutine(inputRows,'整理済み'));
   // 件数は1行にまとめて先に示す。行の一覧は対応が要るものと直近の分だけにし、全件はアプリの受付状況に任せる。
   const waitingIntake=intakeRows.filter(r=>!r.routine).length,failedInputs=effective.filter(u=>receiptsById.get(u.chain.latest.id)?.status==='failed').length,waitingInputs=inputRows.filter(r=>!r.routine).length-failedInputs;
@@ -185,7 +185,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const project of projects)if(await referencesStopped(vault,project.id))errors.push(`- [資料の更新が止まっています](${referencesPath(project.id)}): ${plain(project.title)} — REFERENCES.mdが手で変更されています。資料は整理結果から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
   // 期日のカレンダー用ファイル。書けなくてもHOMEは作り、「失敗と競合」に示す。
-  try{await writeCalendarLocked(config,vault,calendarItems);}catch{errors.push('- 期日のカレンダー用ファイル（90_system/calendar/contexthub.ics）を書き出せませんでした（`ctx doctor`で確認してください）');}
+  // NOW項目を読めないプロジェクトがある間は、予定が一時的に消えないよう前回のファイルを残す。
+  if(!config.calendar?.enabled||!nextUnread.length)try{await writeCalendarLocked(config,vault,calendarItems);}catch{errors.push('- 期日のカレンダー用ファイル（90_system/calendar/contexthub.ics）を書き出せませんでした（`ctx doctor`で確認してください）');}
   // 採用から（または前回「まだ有効」と確かめてから）日数が過ぎた方針。古い順に数件だけ出し、止めるかどうかは本人が決める。
   let policyReviewSection='';
   try{
@@ -193,7 +194,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    for(const path of problems)errors.push(`- [方針の見直しの記録が不正です](${path})`);
    if(due.length){
     const kindLabel={decision:'判断・方針',preference:'好み'} as const,titleOf=(id:string)=>plain(projects.find(p=>p.id===id)?.title??id);
-    const rows=due.slice(0,POLICY_REVIEW_ROWS).map(i=>`- [${clip(i.claim,80)}](${i.path}) — ${kindLabel[i.kind]} / ${i.projectId===null?'共通':titleOf(i.projectId)} / 採用 ${dateLabel(i.approvedAt,config.timezone).slice(0,10)}${i.confirmedAt?`・前回確かめた日 ${dateLabel(i.confirmedAt,config.timezone).slice(0,10)}`:''}（${i.days}日前）${i.newInputs?` / その後このプロジェクトを指定したメモ ${i.newInputs}件`:''} / ${i.knowledgeId} / hash ${i.hash}`);
+    const rows=due.slice(0,POLICY_REVIEW_ROWS).map(i=>`- [${clip(i.claim,80)}](${i.path}) — ${kindLabel[i.kind]} / ${i.projectId===null?'共通':titleOf(i.projectId)} / 採用 ${dateLabel(i.approvedAt,config.timezone).slice(0,10)}${i.confirmedAt?`・前回確かめた日 ${dateLabel(i.confirmedAt,config.timezone).slice(0,10)}`:''}（${i.days}日前）${i.newInputs?` / その後このプロジェクトを指定したメモ・作業要約 ${i.newInputs}件`:''} / ${i.knowledgeId} / hash ${i.hash}`);
     policyReviewSection=`\n\n## 見直す方針（${due.length}件）\n採用してから（または前回「まだ有効」と確かめてから）${policyReviewDays(config)}日を過ぎた方針です。AIへ渡し続けてよいかを確かめてください。日数が過ぎても方針は止めません。\n${rows.join('\n')}${due.length>POLICY_REVIEW_ROWS?`\n- ほか${due.length-POLICY_REVIEW_ROWS}件（\`ctx policy review\`で確認できます）`:''}\n\n続けるならアプリの採用履歴の「まだ有効」か\`ctx policy keep <ID> --hash <hash> --confirm\`、止めるなら適用停止、書き直すなら置き換える候補を\`ctx propose --supersedes <ID>\`で作ってください。`;
    }
   }catch{errors.push('- 方針の見直しの状態を読めません（`ctx policy review`で確認してください）');}

@@ -59,11 +59,19 @@ export function effectiveHappenedOn(happenedOn: string | undefined, recordedAt: 
   return happenedOn !== undefined && happenedOn !== localDate(recordedAt, timezone) ? happenedOn : undefined;
 }
 
+/**
+ * 「この入力より後の根拠か」を比べるときの、入力の側の時刻。出来事の日付の発生日時はその日の正午に置いた値なので、
+ * 同じ日の夕方の根拠を「後」と誤らないよう、その日の終わり（正午の12時間後の直前）として比べる。
+ */
+export function evidenceBound(input: Timed): number {
+  const at = Date.parse(input.occurred_at);
+  return input.happened_on !== undefined ? at + 12 * 3_600_000 - 1 : at;
+}
 interface Timed { occurred_at: string; happened_on?: string; recorded_at?: string }
 /**
  * 一覧に出す日時。出来事の日付があれば「YYYY-MM-DDのこと（記録 YYYY-MM-DD HH:MM）」、なければ発生日時。
  * 出来事の日付の発生日時は正午に置いた値なので、時刻としては示さない。
  */
-export function inputWhen(input: Timed, timezone: string, format: (iso: string) => string): string {
+export function inputWhen(input: Timed, format: (iso: string) => string): string {
   return input.happened_on !== undefined && input.recorded_at !== undefined ? `${input.happened_on}のこと（記録 ${format(input.recorded_at)}）` : format(input.occurred_at);
 }

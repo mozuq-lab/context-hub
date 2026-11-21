@@ -49,7 +49,7 @@ test('採用から日数が過ぎた方針だけを見直しに出し、参考�
   expect(home).toContain('正本はMarkdownとする');
   expect(home).toContain(`${projectId} / hash `);
   const section = home.slice(home.indexOf('## 見直す方針'), home.indexOf('## 要確認'));
-  expect(section).toContain('その後このプロジェクトを指定したメモ 1件');
+  expect(section).toContain('その後このプロジェクトを指定したメモ・作業要約 1件');
   expect(section).not.toContain('Syncthingは双方向');
   await rebuildDashboard(config);
   expect(await vault.read('HOME.md')).not.toContain('## 見直す方針');
@@ -62,9 +62,17 @@ test('「まだ有効」と確かめた日から数え直し、内容の変わ�
   const { config, vault, globalId, projectId, fileHash } = await fixture();
   const h = await fileHash(projectId);
   await expect(keepPolicy(config, { knowledgeId: projectId, expectedHash: '0'.repeat(64), source: 'cli' })).rejects.toMatchObject({ reason: { cause: 'changed' } });
-  const kept = await keepPolicy(config, { knowledgeId: projectId, expectedHash: h, source: 'app', sourceEventId: 'REQ-1', reviewedAt: later(60).toISOString() });
+  const kept = await keepPolicy(config, { knowledgeId: projectId, expectedHash: h, source: 'app', sourceEventId: 'REQ-1' });
   expect(kept.reviewId).toMatch(/^PREV-/);
+  // 60日後に確かめた記録として数え直しを確かめる（記録は書き換えない前提だが、日数の計算だけを見る）。
+  const keptPath = `90_system/policy-reviews/${kept.reviewId}.json`;
+  await vault.write(keptPath, JSON.stringify({ ...JSON.parse((await vault.read(keptPath))!), reviewed_at: later(60).toISOString() }, null, 2) + '\n');
   expect((await keepPolicy(config, { knowledgeId: projectId, expectedHash: h, source: 'app', sourceEventId: 'REQ-1' })).deduped).toBe(true);
+  // 端末の時計が進んでいても、確かめた日時は記録した日時を超えない。
+  const future = await keepPolicy(config, { knowledgeId: globalId, expectedHash: await fileHash(globalId), source: 'app', sourceEventId: 'REQ-2', reviewedAt: later(400).toISOString() });
+  const records = (await vault.files('90_system/policy-reviews')).map(async p => JSON.parse((await vault.read(p))!));
+  const saved = (await Promise.all(records)).find(r => r.id === future.reviewId)!;
+  expect(Date.parse(saved.reviewed_at)).toBeLessThanOrEqual(Date.now());
   const items = (await policyReviewItems(config, vault, { now: later(91) })).items;
   expect(items.find(i => i.knowledgeId === projectId)).toMatchObject({ due: false, days: 31 });
   expect(items.find(i => i.knowledgeId === projectId)!.confirmedAt).toBeDefined();
