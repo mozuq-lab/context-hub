@@ -26,6 +26,12 @@ export interface HubConfig {
    */
   synthesis: { enabled: boolean; intervalDays: number; thinking: ThinkingLevel; timeoutSec: number; maxFocusMemos: number; maxContextMemos: number; maxCalls: number };
   /**
+   * 記録に聞く（ctx ask・アプリの「記録に聞く」）。問いに近い記録を最大maxSources件選び、整理と同じモデルに記録だけを根拠に答えさせる。
+   * 答えの各文には根拠の記録の引用を付けさせ、引用が記録にそのまま含まれない文はコードが落とす。
+   * アプリからの問いはcycleで1回にmaxPerCycle件まで答え、直近24時間の呼び出しがdailyLimitに達したら次の日まで待たせる。
+   */
+  ask: { enabled: boolean; maxSources: number; timeoutSec: number; maxPerCycle: number; dailyLimit: number };
+  /**
    * 本人が付けた期日（と、選んだときは次に見直す日）を、カレンダーに読み込めるファイル（90_system/calendar/contexthub.ics）へ書き出す。既定では無効。
    * titlesがprojectなら、件名と説明に項目の本文を入れず、プロジェクト名と「次の一手」「未解決」だけにする。
    */

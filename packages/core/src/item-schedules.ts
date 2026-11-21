@@ -24,13 +24,31 @@ export const scheduleDateSchema = z.string().refine(value => {
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const scheduleIdSchema = z.string().regex(/^SCH-[0-9A-HJKMNP-TV-Z]{26}$/);
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
-/** 1件の記録は項目の日付の全体（期日と見直す日）を表す。両方nullは日付を外した記録。 */
+/**
+ * 定例の繰り返し。unitとeveryで間隔を決める（例: week・1は毎週、day・14は14日ごと）。期日のある項目にだけ付けられる。
+ * dayは毎月の繰り返しで、本人が付けた期日の日（1〜31）。31日のように短い月にない日は月末に丸め、次の月では元の日へ戻す。
+ */
+export const repeatUnits = ['day', 'week', 'month'] as const;
+export type RepeatUnit = typeof repeatUnits[number];
+export const REPEAT_EVERY_MAX = 12;
+export const repeatRuleSchema = z.object({ unit: z.enum(repeatUnits), every: z.number().int().min(1).max(REPEAT_EVERY_MAX) }).strict();
+export type RepeatRule = z.infer<typeof repeatRuleSchema>;
+export const scheduleRepeatSchema = z.object({ unit: z.enum(repeatUnits), every: z.number().int().min(1).max(REPEAT_EVERY_MAX), day: z.number().int().min(1).max(31).optional() }).strict()
+  .refine(r => r.unit === 'month' ? r.day !== undefined : r.day === undefined, '日は毎月の繰り返しにだけ付けます');
+export type ScheduleRepeat = z.infer<typeof scheduleRepeatSchema>;
+/** 1件の記録は項目の日付の全体（期日と見直す日、繰り返し）を表す。期日と見直す日が両方nullは日付を外した記録。 */
 export const itemScheduleSchema = z.object({
   schema_version: z.literal(1), id: scheduleIdSchema, project_id: projectIdSchema, item_key: digest, section: z.enum(itemSections),
   text: z.string().max(4000), input_id: inputIdSchema, due: scheduleDateSchema.nullable(), review_after: scheduleDateSchema.nullable(),
+  // 繰り返しのない記録（旧版を含む）にはない。
+  repeat: scheduleRepeatSchema.nullable().optional(),
   source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(200).optional(), created_at: z.string().datetime({ offset: true }),
-}).strict();
+}).strict().refine(r => !r.repeat || r.due !== null, '繰り返しには期日が必要です');
 export type ItemSchedule = z.infer<typeof itemScheduleSchema>;
+/** 記録の繰り返し（なければnull）。 */
+export const repeatOf = (schedule: Pick<ItemSchedule, 'repeat'>): ScheduleRepeat | null => schedule.repeat ?? null;
+const sameRule = (a: RepeatRule | null, b: RepeatRule | null) => (a === null && b === null) || (a !== null && b !== null && a.unit === b.unit && a.every === b.every);
+const sameRepeat = (a: ScheduleRepeat | null, b: ScheduleRepeat | null) => (a === null && b === null) || (a !== null && b !== null && a.unit === b.unit && a.every === b.every && a.day === b.day);
 
 const scheduleDir = '90_system/item-schedules';
 const schedulePath = (id: string) => `${scheduleDir}/${id}.json`;
@@ -112,17 +130,50 @@ export function scheduleBucket(schedule: Pick<ItemSchedule, 'due' | 'review_afte
   const hidden = schedule.review_after !== null && schedule.review_after > today && (bucket === 'none' || bucket === 'later');
   return { bucket, hidden };
 }
+/** 繰り返しの表示（毎日・毎週・毎月・N日ごと・N週ごと・Nか月ごと）。 */
+export function repeatLabel(repeat: Pick<ScheduleRepeat, 'unit' | 'every'>): string {
+  if (repeat.every === 1) return { day: '毎日', week: '毎週', month: '毎月' }[repeat.unit];
+  return `${repeat.every}${{ day: '日', week: '週', month: 'か月' }[repeat.unit]}ごと`;
+}
 /** NOW・HOMEで項目の後ろに付ける日付の表示。 */
-export function scheduleLabel(schedule: Pick<ItemSchedule, 'due' | 'review_after'>): string {
-  return [schedule.due ? `期日 ${schedule.due}` : '', schedule.review_after ? `見直す日 ${schedule.review_after}` : ''].filter(Boolean).join('・');
+export function scheduleLabel(schedule: Pick<ItemSchedule, 'due' | 'review_after' | 'repeat'>): string {
+  const repeat = repeatOf(schedule);
+  return [schedule.due ? `期日 ${schedule.due}${repeat ? `（${repeatLabel(repeat)}）` : ''}` : '', schedule.review_after ? `見直す日 ${schedule.review_after}` : ''].filter(Boolean).join('・');
+}
+const daysInMonth = (year: number, month: number) => new Date(Date.UTC(year, month, 0)).getUTCDate();
+/** 期日から繰り返しの間隔を1回分進めた日。毎月は本人が付けた日（day）を短い月では月末に丸める。 */
+export function advanceDue(due: string, repeat: ScheduleRepeat): string {
+  if (repeat.unit === 'day') return addDays(due, repeat.every);
+  if (repeat.unit === 'week') return addDays(due, repeat.every * 7);
+  const [y, m] = due.split('-').map(Number), index = y! * 12 + (m! - 1) + repeat.every, year = Math.floor(index / 12), month = index % 12 + 1;
+  const day = Math.min(repeat.day ?? Number(due.slice(8)), daysInMonth(year, month));
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+/**
+ * 今回を完了・見送ったときの次の期日。期日から間隔ずつ進め、今日より後になった最初の日にする。
+ * 遅れて完了しても過ぎた回をためず、早めに完了したときは次の回（今の期日の次）へ進む。
+ */
+export function nextOccurrenceDue(due: string, repeat: ScheduleRepeat, today: string): string {
+  let next = advanceDue(due, repeat);
+  // 2099年までの範囲に収める（毎日でも数万回で止まる）。
+  for (let guard = 0; next <= today && guard < 40_000; guard++) next = advanceDue(next, repeat);
+  return next;
+}
+/** 依頼の繰り返し（間隔だけ）から記録の繰り返しを作る。毎月は期日の日を覚えておく。 */
+export function scheduleRepeatFor(rule: RepeatRule, due: string): ScheduleRepeat {
+  return rule.unit === 'month' ? { unit: 'month', every: rule.every, day: Number(due.slice(8)) } : { unit: rule.unit, every: rule.every };
 }
 
-export interface ItemScheduleRequest { projectId: string; itemKey: string; due: string | null; reviewAfter: string | null; source: string; sourceEventId?: string }
+/**
+ * repeatは繰り返しの全体。nullで外し、省略すると今の繰り返しを保つ（期日を外すと繰り返しも外れる）。
+ * 繰り返しを知らない版のアプリが期日だけを送っても、定例が外れないようにするため。
+ */
+export interface ItemScheduleRequest { projectId: string; itemKey: string; due: string | null; reviewAfter: string | null; repeat?: RepeatRule | null; source: string; sourceEventId?: string }
 export interface ItemScheduleResult { projectId: string; itemKey: string; scheduleId: string; deduped: boolean }
 const requestSchema = z.object({
-  projectId: projectIdSchema, itemKey: digest, due: scheduleDateSchema.nullable(), reviewAfter: scheduleDateSchema.nullable(),
+  projectId: projectIdSchema, itemKey: digest, due: scheduleDateSchema.nullable(), reviewAfter: scheduleDateSchema.nullable(), repeat: repeatRuleSchema.nullable().optional(),
   source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
-}).strict();
+}).strict().refine(r => !r.repeat || r.due !== null, '繰り返しには期日が必要です');
 
 /**
  * 直近に生成したNOW項目の一覧にある項目へ、期日と見直す日を付ける（両方nullで外す）。
@@ -141,8 +192,10 @@ export async function setItemSchedule(config: HubConfig, request: ItemScheduleRe
       // 再送の照合は記録のままで行う（受け付けた後にプロジェクトが統合されても、同じ依頼として扱う）。
       const previous = (await readItemSchedules(vault, { raw: true })).records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
       if (previous) {
-        // 引き継いだ日付を外した記録は、引き継ぎ元のキーで残る。
-        if (previous.project_id !== r.projectId || (previous.item_key !== r.itemKey && (r.due !== null || r.reviewAfter !== null)) || previous.due !== r.due || previous.review_after !== r.reviewAfter) throw new Error('同じ受付IDで別の日付が記録されています');
+        // 引き継いだ日付を外した記録は、引き継ぎ元のキーで残る。繰り返しを省略した依頼は、記録した繰り返しを問わない。
+        // 毎月の日（day）は期日を変えなかったときに前の記録から引き継ぐため、照合は間隔だけで行う。
+        const recorded = repeatOf(previous), repeatDiffers = r.repeat !== undefined && !sameRule(recorded, r.repeat && r.due ? r.repeat : null);
+        if (previous.project_id !== r.projectId || (previous.item_key !== r.itemKey && (r.due !== null || r.reviewAfter !== null)) || previous.due !== r.due || previous.review_after !== r.reviewAfter || repeatDiffers) throw new Error('同じ受付IDで別の日付が記録されています');
         await rebuild();
         return { projectId: r.projectId, itemKey: r.itemKey, scheduleId: previous.id, deduped: true };
       }
@@ -157,15 +210,131 @@ export async function setItemSchedule(config: HubConfig, request: ItemScheduleRe
     const current = item ? byKey.get(r.itemKey) : orphan;
     if (!clearing && resolved.has(r.itemKey)) throw new Error('解決済み・完了の項目には日付を付けられません');
     if (clearing && !current) throw new Error('この項目に外す日付はありません');
-    if (current && current.due === r.due && current.review_after === r.reviewAfter) throw new Error('この項目には既に同じ日付が付いています');
+    // 繰り返しは、省略なら今のものを保つ。毎月の繰り返しは期日の日を覚え直す（期日を変えたときに付いていく）。
+    // 期日を変えずに同じ間隔を送ったときは、覚えている日を保つ（31日の毎月が月末に丸められた期日のまま、日を30日に覚え直さない）。
+    const kept = current ? repeatOf(current) : null, rule = r.repeat === undefined ? kept : r.repeat;
+    const repeat = !rule || !r.due ? null : kept && current?.due === r.due && sameRule(kept, rule) ? kept : scheduleRepeatFor(rule, r.due);
+    if (current && current.due === r.due && current.review_after === r.reviewAfter && sameRepeat(kept, repeat)) throw new Error('この項目には既に同じ日付が付いています');
     // 引き継いだ日付を外すときは、引き継ぎ元の記録を外す（項目のキーで外しても引き継ぎ元が残るため）。
     const target = clearing && current && current.item_key !== r.itemKey ? current : item ?? orphan!;
     const record: ItemSchedule = {
       schema_version: 1, id: `SCH-${ulid()}`, project_id: r.projectId, item_key: 'item_key' in target ? target.item_key : target.key, section: target.section as ItemSection, text: target.text, input_id: target.input_id,
-      due: r.due, review_after: r.reviewAfter, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),
+      due: r.due, review_after: r.reviewAfter, ...(repeat ? { repeat } : {}), source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),
     };
     if (!await vault.create(schedulePath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('日付の記録が競合しました');
     await rebuild();
     return { projectId: r.projectId, itemKey: r.itemKey, scheduleId: record.id, deduped: false };
+  });
+}
+
+/**
+ * 定例の1回分の記録。done: 今回を完了 / skip: 今回だけ見送る。どちらも項目は欄に残し、期日を次の回へ進める。
+ * dueは片付けた回の期日、next_dueは次の回の期日、schedule_idは次の回の期日を付けた日付の記録、repeatはそのときの繰り返し。
+ * 完了・解決の報告（item-resolutions）とは別で、項目を「解決済み・完了」へは移さない。
+ */
+export const occurrenceActions = ['done', 'skip'] as const;
+export type OccurrenceAction = typeof occurrenceActions[number];
+export const occurrenceActionSchema = z.enum(occurrenceActions);
+export const occurrenceIdSchema = z.string().regex(/^OCC-[0-9A-HJKMNP-TV-Z]{26}$/);
+export const itemOccurrenceSchema = z.object({
+  schema_version: z.literal(1), id: occurrenceIdSchema, project_id: projectIdSchema, item_key: digest, section: z.enum(itemSections),
+  text: z.string().max(4000), input_id: inputIdSchema, action: occurrenceActionSchema, due: scheduleDateSchema, next_due: scheduleDateSchema, schedule_id: scheduleIdSchema, repeat: scheduleRepeatSchema,
+  source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(200).optional(), created_at: z.string().datetime({ offset: true }),
+}).strict();
+export type ItemOccurrence = z.infer<typeof itemOccurrenceSchema>;
+const occurrenceDir = '90_system/item-occurrences';
+const occurrencePath = (id: string) => `${occurrenceDir}/${id}.json`;
+
+/** 定例の記録。読めない記録はproblemsに返す（NOW・HOME・経緯の生成を止めない）。統合の読み替えは完了報告と同じ。 */
+export async function readItemOccurrences(vault: Vault, options: { raw?: boolean } = {}): Promise<{ records: ItemOccurrence[]; problems: string[] }> {
+  const records: ItemOccurrence[] = [], problems: string[] = [];
+  for (const path of await vault.files(occurrenceDir)) {
+    if (!/^90_system\/item-occurrences\/OCC-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
+    try {
+      const record = itemOccurrenceSchema.parse(JSON.parse((await vault.read(path))!));
+      if (path !== occurrencePath(record.id)) throw new Error();
+      records.push(record);
+    } catch { problems.push(path); }
+  }
+  records.sort((a, b) => a.id.localeCompare(b.id));
+  return { records: options.raw ? records : await settleItemRecords(vault, records), problems };
+}
+
+/**
+ * 定例の回を片付けられない理由。同じ依頼を何度受け付けても同じ結果になるため、受付は再試行しない。
+ * occurrence-changed: 確認した回の期日が今の期日と違う（別の端末で先に片付けた）/ not-repeating: 繰り返しが付いていない。
+ */
+export type OccurrenceReason = { code: 'occurrence-changed'; due: string | null } | { code: 'not-repeating' } | { code: 'occurrence-out-of-range' };
+export class OccurrenceError extends Error {
+  constructor(readonly reason: OccurrenceReason, message: string) {
+    super(message);
+    this.name = 'OccurrenceError';
+  }
+}
+export function occurrenceMessage(reason: OccurrenceReason): string {
+  if (reason.code === 'occurrence-out-of-range') return '次の回の期日が記録できる範囲（2099年まで）を超えるため、進めませんでした。繰り返しを外すか、期日を付け直してください。';
+  if (reason.code === 'not-repeating') return 'この項目には繰り返しが付いていませんでした。繰り返しが外されたか、日付が変わった可能性があります。再読込して確認してください。';
+  return `この回は既に片付いているか、期日が変わっていました${reason.due ? `（今の期日は ${reason.due}）` : ''}。再読込して確認してください。`;
+}
+
+export interface OccurrenceRequest { projectId: string; itemKey: string; action: OccurrenceAction; /** 本人が確認した回の期日。今の期日と違えば受け付けない。 */ due: string; source: string; sourceEventId?: string; /** 今日（検証用）。 */ now?: Date }
+export interface OccurrenceResult { projectId: string; itemKey: string; action: OccurrenceAction; occurrenceId: string; nextDue: string; deduped: boolean }
+const occurrenceRequestSchema = z.object({
+  projectId: projectIdSchema, itemKey: digest, action: occurrenceActionSchema, due: scheduleDateSchema,
+  source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(), now: z.date().optional(),
+}).strict();
+
+/**
+ * 定例の項目の今回を完了にする、または見送る。記録を残して期日を次の回へ進め、項目は欄に残す。
+ * 確認した回の期日（due）が今の期日と同じときだけ受け付ける。2台の端末から同じ回を片付けても、2回分進めない。
+ * 回の記録を先に作り、次の回の日付の記録はその中のIDで作る。間で停止した場合は同じ受付IDの再送で続きを作る。
+ */
+export async function completeOccurrence(config: HubConfig, request: OccurrenceRequest): Promise<OccurrenceResult> {
+  const r = occurrenceRequestSchema.parse(request), vault = new Vault(config);
+  const { rebuildNowLocked, readReceipts } = await import('./views.js');
+  return vault.withLock(async () => {
+    const projects = await readProjects(config);
+    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
+    const rebuild = async () => { await rebuildNowLocked(vault, config, r.projectId, await readInputs(config), await readReceipts(config)); };
+    // 次の回の日付の記録がなければ作る（回の記録の直後に停止した場合の続き）。
+    const ensureNext = async (occurrence: ItemOccurrence) => {
+      if (await vault.read(schedulePath(occurrence.schedule_id)) !== undefined) return;
+      const next: ItemSchedule = {
+        schema_version: 1, id: occurrence.schedule_id, project_id: occurrence.project_id, item_key: occurrence.item_key, section: occurrence.section, text: occurrence.text, input_id: occurrence.input_id,
+        due: occurrence.next_due, review_after: null, repeat: occurrence.repeat, source: occurrence.source, created_at: occurrence.created_at,
+      };
+      if (!await vault.create(schedulePath(next.id), JSON.stringify(next, null, 2) + '\n')) throw new Error('日付の記録が競合しました');
+    };
+    if (r.sourceEventId) {
+      const previous = (await readItemOccurrences(vault, { raw: true })).records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
+      if (previous) {
+        if (previous.project_id !== r.projectId || previous.item_key !== r.itemKey || previous.action !== r.action || previous.due !== r.due) throw new Error('同じ受付IDで別の定例の報告が記録されています');
+        await ensureNext(previous);
+        await rebuild();
+        return { projectId: r.projectId, itemKey: r.itemKey, action: r.action, occurrenceId: previous.id, nextDue: previous.next_due, deduped: true };
+      }
+    }
+    assertNotMerged(projects, r.projectId);
+    const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
+    const item = list.find(i => i.key === r.itemKey);
+    if (!item) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
+    const closed = resolved.get(r.itemKey);
+    if (closed) throw new ItemTargetError({ code: 'item-closed', state: closed.action === 'exclude' ? 'excluded' : 'resolved' }, 'この項目は既に解決済みか、誤りとして外しています');
+    const { records } = await readItemSchedules(vault), current = effectiveSchedules(records, r.projectId, list, resolved).byKey.get(r.itemKey);
+    const repeat = current ? repeatOf(current) : null;
+    if (!current || !repeat || current.due === null) throw new OccurrenceError({ code: 'not-repeating' }, 'この項目には繰り返しが付いていません');
+    if (current.due !== r.due) throw new OccurrenceError({ code: 'occurrence-changed', due: current.due }, `確認した回の期日（${r.due}）が今の期日（${current.due}）と違います`);
+    const nextDue = nextOccurrenceDue(current.due, repeat, todayIn(config.timezone, r.now));
+    // 期日は2099年までしか記録できない。読めない記録を残さないよう、先に断る。
+    if (!scheduleDateSchema.safeParse(nextDue).success) throw new OccurrenceError({ code: 'occurrence-out-of-range' }, '次の回の期日が記録できる範囲（2099年まで）を超えます');
+    const occurrence: ItemOccurrence = {
+      schema_version: 1, id: `OCC-${ulid()}`, project_id: r.projectId, item_key: item.key, section: item.section, text: item.text, input_id: item.input_id,
+      action: r.action, due: current.due, next_due: nextDue, schedule_id: `SCH-${ulid()}`,
+      repeat, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),
+    };
+    if (!await vault.create(occurrencePath(occurrence.id), JSON.stringify(occurrence, null, 2) + '\n')) throw new Error('定例の記録が競合しました');
+    await ensureNext(occurrence);
+    await rebuild();
+    return { projectId: r.projectId, itemKey: r.itemKey, action: r.action, occurrenceId: occurrence.id, nextDue: occurrence.next_due, deduped: false };
   });
 }

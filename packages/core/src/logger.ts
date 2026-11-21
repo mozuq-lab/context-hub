@@ -2,14 +2,14 @@ import { constants } from 'node:fs';
 import { mkdir, lstat, realpath, open, readdir, unlink } from 'node:fs/promises';
 import { join, relative, isAbsolute, sep } from 'node:path';
 import type { HubConfig } from './types.js';
-export interface OperationLog { op:'capture'|'organize'|'approve'|'reject'|'propose'|'synthesize'; input_id?:string; ms?:number; error_kind?:'storage'|'llm'|'validation'; counts?:Record<string,number> }
+export interface OperationLog { op:'capture'|'organize'|'approve'|'reject'|'propose'|'synthesize'|'ask'; input_id?:string; ms?:number; error_kind?:'storage'|'llm'|'validation'; counts?:Record<string,number> }
 export async function logOperation(config: HubConfig, event: OperationLog): Promise<boolean> {
   try {
     await mkdir(config.logging.dir,{recursive:true,mode:0o700});
     if((await lstat(config.logging.dir)).isSymbolicLink())return false;
     const dir=await realpath(config.logging.dir);
     try {const vault=await realpath(config.vaultPath), rel=relative(vault,dir);if(!rel||(!rel.startsWith(`..${sep}`)&&rel!=='..'&&!isAbsolute(rel)))return false;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')return false;}
-    if(!['capture','organize','approve','reject','propose','synthesize'].includes(event.op))return false;
+    if(!['capture','organize','approve','reject','propose','synthesize','ask'].includes(event.op))return false;
     const counts:Record<string,number>={};
     for(const key of ['processed','failed','skipped','deduped','conflicts'])if(Number.isSafeInteger(event.counts?.[key])&&event.counts![key]>=0)counts[key]=event.counts![key];
     const record={ts:new Date().toISOString(),op:event.op,

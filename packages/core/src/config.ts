@@ -12,6 +12,8 @@ export function expandPath(value: string): string {
 }
 /** 週次の統合の既定値。既定では無効で、有効にしても呼び出しは間隔ごとに1回。 */
 const defaultSynthesis = (): HubConfig['synthesis'] => ({ enabled: false, intervalDays: 7, thinking: 'medium', timeoutSec: 150, maxFocusMemos: 30, maxContextMemos: 100, maxCalls: 1 });
+/** 記録に聞くの既定値。本人が問いを送ったときだけモデルを呼び、1日の上限で呼び出しを抑える。 */
+export const defaultAsk = (): HubConfig['ask'] => ({ enabled: true, maxSources: 20, timeoutSec: 90, maxPerCycle: 3, dailyLimit: 30 });
 export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Library/Application Support/context-hub')): HubConfig {
   return {
     schema_version: 1, vaultPath: expandPath(vaultPath), statePath: expandPath(statePath), timezone: 'Asia/Tokyo',
@@ -23,6 +25,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
     logging: { dir: join(expandPath(statePath), 'logs'), retentionDays: 14 },
     git: { enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 },
     synthesis: defaultSynthesis(),
+    ask: defaultAsk(),
     privacy: { redactSecrets: true, patterns: [] },
     backup: { dir: null, verifyMaxAgeDays: 7, ageIdentity: null, ageCommand: 'age' },
   };
@@ -44,6 +47,8 @@ const configSchema = z.object({
   // 既定では無効。有効にしたときだけ、cycleが間隔ごとに1回、たまったメモをまとめてモデルへ渡す。
   synthesis: z.object({ enabled: z.boolean(), intervalDays: positive.max(90), thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high']), timeoutSec: positive.max(600),
     maxFocusMemos: positive.max(100), maxContextMemos: z.number().int().min(0).max(500), maxCalls: positive.max(4) }).strict().default(defaultSynthesis()),
+  // 既定で有効。本人が問いを送ったときだけモデルを呼ぶ。
+  ask: z.object({ enabled: z.boolean(), maxSources: positive.max(50), timeoutSec: positive.max(600), maxPerCycle: positive.max(20), dailyLimit: positive.max(1000) }).strict().default(defaultAsk()),
   // 既定で有効。追加の規則は読み込み時に正規表現として組み立てられることを確かめる。
   privacy: z.object({ redactSecrets: z.boolean(), patterns: z.array(z.object({ label: z.string().min(1).max(40).regex(/^[^\]\r\n]+$/), pattern: z.string().min(1).max(500).refine(v => { try { new RegExp(v, 'gu'); return true; } catch { return false; } }, '正規表現が不正です').superRefine((v, ctx) => { const problem = dartPatternProblem(v); if (problem) ctx.addIssue({ code: 'custom', message: problem }); }) }).strict()).max(50) }).strict().default({ redactSecrets: true, patterns: [] }),
   // 既定では無効。有効にすると、HOMEの生成のたびに期日をカレンダー用のファイルへ書き出す（内容が変わったときだけ）。
@@ -76,9 +81,9 @@ function patternReasons(error: ZodError): string {
   return reasons.length ? `（${[...new Set(reasons)].slice(0, 5).join('／')}）` : '';
 }
 /** 設定ファイルへ上書きする値。入れ子は部分指定でよい。 */
-export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'synthesis' | 'privacy' | 'backup' | 'calendar'>> & {
+export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'synthesis' | 'ask' | 'privacy' | 'backup' | 'calendar'>> & {
   calendar?: Partial<NonNullable<HubConfig['calendar']>>;
-  synthesis?: Partial<HubConfig['synthesis']>;
+  synthesis?: Partial<HubConfig['synthesis']>; ask?: Partial<HubConfig['ask']>;
   backup?: Partial<NonNullable<HubConfig['backup']>>; capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; privacy?: Partial<HubConfig['privacy']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
   organize?: Partial<Omit<HubConfig['organize'], 'llm'>> & { llm?: Partial<HubConfig['organize']['llm']> };
 };
@@ -100,6 +105,7 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
     logging: { ...defaults.logging, ...raw.logging, ...overrides.logging },
     git: { ...defaults.git, ...raw.git, ...overrides.git },
     synthesis: { ...defaults.synthesis, ...raw.synthesis, ...overrides.synthesis },
+    ask: { ...defaults.ask, ...raw.ask, ...overrides.ask },
     privacy: { ...defaults.privacy, ...raw.privacy, ...overrides.privacy },
     backup: { ...defaults.backup, ...raw.backup, ...overrides.backup },
     calendar: { enabled: false, reviewDates: false, titles: 'item', ...raw.calendar, ...overrides.calendar },
