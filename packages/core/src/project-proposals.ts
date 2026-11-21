@@ -13,6 +13,8 @@ export interface ProjectCandidate {
  candidateId:string; projectId:string; path:string; rootInputId:string; evidenceHash:string; candidateHash:string; confirmationToken:string; proposal:ProjectProposal; status:'pending'|'approved'|'rejected'|'stale'; generatedAt:string;
  /** 同じ対象を指す確認待ちの案をまとめたとき、まとめられた側の案に付く代表の案のID。 */
  duplicateOf?:string;
+ /** 根拠のメモか確認情報が未同期で、本人が確かめた内容と結び付けられない（採用も却下も受け付けない）。 */
+ unsynced?:boolean;
  /** 代表の案に付く、まとめた案のID（古い順）。判断済みの案では、同じ判断としてまとめた案のID。 */
  duplicates?:string[];
  /** 代表の案とまとめて判断された案に付く、代表の案のID。 */
@@ -127,7 +129,7 @@ export async function readProjectCandidate(config:HubConfig,id:string,coverage?:
   const index=decision?undefined:coverage??await readProjectCoverage(vault),covered=index?.covered.get(meta.id);
   // 読めない判断記録がある間は、まとめて判断済みの案かもしれないので、確認待ちには戻さない。
   const stale=!confirmation||!chain||chain.evidenceHash!==meta.evidence_hash||JSON.stringify(meta.evidence_ids)!==JSON.stringify([chain.root,...chain.revisions].map(i=>i.id))||overlaps(meta.proposal,projects)||!!index?.unreadable.length;
-  return{candidateId:meta.id,projectId:meta.project_id,path,rootInputId:meta.root_input_id,evidenceHash:meta.evidence_hash,candidateHash:hash(raw),confirmationToken:confirmation?.confirmation_token??'',proposal:meta.proposal,generatedAt:meta.generated_at,status:decision?decision.action==='approve'?'approved':'rejected':covered?covered.action==='approve'?'approved':'rejected':stale?'stale':'pending',...(covered?{coveredBy:covered.by}:{}),...(decision?.covers?{duplicates:decision.covers.map(c=>c.candidate_id)}:{})};
+  return{candidateId:meta.id,projectId:meta.project_id,path,rootInputId:meta.root_input_id,evidenceHash:meta.evidence_hash,candidateHash:hash(raw),confirmationToken:confirmation?.confirmation_token??'',proposal:meta.proposal,generatedAt:meta.generated_at,status:decision?decision.action==='approve'?'approved':'rejected':covered?covered.action==='approve'?'approved':'rejected':stale?'stale':'pending',...(!decision&&!covered&&(!confirmation||!chain)?{unsynced:true}:{}),...(covered?{coveredBy:covered.by}:{}),...(decision?.covers?{duplicates:decision.covers.map(c=>c.candidate_id)}:{})};
 }
 export {readDecision as readProjectDecision};
 export async function decideProject(config:HubConfig,request:ProjectDecisionRequest):Promise<ProjectDecisionResult>{
@@ -152,7 +154,10 @@ export async function decideProject(config:HubConfig,request:ProjectDecisionRequ
    await materialize(vault,lead);
    return{candidateId:candidate.candidateId,projectId:parseCandidate(candidatePath(coveredBy.by),lead.candidate_snapshot).project_id,decisionId:lead.id,deduped:true};
   }
-  if(!candidate||candidate.status!=='pending')throw new Error('候補が古いか確認情報が不足しています。同期後に最新候補を確認してください');
+  // 古くなった案（同じ名前のプロジェクトが既にある・元のメモに新しい訂正があるなど）は採用できないが、1件ずつ却下して片付けられる。
+  // 根拠のメモか確認情報が未同期の案は、本人が確かめた内容と結び付けられないので却下も受け付けない。
+  const staleReject=candidate?.status==='stale'&&!candidate.unsynced&&request.action==='reject'&&!covers.length;
+  if(!candidate||(candidate.status!=='pending'&&!staleReject))throw new Error('候補が古いか確認情報が不足しています。同期後に最新候補を確認してください');
   if(candidate.candidateHash!==request.expectedHash||candidate.confirmationToken!==request.confirmationToken)throw new Error('表示した候補と承認の確認情報が一致しません');
   const raw=(await vault.read(candidate.path))!;
   if(hash(raw)!==request.expectedHash)throw new Error('候補の内容が変更されました');

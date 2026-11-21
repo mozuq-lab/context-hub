@@ -100,6 +100,7 @@ test('端末が出来事の日付と方針の見直しに対応した本体か�
   expect(features.schema_version).toBe(1);
   expect(features.capture_fields).toContain('happened_on');
   expect(features.capture_kinds).toEqual(['memo', 'work-summary', 'action']);
+  expect(features.review_rejects).toEqual(['stale']);
   expect(features.operations).toEqual(expect.arrayContaining(['capture', 'policy-keep', 'item-schedule']));
   expect(features).toMatchObject({ max_backdate_days: 365, calendar_titles: 'item' });
   // 端末が本体の設定に合わせられるよう、さかのぼれる日数と予定の件名の設定も書く。

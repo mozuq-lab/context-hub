@@ -36,6 +36,22 @@ test('候補hashが変わらなくても新しい訂正があれば古い候補�
  await expect(approve(c.config,c.id,c.hash,{scope:'global'})).rejects.toThrow();
  expect(await c.vault.files('90_system/approvals')).toHaveLength(0);
 });
+test('古くなった候補は採用できないが、却下して判断履歴へ移せる',async()=>{
+ const c=await aiCandidate(roots);await correctInput(c.config,c.input.inputId,{source:'cli',occurredAt:'2026-11-01T02:00:00Z',text:'採用方針はまだ決まっていない'});
+ expect((await readReviewCandidates(c.config))[0].status).toBe('stale');
+ expect(await reject(c.config,c.id,c.hash)).toMatchObject({candidateId:c.id,deduped:false});
+ expect((await readReviewCandidates(c.config))[0]).toMatchObject({status:'rejected'});
+ expect(await c.vault.files('30_knowledge')).toHaveLength(0);
+ // 同じ却下の再送は同じ記録へまとめ、反対の判断は受け付けない。
+ expect(await reject(c.config,c.id,c.hash)).toMatchObject({deduped:true});
+ await expect(approve(c.config,c.id,c.hash,{scope:'global'})).rejects.toThrow();
+});
+test('同期・形式を確かめられない候補は却下もしない',async()=>{
+ const c=await aiCandidate(roots);await rm(join(c.config.vaultPath,`90_system/receipts/${c.input.inputId}.json`));
+ expect((await readReviewCandidates(c.config))[0].status).toBe('unavailable');
+ await expect(reject(c.config,c.id,c.hash)).rejects.toThrow();
+ expect(await c.vault.files('90_system/approvals')).toHaveLength(0);
+});
 test('根拠receiptが未同期なら確認待ちにして承認を止める',async()=>{
  const c=await aiCandidate(roots);await rm(join(c.config.vaultPath,`90_system/receipts/${c.input.inputId}.json`));
  expect((await readReviewCandidates(c.config))[0].status).toBe('unavailable');

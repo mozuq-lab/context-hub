@@ -93,7 +93,8 @@ async function decide(config: HubConfig, id: string, expectedHash: string, actio
       const candidate = await candidateAt(vault, id);
       if (hash(candidate.content) !== expectedHash) throw new Error('候補のハッシュが一致しません。内容を再確認してください');
       const state=await readKnowledgeCandidate(config,id);
-      if(state.status!=='pending')throw new Error(state.warnings[0]??'候補を確認できません');
+      // 古くなった候補（根拠に新しい訂正がある・置き換え元に別の後継があるなど）は採用できないが、却下して片付けられる。
+      if(state.status!=='pending'&&!(action==='reject'&&state.status==='stale'))throw new Error(state.warnings[0]??'候補を確認できません');
       if(state.candidateHash!==expectedHash)throw new Error('確認中に候補の内容が変わりました。再確認してください');
       for(const[path,want]of Object.entries(state.dependencies)){
         const bytes=await vault.readBytes(path,1_048_576),actual=bytes===undefined?null:hash(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes));

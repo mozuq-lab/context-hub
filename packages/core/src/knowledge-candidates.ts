@@ -56,7 +56,8 @@ export async function readKnowledgeCandidate(config:HubConfig,id:string):Promise
   }else{const existing=await readKnowledge(vault,`KNW-${id.slice(4)}`);
     await depend(retirementPath(`KNW-${id.slice(4)}`));
     const stopped=await readRetirement(vault,`KNW-${id.slice(4)}`);item.retired=!!stopped;if(stopped)item.retiredAt=stopped.retired_at;if(existing)await depend(existing.path);await depend(`30_knowledge/KNW-${id.slice(4)}.md`);}
-  const issue=(status:'stale'|'unavailable',message:string)=>{item.warnings.push(message);if(!decision)item.status=status;};
+  // 確かめられない（unavailable）ことが分かった候補は、ほかに古い理由があっても却下できる候補（stale）にしない。
+  const issue=(status:'stale'|'unavailable',message:string)=>{item.warnings.push(message);if(!decision&&!(status==='stale'&&item.status==='unavailable'))item.status=status;};
   if(m.supersedes){
    let replacementLinked=false;
    const record=await readKnowledge(vault,m.supersedes);
