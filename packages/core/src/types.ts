@@ -14,7 +14,9 @@ export interface HubConfig {
   /** 作業記録の下書きに使うローカルリポジトリ。本人が設定したものだけを読み取り専用で参照する。 */
   git: { enabled: boolean; repos: { projectId: string; path: string; name?: string }[]; maxCommits: number; lookbackDays: number };
   /** バックアップから復元できるかの確認。dirは scripts/vault-backup.sh の保存先（Vaultの外）。確かめた復元点がverifyMaxAgeDaysより古いとHOMEで知らせる。 */
-  backup?: { dir: string | null; verifyMaxAgeDays: number };
+  backup?: { dir: string | null; verifyMaxAgeDays: number;
+    /** 暗号化したバックアップ（.tar.gz.age）を確かめるときのageの秘密鍵のファイル（Vaultの外）。未設定なら暗号化したバックアップは確かめられない。 */ ageIdentity?: string | null;
+    /** ageのコマンド。launchdなどPATHが短い環境では絶対パスにする。 */ ageCommand?: string };
   /**
    * 週次の統合。たまったメモをモデルがまとめて読み、メモ1件を読むだけでは分からないこと（つながり・考えの変化・止まっている意図・次の一手・問い）を返す。
    * 既定では無効。有効にすると、cycleがintervalDaysごとに1回だけ実行する。モデルの接続先はorganize.llmを使い、思考の深さ（thinking）は整理と別に決める。

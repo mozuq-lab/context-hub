@@ -12,7 +12,7 @@ import { MockLlm } from '../src/llm.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { doctor } from '../src/doctor.js';
 import { defaultConfig, validateConfig } from '../src/config.js';
-import { BackupArchiveError, archiveCreatedAt, backupExtractLimits, backupStatus, extractArchive, latestArchive, readBackupChecks, verifyBackup, type BackupCheck } from '../src/backup-check.js';
+import { AgeCommandError, BackupArchiveError, archiveCreatedAt, backupExtractLimits, backupStatus, extractArchive, latestArchive, readBackupChecks, verifyBackup, type BackupCheck } from '../src/backup-check.js';
 import type { HubConfig } from '../src/types.js';
 
 const roots: string[] = [];
@@ -288,8 +288,8 @@ test('確認結果は新しい30件と、最後に復元できた1件を残す',
 
 test('バックアップ先はVaultの外に設定する', async () => {
   const base = defaultConfig('/tmp/ctx-vault', '/tmp/ctx-state');
-  expect(validateConfig({ ...base, backup: { dir: '/tmp/ctx-backups', verifyMaxAgeDays: 3 } }).backup).toEqual({ dir: '/tmp/ctx-backups', verifyMaxAgeDays: 3 });
-  expect(validateConfig(base).backup).toEqual({ dir: null, verifyMaxAgeDays: 7 });
+  expect(validateConfig({ ...base, backup: { dir: '/tmp/ctx-backups', verifyMaxAgeDays: 3 } }).backup).toEqual({ dir: '/tmp/ctx-backups', verifyMaxAgeDays: 3, ageIdentity: null, ageCommand: 'age' });
+  expect(validateConfig(base).backup).toEqual({ dir: null, verifyMaxAgeDays: 7, ageIdentity: null, ageCommand: 'age' });
   expect(() => validateConfig({ ...base, backup: { dir: '/tmp/ctx-vault/backups', verifyMaxAgeDays: 7 } })).toThrow('Vaultの外');
   expect(() => validateConfig({ ...base, backup: { dir: 'relative/backups', verifyMaxAgeDays: 7 } })).toThrow();
 });
@@ -304,4 +304,111 @@ test('確認の展開上限はVaultの大きさと空き容量から決め、空
   // 空き容量が分かれば、256MiBを残した分までにする。
   expect(backupExtractLimits(2 * GiB, 5 * GiB).maxBytes).toBe(5 * GiB - 256 * MiB);
   expect(() => backupExtractLimits(2 * GiB, 2 * GiB)).toThrow('空き容量が足りません');
+});
+
+/** ageとage-keygenがあるときだけ、暗号化したバックアップを試す（CIではインストールしてから実行する）。 */
+const hasAge = spawnSync('age', ['--version']).status === 0 && spawnSync('age-keygen', ['--help']).error === undefined;
+// CIではageを入れたうえでCTX_REQUIRE_AGE=1を指定し、暗号化の試験が黙って飛ばされないようにする。
+if (!hasAge && process.env.CTX_REQUIRE_AGE === '1') throw new Error('ageとage-keygenが見つかりません');
+/** 架空の鍵の組。秘密鍵はVaultとバックアップ先の外に置く。 */
+async function ageKeys(): Promise<{ identity: string; recipient: string }> {
+  const dir = await tempDir(), identity = join(dir, 'backup-key.txt');
+  const made = spawnSync('age-keygen', ['-o', identity], { encoding: 'utf8' });
+  if (made.status !== 0) throw new Error(made.stderr);
+  const pub = spawnSync('age-keygen', ['-y', identity], { encoding: 'utf8' });
+  return { identity, recipient: pub.stdout.trim() };
+}
+/** scripts/vault-backup.sh と同じ形で作ったtar.gzを、ageで暗号化して.tar.gz.ageにする。 */
+async function encryptedArchiveOf(config: HubConfig, backups: string, recipient: string, name = stamp().replace(/\.tar\.gz$/, '.tar.gz.age')): Promise<string> {
+  const plainDir = await tempDir(), plain = archiveOf(config, plainDir, 'plain.tar.gz'), out = join(backups, name);
+  const result = spawnSync('age', ['-e', '-r', recipient, '-o', out, plain], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return out;
+}
+
+test.skipIf(!hasAge)('暗号化したバックアップを秘密鍵で復号して確かめ、HOMEに暗号化したバックアップとして示す', async () => {
+  const { config, vault, backups } = await fixture();
+  const { identity, recipient } = await ageKeys();
+  // 名前は1回だけ決める（時刻をまたいで作り直すと、別の名前になることがある）。
+  const plainName = stamp(3);
+  archiveOf(config, backups, plainName);
+  const name = stamp(1).replace(/\.tar\.gz$/, '.tar.gz.age'), archive = await encryptedArchiveOf(config, backups, recipient, name);
+  // 暗号化したものと、しないものが混ざっていても、いちばん新しいものを選ぶ。
+  expect(await latestArchive(backups)).toBe(archive);
+  const encrypted: HubConfig = { ...config, backup: { ...config.backup!, ageIdentity: identity } };
+  const work = await tempDir();
+  const { check } = await verifyBackup(encrypted, { workDir: work });
+  expect(check).toMatchObject({ status: 'ok', archive: name, encrypted: true, restored: { inputs: 2, projects: 1, receipts: 2 }, issues: [] });
+  expect(await readdir(work)).toEqual([]);
+  // 記録には秘密鍵の場所を残さない。
+  const raw = (await vault.read(`90_system/backup-checks/${check.id}.json`))!;
+  expect(raw).not.toContain(identity);
+  expect(raw).not.toContain('AGE-SECRET-KEY');
+  await rebuildDashboard(encrypted);
+  expect((await vault.read('HOME.md'))!).toMatch(/\n最後に確かめた復元点: \d{4}-\d{2}-\d{2} \d{2}:\d{2}の暗号化したバックアップ（0日前 \/ 今日復元できることを確認）\n/);
+  // 暗号化していないアーカイブの記録には、encryptedを書かない。
+  const plainCheck = await verifyBackup(encrypted, { archive: join(backups, plainName), workDir: work });
+  expect(plainCheck.check.status).toBe('ok');
+  expect(plainCheck.check).not.toHaveProperty('encrypted');
+});
+
+test.skipIf(!hasAge)('鍵が違う・壊れた・途中で切れた暗号化アーカイブは、復号できないとして記録する', async () => {
+  const { config, backups } = await fixture();
+  const right = await ageKeys(), wrong = await ageKeys();
+  const archive = await encryptedArchiveOf(config, backups, right.recipient, 'vault-20261110-033000.tar.gz.age');
+  const work = await tempDir();
+  const withKey = (identity: string): HubConfig => ({ ...config, backup: { ...config.backup!, ageIdentity: identity } });
+  const reason = '暗号化したアーカイブを復号できません（鍵が違う、壊れている、または途中で切れています）';
+  expect((await verifyBackup(withKey(wrong.identity), { archive, workDir: work })).check).toMatchObject({ status: 'failed', encrypted: true, restored: null, issues: [reason] });
+  const bytes = await readFile(archive);
+  // 末尾を切ったもの（認証できた途中までしか出てこない）。
+  await writeFile(archive, bytes.subarray(0, bytes.length - 40));
+  expect((await verifyBackup(withKey(right.identity), { archive, workDir: work })).check).toMatchObject({ status: 'failed', issues: [reason] });
+  // 本文の1バイトを書き換えたもの。
+  const tampered = Buffer.from(bytes); tampered[tampered.length - 30] ^= 0xff;
+  await writeFile(archive, tampered);
+  expect((await verifyBackup(withKey(right.identity), { archive, workDir: work })).check).toMatchObject({ status: 'failed', issues: [reason] });
+  expect(await readdir(work)).toEqual([]);
+});
+
+test.skipIf(!hasAge)('復号の途中でこちらが止めたとき（展開の上限など）は、復号の失敗ではなく、止めた理由を示す', async () => {
+  const { config, backups } = await fixture();
+  const { identity, recipient } = await ageKeys();
+  const archive = await encryptedArchiveOf(config, backups, recipient, 'vault-20261110-033000.tar.gz.age');
+  const decrypt = { command: 'age', identity };
+  await expect(extractArchive(archive, await tempDir(), { maxFiles: 1, maxBytes: 1024 ** 3 }, decrypt)).rejects.toThrow('エントリー数が上限');
+  await expect(extractArchive(archive, await tempDir(), { maxFiles: 1000, maxBytes: 8 }, decrypt)).rejects.toThrow('展開後の大きさが上限');
+  // 止めずに最後まで読めば、復号して展開できる。
+  expect((await extractArchive(archive, await tempDir(), undefined, decrypt)).files).toBeGreaterThan(0);
+});
+
+test('暗号化したバックアップは、秘密鍵やageがなければ「復元できない」とは記録せずに止める', async () => {
+  const { config, vault, backups } = await fixture();
+  // 中身は問わない（鍵がない・コマンドがないことを、復号の前に見つける）。
+  const archive = join(backups, 'vault-20261110-033000.tar.gz.age');
+  await writeFile(archive, 'age-encryption.org/v1\n');
+  const work = await tempDir();
+  await expect(verifyBackup(config, { workDir: work })).rejects.toThrow('backup.ageIdentity');
+  await expect(verifyBackup({ ...config, backup: { ...config.backup!, ageIdentity: join(work, 'none.txt') } }, { workDir: work })).rejects.toThrow('秘密鍵のファイルを読めません');
+  // パスフレーズで守った鍵は、無人の確認では入力できずに止まるため、展開の前に断る。
+  const locked = join(work, 'locked.txt'); await writeFile(locked, 'age-encryption.org/v1\n-> scrypt 架空\n');
+  await expect(verifyBackup({ ...config, backup: { ...config.backup!, ageIdentity: locked } }, { archive, workDir: work })).rejects.toThrow('パスフレーズ');
+  await rm(locked);
+  const key = join(work, 'key.txt'); await writeFile(key, '# 架空の鍵\n');
+  const missing: HubConfig = { ...config, backup: { ...config.backup!, ageIdentity: key, ageCommand: join(work, 'no-such-age') } };
+  await expect(verifyBackup(missing, { archive, workDir: work })).rejects.toThrow(AgeCommandError);
+  await expect(verifyBackup(missing, { archive, workDir: work })).rejects.toThrow('backup.ageCommand');
+  expect((await readBackupChecks(vault)).records).toEqual([]);
+  expect((await readdir(work)).sort()).toEqual(['key.txt']);
+});
+
+test('ageの秘密鍵は、Vaultの中やバックアップ先の中には設定できない', async () => {
+  const base = defaultConfig('/tmp/ctx-key-vault', '/tmp/ctx-key-state');
+  const ok = validateConfig({ ...base, backup: { dir: '/tmp/ctx-key-backups', verifyMaxAgeDays: 7, ageIdentity: '/tmp/ctx-keys/backup.txt', ageCommand: '/opt/homebrew/bin/age' } });
+  expect(ok.backup).toMatchObject({ ageIdentity: '/tmp/ctx-keys/backup.txt', ageCommand: '/opt/homebrew/bin/age' });
+  // 書かなければ鍵なし・コマンドはageになる（今までの設定ファイルのまま読める）。
+  expect(validateConfig({ ...base, backup: { dir: null, verifyMaxAgeDays: 7 } }).backup).toEqual({ dir: null, verifyMaxAgeDays: 7, ageIdentity: null, ageCommand: 'age' });
+  expect(() => validateConfig({ ...base, backup: { dir: null, verifyMaxAgeDays: 7, ageIdentity: '/tmp/ctx-key-vault/keys/backup.txt' } })).toThrow('Vaultの外');
+  expect(() => validateConfig({ ...base, backup: { dir: '/tmp/ctx-key-backups', verifyMaxAgeDays: 7, ageIdentity: '/tmp/ctx-key-backups/backup.txt' } })).toThrow('バックアップ先の外');
+  expect(() => validateConfig({ ...base, backup: { dir: null, verifyMaxAgeDays: 7, ageIdentity: 'keys/backup.txt' } })).toThrow();
 });
