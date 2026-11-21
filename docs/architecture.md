@@ -21,7 +21,7 @@ Input/                         端末が追加する不変の受付ファイル
 20_ideas/                      AI整理済みアイデア
 30_knowledge/                  共通へ採用した正式知識・方針
 40_people/<id>/person.md        本人が登録した人の定義（名前・呼び名）
-40_people/<id>/PERSON.md        その人が出てくる記録と未完了の項目の生成ビュー
+40_people/<id>/SUMMARY.md        その人が出てくる記録と未完了の項目の生成ビュー
 40_people/PEOPLE.md            登録した人の一覧の生成ビュー（人を登録したときだけ）
 10_projects/<id>/knowledge/     対象projectへ採用した正式知識・方針
 POLICY.md                      共通の有効方針（派生集約）

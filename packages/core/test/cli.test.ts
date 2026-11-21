@@ -112,11 +112,16 @@ test('CLIで人を登録・変更・外し、変更と外すには確認した�
  const{root,config}=await setup();await cli(config,['init']);
  await cli(config,['add','--occurred-at','2026-11-10T00:00:00Z'],'田中さんと話した');await cli(config,['organize']);
  const added=await cli(config,['person','add','tanaka','--name','田中さん','--aliases','田中,Tanaka']);expect(added.code).toBe(0);expect(JSON.parse(added.out)).toMatchObject({personId:'tanaka',action:'add'});
- expect(await readFile(join(root,'vault/40_people/tanaka/PERSON.md'),'utf8')).toContain('田中さんと話した');
+ expect(await readFile(join(root,'vault/40_people/tanaka/SUMMARY.md'),'utf8')).toContain('田中さんと話した');
  expect((await cli(config,['person','show','tanaka'])).out).toContain('記録 1件');
  const listed=JSON.parse((await cli(config,['person','list'])).out);expect(listed.people[0]).toMatchObject({id:'tanaka',aliases:['田中','Tanaka']});
  expect((await cli(config,['person','edit','tanaka','--remove-alias','Tanaka','--confirm'])).code).not.toBe(0);
  expect((await cli(config,['person','edit','tanaka','--remove-alias','Tanaka','--hash',listed.people[0].hash,'--confirm'])).code).toBe(0);
+ // 呼び名が多くても変更できる（受付IDの長さの上限を超えない）。
+ const many=Array.from({length:20},(_,i)=>`呼び名${'あ'.repeat(20)}${i}`);
+ const hash1=JSON.parse((await cli(config,['person','list'])).out).people[0].hash;
+ expect((await cli(config,['person','edit','tanaka',...many.flatMap(a=>['--add-alias',a]),'--remove-alias','田中','--hash',hash1,'--confirm'])).code).toBe(0);
+ expect(JSON.parse((await cli(config,['person','list'])).out).people[0].aliases).toHaveLength(20);
  const hash2=JSON.parse((await cli(config,['person','list'])).out).people[0].hash;
  expect((await cli(config,['person','remove','tanaka','--hash',hash2,'--confirm'])).code).toBe(0);
  expect(JSON.parse((await cli(config,['person','list'])).out).people).toEqual([]);

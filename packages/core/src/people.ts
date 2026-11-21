@@ -12,7 +12,7 @@ import type { HubConfig, Project } from './types.js';
 
 /**
  * 人ごとの見返し。本人が登録した人（名前と呼び名）が本文に出てくる記録と、その人が出てくる未完了の次の一手・未解決を、
- * モデルを使わずに集めて 40_people/<id>/PERSON.md と一覧 40_people/PEOPLE.md に書く。
+ * モデルを使わずに集めて 40_people/<id>/SUMMARY.md と一覧 40_people/PEOPLE.md に書く。
  * 人名をAIに推定させず、登録した名前・呼び名との一致だけをコードで数えるため、登録していない人は一覧に出ない。
  */
 export const PEOPLE_DIR = '40_people';
@@ -27,7 +27,8 @@ export const PERSON_RECORDS_SHOWN = 100;
 export const PERSON_ITEMS_SHOWN = 50;
 
 export const personDefinitionPath = (id: string) => `${PEOPLE_DIR}/${id}/person.md`;
-export const personPagePath = (id: string) => `${PEOPLE_DIR}/${id}/PERSON.md`;
+/** 生成する一覧。定義（person.md）と大文字・小文字だけが違う名前にすると、大文字・小文字を区別しないMacのファイルシステムで同じファイルになるため、別の名前にする。 */
+export const personPagePath = (id: string) => `${PEOPLE_DIR}/${id}/SUMMARY.md`;
 export const peopleIndexPath = `${PEOPLE_DIR}/PEOPLE.md`;
 const changeDir = '90_system/people';
 
@@ -54,7 +55,7 @@ export function normalizePersonDefinition(value: PersonDefinition): PersonDefini
 
 /** 登録・変更・削除で受け付けられない理由。同じ依頼は何度受け付けても同じ結果になるため、受付は再試行しない。 */
 export type PersonReason =
-  | { code: 'person-exists' } | { code: 'person-missing' } | { code: 'person-changed' } | { code: 'person-invalid' }
+  | { code: 'person-exists' } | { code: 'person-missing' } | { code: 'person-changed' } | { code: 'person-invalid' } | { code: 'person-unchanged' }
   | { code: 'person-overlap'; person_id: string };
 export class PersonDefinitionError extends Error {
   constructor(readonly reason: PersonReason, message = personReasonMessage(reason)) { super(message); this.name = 'PersonDefinitionError'; }
@@ -65,6 +66,7 @@ export function personReasonMessage(reason: PersonReason): string {
     case 'person-missing': return '人が見つかりません。既に外されている可能性があります。同期して一覧を確かめてください。';
     case 'person-changed': return '確認した後に人の定義が変更されています。同期して最新の内容を確かめ、新しい依頼を送ってください。';
     case 'person-invalid': return personLimitMessage;
+    case 'person-unchanged': return '名前・呼び名に変更がありません。';
     case 'person-overlap': return `名前か呼び名が、登録済みの人（${reason.person_id}）と重なります。別の呼び名にするか、登録済みの人の呼び名を見直してください。`;
   }
 }
@@ -79,10 +81,17 @@ const asciiWord = /[a-z0-9]/;
  * 本文の中で最初に名前・呼び名が出てくる位置（元の本文の文字の位置と長さ）。見つからなければundefined。
  * 和文は語の区切りがないため、含まれていれば一致とする。英数字で始まる・終わる呼び名は、前後が英数字でないときだけ一致とする（「Ken」が「Kenji」に一致しない）。
  */
+const combining = /^[\p{M}\uFF9E\uFF9F]$/u;
 export function findMention(text: string, terms: readonly string[]): { start: number; end: number } | undefined {
   // 全角・半角をそろえた本文と、元の本文の文字の位置を対応させる。
+  // 濁点・半濁点（半角を含む）や結合文字は直前の文字とまとめてそろえる（「ｶﾞ」を「ガ」にするため）。
   const chars = Array.from(text), folded: string[] = [], origin: number[] = [];
-  chars.forEach((c, i) => { for (const f of Array.from(fold(c))) { folded.push(f); origin.push(i); } });
+  for (let i = 0; i < chars.length;) {
+    let j = i + 1;
+    while (j < chars.length && combining.test(chars[j]!)) j++;
+    for (const f of Array.from(fold(chars.slice(i, j).join('')))) { folded.push(f); origin.push(i); }
+    i = j;
+  }
   const joined = folded.join(''), offsets: number[] = [];
   { let o = 0; for (const f of folded) { offsets.push(o); o += f.length; } offsets.push(o); }
   const indexAt = (utf16: number) => { let lo = 0, hi = folded.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (offsets[mid]! < utf16) lo = mid + 1; else hi = mid; } return lo; };
@@ -95,7 +104,7 @@ export function findMention(text: string, terms: readonly string[]): { start: nu
       const before = folded[s - 1], after = folded[e];
       if (asciiWord.test(first) && before !== undefined && asciiWord.test(before)) continue;
       if (asciiWord.test(last) && after !== undefined && asciiWord.test(after)) continue;
-      const start = origin[s]!, end = (origin[e - 1] ?? start) + 1;
+      const start = origin[s]!, end = Math.max(start + 1, e < origin.length ? origin[e]! : chars.length);
       if (!best || start < best.start) best = { start, end };
       break;
     }
@@ -175,28 +184,39 @@ const requestSchema = z.object({
   source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
 }).strict().superRefine((v, ctx) => {
   if (v.action !== 'remove' && v.name === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: '名前を指定してください' });
+  // 呼び名を省いた変更で、呼び名がすべて消えないようにする（変更は名前と呼び名の全体で指定する）。
+  if (v.action === 'edit' && v.aliases === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: '変更では呼び名の全体を指定してください（ないときは空）' });
   if (v.action === 'remove' && (v.name !== undefined || v.aliases !== undefined)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: '外すときは名前・呼び名を指定しません' });
   if (v.action === 'add' ? v.expectedHash !== undefined : v.expectedHash === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: v.action === 'add' ? '登録では確認用のハッシュを指定しません' : '確認用のハッシュを指定してください' });
 });
-const personText = (name: string) => `# ${name}\n\n本人が登録した人の定義です。名前（name）と呼び名（aliases）が本文に出てくる記録を、同じフォルダーのPERSON.mdに集めます。\n`;
+const personText = (name: string) => `# ${name}\n\n本人が登録した人の定義です。名前（name）と呼び名（aliases）が本文に出てくる記録を、同じフォルダーのSUMMARY.mdに集めます。\n`;
+/** 本文の見出しが前の名前のままなら、新しい名前にする（ほかの本文は変えない）。 */
+const retitle = (doc: { meta: Record<string, unknown>; text: string }, name: string) => {
+  const old = typeof doc.meta.name === 'string' ? doc.meta.name.trim() : undefined, lines = doc.text.split('\n');
+  const at = lines.findIndex(l => l.trim() !== '');
+  if (old !== undefined && at >= 0 && lines[at]!.trim() === `# ${old}`) lines[at] = `# ${name}`;
+  return lines.join('\n');
+};
 const sameDefinition = (a: PersonDefinition | null, b: PersonDefinition | null) => JSON.stringify(a) === JSON.stringify(b);
 
 /**
  * 人を登録・変更・外す。変更と削除は本人が確認したperson.mdのハッシュに結び付ける。
- * 記録を先に作り、定義の書き込み前に停止した場合は同じ受付IDの再送で回復する。外すと、手で変えていないPERSON.mdも消す（記録そのものは消さない）。
+ * 記録を先に作り、定義の書き込み前に停止した場合は同じ受付IDの再送で回復する。外すと、手で変えていないSUMMARY.mdも消す（記録そのものは消さない）。
  */
 export async function setPerson(config: HubConfig, request: PersonRequest): Promise<PersonResult> {
   const r = requestSchema.parse(request), vault = new Vault(config), path = personDefinitionPath(r.personId);
   const after = r.action === 'remove' ? null : normalizePersonDefinition({ name: r.name!, aliases: r.aliases ?? [] });
   return vault.withLock(async () => {
     const raw = await vault.read(path), current = raw === undefined ? null : hash(raw);
-    const nextRaw = after ? markdown({ id: r.personId, name: after.name, aliases: after.aliases }, raw === undefined ? personText(after.name) : (() => { try { return parseMarkdown(raw).text; } catch { return personText(after.name); } })()) : null;
+    const nextRaw = after ? markdown({ id: r.personId, name: after.name, aliases: after.aliases }, raw === undefined ? personText(after.name) : (() => { try { return retitle(parseMarkdown(raw), after.name); } catch { return personText(after.name); } })()) : null;
     if (r.sourceEventId) {
-      const previous = (await readPersonChanges(vault)).find(c => c.source === r.source && c.source_event_id === r.sourceEventId);
+      const changes = await readPersonChanges(vault), previous = changes.find(c => c.source === r.source && c.source_event_id === r.sourceEventId);
       if (previous) {
         if (previous.person_id !== r.personId || previous.action !== r.action || !sameDefinition(previous.after, after) || (r.action !== 'add' && previous.before_hash !== r.expectedHash)) throw new Error('同じ受付IDで別の人の定義の変更が記録されています');
         const result = { personId: r.personId, action: r.action, changeId: previous.id, deduped: true };
         if (current === previous.after_hash) { if (r.action === 'remove') await removePageLocked(vault, r.personId); return result; }
+        // この記録の後に同じ人の変更があれば、依頼は反映済み（後の変更を巻き戻さない）。
+        if (changes.filter(c => c.person_id === r.personId).at(-1)?.id !== previous.id) return result;
         if (current !== previous.before_hash) throw new PersonDefinitionError({ code: 'person-changed' });
         if (r.action === 'remove') { await vault.remove(path); await removePageLocked(vault, r.personId); }
         else await vault.write(path, nextRaw!);
@@ -212,7 +232,7 @@ export async function setPerson(config: HubConfig, request: PersonRequest): Prom
       const others = (await inspectPeople(vault)).people.filter(p => p.id !== r.personId), mine = new Set(personTerms(after));
       const overlap = others.find(p => personTerms(p).some(t => mine.has(t)));
       if (overlap) throw new PersonDefinitionError({ code: 'person-overlap', person_id: overlap.id });
-      if (r.action === 'edit' && before && sameDefinition(before, after)) throw new PersonDefinitionError({ code: 'person-invalid' }, '名前・呼び名に変更がありません');
+      if (r.action === 'edit' && before && sameDefinition(before, after)) throw new PersonDefinitionError({ code: 'person-unchanged' });
     }
     const change: PersonChange = {
       schema_version: 1, id: `PPL-${ulid()}`, person_id: r.personId, action: r.action,
@@ -226,7 +246,7 @@ export async function setPerson(config: HubConfig, request: PersonRequest): Prom
     return { personId: r.personId, action: r.action, changeId: change.id, deduped: false };
   });
 }
-/** 手で変えていないPERSON.mdを消す。手で変えたものは残す（doctorで示す）。 */
+/** 手で変えていないSUMMARY.mdを消す。手で変えたものは残す（doctorで示す）。 */
 async function removePageLocked(vault: Vault, personId: string): Promise<void> {
   const page = await vault.read(personPagePath(personId));
   if (page !== undefined && isGeneratedIntact(page)) await vault.remove(personPagePath(personId));
@@ -320,7 +340,7 @@ export function buildPeopleIndexText(config: HubConfig, summaries: PersonSummary
   const lines = ['# 人', '', `登録した人 ${summaries.length}人。名前・呼び名が本文に出てくる記録と未完了の項目を、人ごとに集めています。人の登録は \`ctx person add\` かアプリの「人」から行います。`, ''];
   if (sorted.length) {
     lines.push('| 人 | 最後に出てきた日 | 記録 | 未完了の項目 |', '|---|---|---|---|');
-    for (const s of sorted) lines.push(`| [${plain(s.person.name)}](${s.person.id}/PERSON.md) | ${day(s.lastSeen)} | ${s.records.length} | ${s.items.length} |`);
+    for (const s of sorted) lines.push(`| [${plain(s.person.name)}](${s.person.id}/SUMMARY.md) | ${day(s.lastSeen)} | ${s.records.length} | ${s.items.length} |`);
     lines.push('');
   }
   if (issues.length) { lines.push('## 読めない定義', ...issues.map(i => `- ${plain(i.path)}: ${plain(i.message)}`), ''); }
@@ -338,7 +358,7 @@ export async function rebuildPeopleLocked(config: HubConfig, vault: Vault, units
   const { people, issues } = await inspectPeople(vault), result: PeopleWrite[] = [];
   const known = new Set(people.map(p => p.id));
   for (const path of await vault.files(PEOPLE_DIR)) {
-    const m = /^40_people\/([^/]+)\/PERSON\.md$/.exec(path);
+    const m = /^40_people\/([^/]+)\/SUMMARY\.md$/.exec(path);
     if (!m || known.has(m[1]!)) continue;
     // 読めない定義の人の画面は残す（定義を直せば作り直す）。
     if (await vault.read(personDefinitionPath(m[1]!)) !== undefined) continue;
@@ -377,7 +397,7 @@ export async function rebuildPeople(config: HubConfig): Promise<PeopleWrite[]> {
 export async function stoppedPeoplePages(vault: Vault): Promise<string[]> {
   const result: string[] = [];
   for (const path of await vault.files(PEOPLE_DIR)) {
-    if (!/^40_people\/(?:[^/]+\/PERSON|PEOPLE)\.md$/.test(path)) continue;
+    if (!/^40_people\/(?:[^/]+\/SUMMARY|PEOPLE)\.md$/.test(path)) continue;
     const raw = await vault.read(path);
     if (raw !== undefined && !isGeneratedIntact(raw)) result.push(path);
   }

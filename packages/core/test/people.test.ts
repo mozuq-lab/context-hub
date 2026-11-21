@@ -38,6 +38,10 @@ test('名前・呼び名は全角・半角と大文字・小文字をそろえ�
   expect(findMention('昼に田中さんと会う', terms)).toEqual({ start: 2, end: 6 });
   // 和文は語の区切りがないため、含まれていれば一致とする。
   expect(findMention('タナカ田中さん', personTerms({ name: '田中', aliases: [] }))).toEqual({ start: 3, end: 5 });
+  // 半角の濁点・半濁点は直前の文字とまとめてそろえる。
+  expect(findMention('ｶﾞｯｷｰと会った', personTerms({ name: 'ガッキー', aliases: [] }))).toEqual({ start: 0, end: 5 });
+  expect(findMention('昨日ｾﾊﾞｽﾁｬﾝから', personTerms({ name: 'ｾﾊﾞｽﾁｬﾝ', aliases: [] }))).toEqual({ start: 2, end: 9 });
+  expect(findMention('ジョージ', personTerms({ name: 'ｼﾞｮｰｼﾞ', aliases: [] }))).toEqual({ start: 0, end: 4 });
   const text = `${'あ'.repeat(40)}田中さん${'い'.repeat(70)}`;
   expect(mentionExcerpt(text, findMention(text, terms)!)).toBe(`…${'あ'.repeat(30)}田中さん${'い'.repeat(60)}…`);
 });
@@ -67,7 +71,7 @@ test('名前が出てくる記録と、名前が出てくる未完了の次の�
   expect(writes.filter(w => w.written).map(w => w.path).sort()).toEqual([peopleIndexPath, personPagePath('tanaka')]);
   const page = parseMarkdown((await vault.read(personPagePath('tanaka')))!);
   expect(page.meta).toMatchObject({ person: 'tanaka', records: 3, open_items: 1, last_seen: '2026-11-15T01:00:00Z', verified: false });
-  expect(await vault.read(peopleIndexPath)).toContain('| [田中さん](tanaka/PERSON.md) | 2026-11-15 | 3 | 1 |');
+  expect(await vault.read(peopleIndexPath)).toContain('| [田中さん](tanaka/SUMMARY.md) | 2026-11-15 | 3 | 1 |');
   // 同じ内容なら書き直さない。
   expect((await rebuildPeople(config)).some(w => w.written)).toBe(false);
 });
@@ -109,6 +113,32 @@ test('人を変更・外すときは確認したハッシュに結び付け、�
   expect((await readPersonChanges(vault)).map(c => c.action)).toEqual(['add', 'edit', 'remove']);
   await rebuildPeople(config);
   expect(await vault.read(peopleIndexPath)).toBeUndefined();
+});
+
+test('名前を変えると見出しも変え、変更のない変更・呼び名を省いた変更は受け付けない', async () => {
+  const { config, vault } = await fixture();
+  const raw = (await vault.read(personDefinitionPath('tanaka')))!;
+  await expect(setPerson(config, { personId: 'tanaka', action: 'edit', name: '田中さん', aliases: ['田中', 'Tanaka'], expectedHash: hash(raw), source: 'cli' })).rejects.toMatchObject({ reason: { code: 'person-unchanged' }, message: '名前・呼び名に変更がありません。' });
+  await expect(setPerson(config, { personId: 'tanaka', action: 'edit', name: '田中部長', expectedHash: hash(raw), source: 'cli' })).rejects.toThrow('呼び名の全体');
+  await setPerson(config, { personId: 'tanaka', action: 'edit', name: '田中部長', aliases: ['田中', 'Tanaka'], expectedHash: hash(raw), source: 'cli' });
+  const edited = parseMarkdown((await vault.read(personDefinitionPath('tanaka')))!);
+  expect(edited.text).toMatch(/^# 田中部長\n/);
+  expect(edited.text).not.toContain('# 田中さん');
+});
+
+test('登録の依頼を記録した後に外していれば、同じ依頼の再送で登録を戻さない', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  const request = { personId: 'suzuki', action: 'add' as const, name: '鈴木さん', aliases: [], source: 'intake', sourceEventId: 'REQ-1' };
+  await setPerson(config, request);
+  const raw = (await vault.read(personDefinitionPath('suzuki')))!;
+  await setPerson(config, { personId: 'suzuki', action: 'remove', expectedHash: hash(raw), source: 'cli' });
+  await expect(setPerson(config, request)).resolves.toMatchObject({ deduped: true });
+  expect(await vault.read(personDefinitionPath('suzuki'))).toBeUndefined();
+  // 記録した直後（定義の書き込み前）に止まった場合は、同じ依頼の再送で回復する。
+  await setPerson(config, { ...request, personId: 'sato', name: '佐藤さん', sourceEventId: 'REQ-2' });
+  await vault.remove(personDefinitionPath('sato'));
+  await expect(setPerson(config, { ...request, personId: 'sato', name: '佐藤さん', sourceEventId: 'REQ-2' })).resolves.toMatchObject({ deduped: true });
+  expect(await vault.read(personDefinitionPath('sato'))).toBeDefined();
 });
 
 test('手で書き換えた画面は上書きせず、HOMEとdoctorで示す。読めない定義も示す', async () => {

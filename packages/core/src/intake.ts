@@ -44,7 +44,7 @@ const intakeReasonSchema=z.discriminatedUnion('code',[
  z.object({code:z.literal('item-closed'),state:z.enum(['resolved','excluded'])}).strict(),
  z.object({code:z.literal('item-open')}).strict(),
  z.object({code:z.literal('insight-missing')}).strict(),
- z.object({code:z.enum(['person-exists','person-missing','person-changed','person-invalid'])}).strict(),
+ z.object({code:z.enum(['person-exists','person-missing','person-changed','person-invalid','person-unchanged'])}).strict(),
  z.object({code:z.literal('person-overlap'),person_id:personIdSchema}).strict(),
  z.object({code:z.literal('project-merge-refused'),cause:z.enum(['missing','same','already-merged','target-merged','has-sources','not-merged','target-mismatch']),project_id:projectIdSchema.optional()}).strict(),
 ]);

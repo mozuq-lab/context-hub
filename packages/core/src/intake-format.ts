@@ -47,7 +47,7 @@ const projectMerge=z.object({...base,operation:z.enum(['project-merge','project-
 const insightReaction=z.object({...base,operation:z.literal('insight-reaction'),run_id:insightRunIdSchema,item_key:insightItemKeySchema,reaction:insightReactionValueSchema,confirmed:z.literal(true),text:z.string()}).strict();
 // 人の登録（add）・名前と呼び名の変更（edit）・外す（remove）。変更と外すは、本人が確認したperson.mdのハッシュに結び付ける。
 const personDefinition=z.object({...base,operation:z.literal('person-definition'),person_id:personIdSchema,action:z.enum(personActions),person_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),name:z.string().max(PERSON_NAME_CHARS).optional(),aliases:z.array(z.string().max(PERSON_NAME_CHARS)).max(PERSON_ALIASES_MAX).optional(),confirmed:z.literal(true),text:z.string()}).strict()
- .refine(v=>v.action==='add'?v.person_hash===undefined&&v.name!==undefined:v.person_hash!==undefined&&(v.action==='edit'?v.name!==undefined:v.name===undefined&&v.aliases===undefined),'人の定義の依頼の項目が操作と合いません');
+ .refine(v=>v.action==='add'?v.person_hash===undefined&&v.name!==undefined:v.person_hash!==undefined&&(v.action==='edit'?v.name!==undefined&&v.aliases!==undefined:v.name===undefined&&v.aliases===undefined),'人の定義の依頼の項目が操作と合いません');
 const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, personDefinition]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
