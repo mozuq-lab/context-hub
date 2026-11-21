@@ -50,6 +50,7 @@ export * from './synthesis-prompt.js';
 export * from './synthesis.js';
 export * from './insights.js';
 export * from './insight-feedback.js';
+export * from './people.js';
 export * from './happened.js';
 export * from './calendar.js';
 export * from './policy-reviews.js';

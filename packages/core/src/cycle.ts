@@ -5,6 +5,7 @@ import { rebuildDigest } from './digest.js';
 import { rebuildHistories,type HistoryWrite } from './history.js';
 import { rebuildReferences,type ReferencesWrite } from './references.js';
 import { collectGitDrafts,type CollectOutcome } from './git-drafts.js';
+import { rebuildPeople,type PeopleWrite } from './people.js';
 import { nowItemsPath } from './item-resolutions.js';
 import { readProjects,inspectProjects } from './projects.js';
 import { rebuildNow } from './views.js';
@@ -13,7 +14,7 @@ import { answerPending,type AnswerPendingResult } from './ask.js';
 import { userFacingError } from './error-message.js';
 import { Vault } from './storage.js';
 import type { HubConfig,LlmClient } from './types.js';
-export interface CycleResult { intake:IntakeRunResult; organize:OrganizeRunResult; dashboard?:{path:string;conflict?:string}; digest?:{path:string;conflict?:string}; history?:HistoryWrite[]|{error:string}; references?:ReferencesWrite[]|{error:string}; git?:CollectOutcome; /** 週次の統合。設定で有効にしたときだけ入る。 */ synthesis?:SynthesisOutcome|{error:string}; /** 記録に聞くの答え待ちに答えた結果。答え待ちがあったときだけ入る。 */ ask?:AnswerPendingResult|{error:string}; dryRun:boolean }
+export interface CycleResult { intake:IntakeRunResult; organize:OrganizeRunResult; dashboard?:{path:string;conflict?:string}; digest?:{path:string;conflict?:string}; history?:HistoryWrite[]|{error:string}; references?:ReferencesWrite[]|{error:string}; git?:CollectOutcome; /** 週次の統合。設定で有効にしたときだけ入る。 */ synthesis?:SynthesisOutcome|{error:string}; /** 記録に聞くの答え待ちに答えた結果。答え待ちがあったときだけ入る。 */ ask?:AnswerPendingResult|{error:string}; /** 人ごとの見返し。人を登録しているときだけ入る。 */ people?:PeopleWrite[]|{error:string}; dryRun:boolean }
 export interface CycleExtras {
  /** 週次の統合に使うモデル。思考の深さを整理と分けるには、synthesisLlmConfigの設定で作ったクライアントを渡す。省略時は整理と同じllmを使う。 */ synthesisLlm?:LlmClient;
  /** 週次の統合の実行時刻（検証用）。 */ now?:Date;
@@ -45,6 +46,9 @@ export async function runCycle(config:HubConfig,llm:LlmClient,options:OrganizeOp
  // 資料棚も派生の読み物。資料のあるプロジェクトだけに作り、作れなくてもcycleは止めない。
  let references:ReferencesWrite[]|{error:string};
  try{references=(await rebuildReferences(config)).filter(r=>r.written||r.stopped);}catch(error){references={error:error instanceof Error?error.message:String(error)};}
+ // 人ごとの見返しも派生の読み物。人を登録していなければ何も作らず、作れなくてもcycleは止めない。
+ let people:PeopleWrite[]|{error:string}|undefined;
+ try{const written=(await rebuildPeople(config)).filter(p=>p.written||p.stopped||p.removed);if(written.length)people=written;}catch(error){people={error:error instanceof Error?error.message:String(error)};}
  const dashboard=await rebuildDashboard(config);
- return{intake,organize:organized,dashboard,digest,history,references,...(git?{git}:{}),...(synthesis?{synthesis}:{}),...(ask?{ask}:{}),dryRun:false};
+ return{intake,organize:organized,dashboard,digest,history,references,...(people?{people}:{}),...(git?{git}:{}),...(synthesis?{synthesis}:{}),...(ask?{ask}:{}),dryRun:false};
 }
