@@ -98,7 +98,7 @@ async function openItemsFor(vault: Vault, chain: CorrectionChain, projects: Proj
     .map((i, index) => ({ ref: `i${index + 1}`, key: i.key, section: i.section, text: `${i.label}${i.text}`.slice(0, OPEN_ITEM_CHARS) }));
 }
 function evidenceText(input: Input, config: HubConfig, prefix: string): string {
-  return `入力: [${input.id}](${prefix}${input.path})\n出典: ${input.source}${input.tool ? ` / ${input.tool}` : ''}\n発生日時: ${dateLabel(input.occurred_at, config.timezone)} ${config.timezone}\n受信日時: ${dateLabel(input.received_at, config.timezone)} ${config.timezone}\n性質: ${input.origin}（未検証）\n`;
+  return `入力: [${input.id}](${prefix}${input.path})\n出典: ${input.source}${input.tool ? ` / ${input.tool}` : ''}\n${input.happened_on !== undefined && input.recorded_at !== undefined ? `出来事の日付: ${input.happened_on}（本人が指定）\n記録日時: ${dateLabel(input.recorded_at, config.timezone)} ${config.timezone}\n` : `発生日時: ${dateLabel(input.occurred_at, config.timezone)} ${config.timezone}\n`}受信日時: ${dateLabel(input.received_at, config.timezone)} ${config.timezone}\n性質: ${input.origin}（未検証）\n`;
 }
 
 async function readJournal(vault: Vault, inputId: string): Promise<Receipt | undefined> {

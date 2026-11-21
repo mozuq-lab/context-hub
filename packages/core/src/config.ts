@@ -30,8 +30,8 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
 const positive = z.number().int().min(1).max(1_000_000);
 const configSchema = z.object({
   schema_version: z.literal(1), vaultPath: z.string().min(1), statePath: z.string().min(1), timezone: z.literal('Asia/Tokyo'),
-  policy: z.object({projectRoots:z.array(z.object({path:z.string().refine(isAbsolute,'絶対パスが必要です'),projectId:projectIdSchema}).strict()).max(1000)}).strict(),
-  capture: z.object({ maxInputChars: positive.max(100_000), allowedSenderIds: z.array(z.string()) }).strict(),
+  policy: z.object({projectRoots:z.array(z.object({path:z.string().refine(isAbsolute,'絶対パスが必要です'),projectId:projectIdSchema}).strict()).max(1000),reviewDays:z.number().int().min(0).max(3650).optional()}).strict(),
+  capture: z.object({ maxInputChars: positive.max(100_000), allowedSenderIds: z.array(z.string()), maxBackdateDays: positive.max(3650).optional() }).strict(),
   organize: z.object({ maxItemsPerRun: positive.max(1000), maxAttempts: positive.max(10), timeoutSec: positive.max(600), projectThreshold: z.number().min(0).max(1),
     // 旧版の設定を読めるよう受け付けるが使わない。ロックは自動回収せず、ctx doctor --unlock で明示的に回収する。
     lockStaleSec: positive.optional(),
@@ -47,6 +47,8 @@ const configSchema = z.object({
   // 既定で有効。追加の規則は読み込み時に正規表現として組み立てられることを確かめる。
   privacy: z.object({ redactSecrets: z.boolean(), patterns: z.array(z.object({ label: z.string().min(1).max(40).regex(/^[^\]\r\n]+$/), pattern: z.string().min(1).max(500).refine(v => { try { new RegExp(v, 'gu'); return true; } catch { return false; } }, '正規表現が不正です').superRefine((v, ctx) => { const problem = dartPatternProblem(v); if (problem) ctx.addIssue({ code: 'custom', message: problem }); }) }).strict()).max(50) }).strict().default({ redactSecrets: true, patterns: [] }),
   // 既定では未設定。バックアップ先を書くと、ctx backup verify が最新のアーカイブを確かめ、HOMEが復元点の古さを知らせる。
+  // 既定では無効。有効にすると、HOMEの生成のたびに期日をカレンダー用のファイルへ書き出す（内容が変わったときだけ）。
+  calendar: z.object({ enabled: z.boolean(), reviewDates: z.boolean(), titles: z.enum(['item', 'project']) }).strict().default({ enabled: false, reviewDates: false, titles: 'item' }),
   backup: z.object({ dir: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です').nullable(), verifyMaxAgeDays: positive.max(3650) }).strict().default({ dir: null, verifyMaxAgeDays: 7 }),
 }).strict();
 export function validateConfig(value: unknown): HubConfig {
@@ -66,7 +68,8 @@ function patternReasons(error: ZodError): string {
   return reasons.length ? `（${[...new Set(reasons)].slice(0, 5).join('／')}）` : '';
 }
 /** 設定ファイルへ上書きする値。入れ子は部分指定でよい。 */
-export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'synthesis' | 'privacy' | 'backup'>> & {
+export type ConfigOverrides = Partial<Omit<HubConfig, 'capture' | 'organize' | 'retrieve' | 'logging' | 'git' | 'synthesis' | 'privacy' | 'backup' | 'calendar'>> & {
+  calendar?: Partial<NonNullable<HubConfig['calendar']>>;
   synthesis?: Partial<HubConfig['synthesis']>;
   backup?: Partial<NonNullable<HubConfig['backup']>>; capture?: Partial<HubConfig['capture']>; git?: Partial<HubConfig['git']>; privacy?: Partial<HubConfig['privacy']>; retrieve?: Partial<HubConfig['retrieve']>; logging?: Partial<HubConfig['logging']>;
   organize?: Partial<Omit<HubConfig['organize'], 'llm'>> & { llm?: Partial<HubConfig['organize']['llm']> };
@@ -91,6 +94,7 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
     synthesis: { ...defaults.synthesis, ...raw.synthesis, ...overrides.synthesis },
     privacy: { ...defaults.privacy, ...raw.privacy, ...overrides.privacy },
     backup: { ...defaults.backup, ...raw.backup, ...overrides.backup },
+    calendar: { enabled: false, reviewDates: false, titles: 'item', ...raw.calendar, ...overrides.calendar },
   };
   // 値は秘密を含みうるので出さず、誤りのあるキーの場所だけを示す。
   try { return validateConfig(c); } catch (error) { throw new Error(error instanceof ZodError ? `設定のキー・型・値を確認してください: ${issuePaths(error).join('、')}${patternReasons(error)}` : error instanceof Error && error.message.startsWith('ローカル状態') ? error.message : '設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }

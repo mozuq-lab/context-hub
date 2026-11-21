@@ -9,6 +9,7 @@ import { Vault, parseMarkdown, hash } from './storage.js';
 import type { HubConfig, Input } from './types.js';
 import { redactText, secretSettings } from './secrets.js';
 import { readIdeaGroupMap } from './idea-links.js';
+import { inputWhen } from './happened.js';
 
 export function displayTime(value: string): string {
   if (!Number.isFinite(Date.parse(value))) return '不明';
@@ -23,7 +24,7 @@ export function truncate(value: string, limit: number): string {
 /** hideは抜粋の前に本文へかける処理（秘密情報の伏せ字）。切ってから伏せると、途中で切れた値が検出されずに残る。 */
 function inputLine(input: Input, maxText = 200, hide: (text: string) => string = t => t): string {
   const text = hide(input.text);
-  return `- [${input.id}](${input.path}) | ${displayTime(input.occurred_at)} | ${input.source}${input.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}\n  ${text.slice(0,maxText).replace(/\r?\n/g,' ')}${text.length > maxText ? '…' : ''}`;
+  return `- [${input.id}](${input.path}) | ${inputWhen(input, 'Asia/Tokyo', displayTime)} | ${input.source}${input.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}\n  ${text.slice(0,maxText).replace(/\r?\n/g,' ')}${text.length > maxText ? '…' : ''}`;
 }
 async function receiptStatus(vault: Vault, input: Input): Promise<string> {
   const raw = await vault.read(`90_system/receipts/${input.id}.json`);
@@ -262,7 +263,7 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
       if (owned) policyProjects.add(owned);
       const status = await receiptStatus(vault, latest);
       const lines = [
-        `## [${root.id}](${root.path}) | ${displayTime(root.occurred_at)} | ${oneLine(root.source)}${root.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}`,
+        `## [${root.id}](${root.path}) | ${inputWhen(root, 'Asia/Tokyo', displayTime)} | ${oneLine(root.source)}${root.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}`,
         `種類: ${kindLabels[root.kind]} / 状態: ${status}`,
         ...(owned ? [`プロジェクト: ${projects.get(owned) ?? owned}（${owned}、本人指定）`] : []),
         ...(estimated.length ? [`関連候補（AI推定、帰属未確定）: ${estimated.map(p => `${projects.get(p) ?? p}（${p}）`).join(', ')}`] : []),

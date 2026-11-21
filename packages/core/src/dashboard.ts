@@ -11,7 +11,7 @@ import { readProjects,inspectProjects,projectIssueFields,mergeTargets,mergeIssue
 import {buildReviewIndex,writeReviewIndexLocked,type ReviewCandidate} from './candidate-review.js';
 import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
 import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel,lastEvidenceAt } from './views.js';
-import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage } from './intake.js';
+import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage,writeIntakeFeaturesLocked } from './intake.js';
 import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
 import { referencesStopped,referencesPath,unassignedReferenceSection } from './references.js';
@@ -23,6 +23,8 @@ import { insightsNotices, insightsSection, rebuildInsightsLocked } from './insig
 import { isDeepStrictEqual } from 'node:util';
 import { readExclusionOverlays, rereadResolutionIds } from './item-rereads.js';
 import { backupHomeLine, backupStatus, readBackupChecks } from './backup-check.js';
+import { writeCalendarLocked, type CalendarItem } from './calendar.js';
+import { POLICY_REVIEW_ROWS, policyReviewDays, policyReviewItems } from './policy-reviews.js';
 // HTMLコメントの開始はNOWと同じく無害化し、以降の行が隠れないようにする。
 const plain=listText;
 const clip=(s:string,n=120)=>clipText(s,n);
@@ -56,6 +58,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
  const clock=options.now??new Date();
  // アプリが「選んで深掘り」で同じ追加規則を当てられるよう、設定の伏せ字の規則を同期するファイルへ書く（内容が変わったときだけ）。
  await writePrivacyPatternsLocked(config,vault);
+ // 端末が、この本体の受け付ける依頼と欄を知るための一覧（内容が変わったときだけ書く）。
+ await writeIntakeFeaturesLocked(vault);
  {
   // 不正なプロジェクト定義があると一覧・方針・候補を組み立てられない。どのファイルのどの項目かをHOMEに示して止める。
   const definitionIssues=(await inspectProjects(config)).issues;
@@ -81,6 +85,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 本人が付けた期日・見直す日。期日が7日以内の項目はプロジェクトをまたいで前に出し、見直す日が先の項目はたたむ。
   const today=todayIn(config.timezone,clock),schedules=await readItemSchedules(vault),resolutionRecords=schedules.records.length?await readItemResolutions(vault):[];
   const dated:{bucket:'overdue'|'today'|'week';due:string;id:string;row:string}[]=[],orphaned:string[]=[];let resting=0;
+  // カレンダーに書き出す、進行中のプロジェクトの日付付きの項目（HOMEの「次の一手」と同じ範囲）。
+  const calendarItems:CalendarItem[]=[];
   for(const project of projects){
    const now=`10_projects/${project.id}/NOW.md`,target=await vault.read(now)!==undefined?now:`10_projects/${project.id}/project.md`;
    const mergeTarget=projects.find(p=>p.id===mergedInto.get(project.id));
@@ -104,6 +110,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     const front=new Set<string>(),{byKey:scheduled,orphaned:loose}=effectiveSchedules(schedules.records,project.id,list.items,activeResolutions(resolutionRecords,project.id));
     for(const i of list.items){
      const schedule=i.resolution===null?scheduled.get(i.key):undefined;if(!schedule)continue;
+     calendarItems.push({projectId:project.id,projectTitle:project.title,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedule.created_at});
      const {bucket,hidden}=scheduleBucket(schedule,today);
      if(hidden){resting++;front.add(i.key);}
      else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
@@ -177,6 +184,19 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const project of projects)if(await historyStopped(vault,project.id))errors.push(`- [経緯の更新が止まっています](${historyPath(project.id)}): ${plain(project.title)} — HISTORY.mdが手で変更されています。経緯は根拠から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const project of projects)if(await referencesStopped(vault,project.id))errors.push(`- [資料の更新が止まっています](${referencesPath(project.id)}): ${plain(project.title)} — REFERENCES.mdが手で変更されています。資料は整理結果から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
+  // 期日のカレンダー用ファイル。書けなくてもHOMEは作り、「失敗と競合」に示す。
+  try{await writeCalendarLocked(config,vault,calendarItems);}catch{errors.push('- 期日のカレンダー用ファイル（90_system/calendar/contexthub.ics）を書き出せませんでした（`ctx doctor`で確認してください）');}
+  // 採用から（または前回「まだ有効」と確かめてから）日数が過ぎた方針。古い順に数件だけ出し、止めるかどうかは本人が決める。
+  let policyReviewSection='';
+  try{
+   const {items,problems}=await policyReviewItems(config,vault,{now:clock,inputs:effective.map(u=>u.chain.root)}),due=items.filter(i=>i.due);
+   for(const path of problems)errors.push(`- [方針の見直しの記録が不正です](${path})`);
+   if(due.length){
+    const kindLabel={decision:'判断・方針',preference:'好み'} as const,titleOf=(id:string)=>plain(projects.find(p=>p.id===id)?.title??id);
+    const rows=due.slice(0,POLICY_REVIEW_ROWS).map(i=>`- [${clip(i.claim,80)}](${i.path}) — ${kindLabel[i.kind]} / ${i.projectId===null?'共通':titleOf(i.projectId)} / 採用 ${dateLabel(i.approvedAt,config.timezone).slice(0,10)}${i.confirmedAt?`・前回確かめた日 ${dateLabel(i.confirmedAt,config.timezone).slice(0,10)}`:''}（${i.days}日前）${i.newInputs?` / その後このプロジェクトを指定したメモ ${i.newInputs}件`:''} / ${i.knowledgeId} / hash ${i.hash}`);
+    policyReviewSection=`\n\n## 見直す方針（${due.length}件）\n採用してから（または前回「まだ有効」と確かめてから）${policyReviewDays(config)}日を過ぎた方針です。AIへ渡し続けてよいかを確かめてください。日数が過ぎても方針は止めません。\n${rows.join('\n')}${due.length>POLICY_REVIEW_ROWS?`\n- ほか${due.length-POLICY_REVIEW_ROWS}件（\`ctx policy review\`で確認できます）`:''}\n\n続けるならアプリの採用履歴の「まだ有効」か\`ctx policy keep <ID> --hash <hash> --confirm\`、止めるなら適用停止、書き直すなら置き換える候補を\`ctx propose --supersedes <ID>\`で作ってください。`;
+   }
+  }catch{errors.push('- 方針の見直しの状態を読めません（`ctx policy review`で確認してください）');}
   // バックアップから復元できるかの確認結果。バックアップ先を設定していないか、確認したことがない間は何も出さない。
   let backupLine='';
   try{
@@ -192,7 +212,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    for(const path of overlays.problems)errors.push(`- [読み直しの記録が不正です](${path})`);
   }catch{errors.push('- 完了・解決・誤りとして外した記録を読めません（`ctx doctor`で確認してください）');}
   for(const p of gitProblems)errors.push(`- 作業記録の下書き（${plain(p.projectId)} / ${plain(p.repo)}）: ${plain(p.error)}`);
-  const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n同期された時点の表示です。端末保存・Mac mini受領・整理完了はそれぞれ別の状態です。${reviewLink}${backupLine}\n\n${lead}${projectSections}${draftSection}\n\n## 確認待ち（${pending.length}件）\n${reviewRows(pending)}\n\n候補を開いて内容・理由・出典を確認し、QuickAddの承認／却下を実行してください。保留は閉じるだけです。AI候補は未承認です。\n\n## 要確認（${attention.length}件）\n${reviewRows(attention)}\n\n## 有効方針\n[共通方針](POLICY.md)。各プロジェクトのPOLICY.mdに対象方針を掲載します。参考知識は必要時に検索します。\n\n## 判断履歴\n${reviewRows(history)}${ideaText}${unassignedReferenceSection(config,effective)}${secretRows}\n\n## 受領と整理状況\n${statusSummary}${statuses.join('\n')||'入力はありません。'}\n\n## 失敗と競合\n${errors.join('\n')||'記録された失敗・競合はありません。'}\n\n正式知識は根拠が訂正されても自動変更しません。根拠の訂正履歴と承認内容を確認してください。\n`;
+  const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n同期された時点の表示です。端末保存・Mac mini受領・整理完了はそれぞれ別の状態です。${reviewLink}${backupLine}\n\n${lead}${projectSections}${draftSection}\n\n## 確認待ち（${pending.length}件）\n${reviewRows(pending)}\n\n候補を開いて内容・理由・出典を確認し、QuickAddの承認／却下を実行してください。保留は閉じるだけです。AI候補は未承認です。${policyReviewSection}\n\n## 要確認（${attention.length}件）\n${reviewRows(attention)}\n\n## 有効方針\n[共通方針](POLICY.md)。各プロジェクトのPOLICY.mdに対象方針を掲載します。参考知識は必要時に検索します。\n\n## 判断履歴\n${reviewRows(history)}${ideaText}${unassignedReferenceSection(config,effective)}${secretRows}\n\n## 受領と整理状況\n${statusSummary}${statuses.join('\n')||'入力はありません。'}\n\n## 失敗と競合\n${errors.join('\n')||'記録された失敗・競合はありません。'}\n\n正式知識は根拠が訂正されても自動変更しません。根拠の訂正履歴と承認内容を確認してください。\n`;
   return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
  }
 }

@@ -7,6 +7,7 @@ import {readProjectCandidate,readProjectCoverage,readProjectDecision,UNREADABLE_
 import {groupProposals} from './project-proposal-groups.js';
 import {readKnowledgeCandidate,reviewRead,unavailableCandidate} from './knowledge-candidates.js';
 import {projectProposalSchema} from './llm.js';
+import {policyReviewDays,policyReviewItems} from './policy-reviews.js';
 export interface ReviewCandidate {
   id:string; kind:'project'|'knowledge'|'decision'|'preference'|'unknown';
   path:string; title:string; claim:string; rationale:string; inputIds:string[];
@@ -21,6 +22,8 @@ export interface ReviewCandidate {
   /** プロジェクト案だけ。代表の案とまとめて判断された案に付く、代表の案のID。decisionIdは代表の案の判断記録を指す。 */
   coveredBy?:string;
   dependencies:Record<string,string|null>;
+  /** 有効な方針（判断・好み）だけ。採用か前回「まだ有効」と確かめた日時（since）から、見直しの日数（reviewDays）が過ぎたか。0日の設定では付かない。 */
+  policyReview?:{due:boolean;since:string;days:number;reviewDays:number;confirmedAt?:string};
 }
 export interface ReviewIndex {schema_version:1;generated_at:string;projects:ReviewProject[];items:ReviewCandidate[]}
 async function projectReview(config:HubConfig,id:string,coverage:ProjectCoverageIndex):Promise<ReviewCandidate>{
@@ -86,6 +89,8 @@ export async function readReviewCandidates(config:HubConfig):Promise<ReviewCandi
   byId.get(group.representative.id)!.duplicates=group.duplicates.map(d=>d.id);
   for(const d of group.duplicates)byId.get(d.id)!.duplicateOf=group.representative.id;
  }
+ // 有効な方針に見直しの状態を添える。読めなくても一覧は作る（HOMEの「失敗と競合」に示す）。
+ try{const reviewDays=policyReviewDays(config),{items:reviews}=await policyReviewItems(config,vault);for(const r of reviews){const item=byId.get(`CAN-${r.knowledgeId.slice(4)}`);if(item&&item.status==='approved'&&!item.retired)item.policyReview={due:r.due,since:r.since,days:r.days,reviewDays,...(r.confirmedAt?{confirmedAt:r.confirmedAt}:{})};}}catch{/* 方針の集約を読めないときは見直しの状態を付けない。 */}
  return items.sort((a,b)=>(b.generatedAt??'').localeCompare(a.generatedAt??'')||a.id.localeCompare(b.id));
 }
 export async function buildReviewIndex(config:HubConfig):Promise<ReviewIndex>{return{schema_version:1,generated_at:new Date().toISOString(),projects:await readProjectCatalog(new Vault(config)),items:await readReviewCandidates(config)};}
