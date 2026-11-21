@@ -9,6 +9,7 @@ import { Vault, parseMarkdown, hash } from './storage.js';
 import type { HubConfig, Input } from './types.js';
 import { redactText, secretSettings } from './secrets.js';
 import { readIdeaGroupMap } from './idea-links.js';
+import { inputWhen } from './happened.js';
 
 export function displayTime(value: string): string {
   if (!Number.isFinite(Date.parse(value))) return '不明';
@@ -23,7 +24,7 @@ export function truncate(value: string, limit: number): string {
 /** hideは抜粋の前に本文へかける処理（秘密情報の伏せ字）。切ってから伏せると、途中で切れた値が検出されずに残る。 */
 function inputLine(input: Input, maxText = 200, hide: (text: string) => string = t => t): string {
   const text = hide(input.text);
-  return `- [${input.id}](${input.path}) | ${displayTime(input.occurred_at)} | ${input.source}${input.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}\n  ${text.slice(0,maxText).replace(/\r?\n/g,' ')}${text.length > maxText ? '…' : ''}`;
+  return `- [${input.id}](${input.path}) | ${inputWhen(input, displayTime)} | ${input.source}${input.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}\n  ${text.slice(0,maxText).replace(/\r?\n/g,' ')}${text.length > maxText ? '…' : ''}`;
 }
 async function receiptStatus(vault: Vault, input: Input): Promise<string> {
   const raw = await vault.read(`90_system/receipts/${input.id}.json`);
@@ -73,7 +74,7 @@ export function parseFindTime(value: string, endOfDay = false): number {
   if (!/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Error('期間はYYYY-MM-DDまたはタイムゾーン付き日時で指定してください');
   return Date.parse(value);
 }
-type Doc = { path:string; text:string; id:string; at:string; when:string; source:string; ids:string[]; kind:Exclude<FindKind,'reference'>; owner?:string; retracted?:boolean; reference?:boolean };
+type Doc = { path:string; text:string; id:string; at:string; when:string; source:string; ids:string[]; kind:Exclude<FindKind,'reference'>; owner?:string; retracted?:boolean; reference?:boolean; /** 一覧に出す日時。原文は出来事の日付と記録日時を示す。 */ display?:string };
 /** 検索と束ねた文脈で共有する記録の一覧。原文・アイデア・知識・NOWと、入力ごとのプロジェクトの帰属を読む。 */
 async function collectDocs(config: HubConfig) {
   const vault = new Vault(config), inputs = await readInputs(config);
@@ -88,7 +89,7 @@ async function collectDocs(config: HubConfig) {
     for (const input of [unit.chain.root,...unit.chain.revisions]) assigned.set(input.id,{owned,estimated});
   }
   // atは表示用、whenは期間と新しい順の判定用。NOWは最終根拠、アイデアは元のメモの発生日時で判断し、再生成や整理の遅れに左右されないようにする。
-  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind,...(references.has(i.id)?{reference:true}:{})}));
+  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,display:inputWhen(i, displayTime),source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind,...(references.has(i.id)?{reference:true}:{})}));
   // frontmatterを読めないファイル（手で壊したNOWやアイデアなど）は飛ばし、結果に件数とパスを示す。
   const unreadable: string[] = [];
   for (const dir of ['20_ideas','30_knowledge','10_projects']) for(const path of await vault.files(dir)) {
@@ -162,7 +163,7 @@ export async function find(config: HubConfig, query: string, options: FindOption
     const relatedNotice=doc.related==='estimated'?'関連候補（AI推定、帰属未確定）\n  ':'';
     const group=doc.kind==='idea'?groups.get(doc.id):undefined;
     const groupNotice=group?`束ねたアイデア: ${group.ideas.filter(id=>id!==doc.id).map(id=>`[${id}](20_ideas/${id}.md)`).join(', ')}\n  `:'';
-    return `- [${doc.id}](${doc.path}) | ${displayTime(doc.at)} | ${doc.source}\n  出典: ${refs || '原文参照なし'}\n  ${relatedNotice}${groupNotice}${knowledgeNotice}${notices.join('\n  ')}\n  ${doc.text.slice(start,start+220).replace(/\r?\n/g,' ')}`;
+    return `- [${doc.id}](${doc.path}) | ${doc.display ?? displayTime(doc.at)} | ${doc.source}\n  出典: ${refs || '原文参照なし'}\n  ${relatedNotice}${groupNotice}${knowledgeNotice}${notices.join('\n  ')}\n  ${doc.text.slice(start,start+220).replace(/\r?\n/g,' ')}`;
   });
   if (!lines.length) return withBroken(offset > 0 && hits.length ? `見つかりません（該当${hits.length}件。開始位置が件数を超えています）` : '見つかりません');
   const more = offset + page.length < hits.length;
@@ -262,7 +263,7 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
       if (owned) policyProjects.add(owned);
       const status = await receiptStatus(vault, latest);
       const lines = [
-        `## [${root.id}](${root.path}) | ${displayTime(root.occurred_at)} | ${oneLine(root.source)}${root.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}`,
+        `## [${root.id}](${root.path}) | ${inputWhen(root, displayTime)} | ${oneLine(root.source)}${root.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}`,
         `種類: ${kindLabels[root.kind]} / 状態: ${status}`,
         ...(owned ? [`プロジェクト: ${projects.get(owned) ?? owned}（${owned}、本人指定）`] : []),
         ...(estimated.length ? [`関連候補（AI推定、帰属未確定）: ${estimated.map(p => `${projects.get(p) ?? p}（${p}）`).join(', ')}`] : []),
@@ -283,7 +284,7 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
     if (doc.kind === 'idea') for (const ref of doc.ids) { const link = assigned.get(ref); link?.owned.forEach(p => owners.add(p)); link?.estimated.forEach(p => guesses.add(p)); }
     owners.forEach(p => guesses.delete(p));
     const lines = [
-      `## [${doc.id}](${doc.path}) | ${displayTime(doc.at)} | ${doc.source}`,
+      `## [${doc.id}](${doc.path}) | ${doc.display ?? displayTime(doc.at)} | ${doc.source}`,
       `種類: ${kindLabels[doc.kind]}${doc.retracted ? '（分類取り消し済み）' : ''}${doc.owner ? ` / プロジェクト: ${projects.get(doc.owner) ?? doc.owner}（${doc.owner}）` : ''}`,
       ...(owners.size ? [`プロジェクト: ${[...owners].sort().map(p => `${projects.get(p) ?? p}（${p}）`).join(', ')}、本人指定`] : []),
       ...(guesses.size ? [`関連候補（AI推定、帰属未確定）: ${[...guesses].sort().map(p => `${projects.get(p) ?? p}（${p}）`).join(', ')}`] : []),

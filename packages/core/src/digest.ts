@@ -11,6 +11,7 @@ import { lastEvidenceAt } from './views.js';
 import { insightFeedbackSection, insightsSection, readInsights } from './insights.js';
 import { activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions } from './item-resolutions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
+import { inputWhen } from './happened.js';
 
 const DAY = 86_400_000;
 // 以前はHTMLコメントの開始を無効にしていなかった。ほかの生成物と同じ無害化にそろえる。
@@ -113,7 +114,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const lastReceived = (u: Unit) => Math.max(...evidenceOf(u).filter(i => inWindow(i.received_at)).map(i => Date.parse(i.received_at)));
     for (const u of [...fresh].sort((a, b) => lastReceived(b) - lastReceived(a)).slice(0, 5)) {
       const summary = u.unit.receipt?.result?.summary;
-      out.push(`  - ${ref(u.input)} ${label(u.input.occurred_at)} ${summary ? clip(summary) : `（${state(u) === 'failed' ? '整理失敗' : '整理待ち'}）`}${corrected(u) ? ' / 期間内に訂正' : ''}${u.unit.pendingCorrection ? ' / 訂正未反映' : ''}${u.input.project !== project.id ? ' / 関連候補（AI推定）' : ''}`);
+      out.push(`  - ${ref(u.input)} ${inputWhen(u.input, label)} ${summary ? clip(summary) : `（${state(u) === 'failed' ? '整理失敗' : '整理待ち'}）`}${corrected(u) ? ' / 期間内に訂正' : ''}${u.unit.pendingCorrection ? ' / 訂正未反映' : ''}${u.input.project !== project.id ? ' / 関連候補（AI推定）' : ''}`);
     }
     const carried = mine.filter(u => before(u.input.received_at)).sort(byOccurred).flatMap(u => {
       const result = u.unit.receipt!.result!;
