@@ -59,7 +59,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
  // アプリが「選んで深掘り」で同じ追加規則を当てられるよう、設定の伏せ字の規則を同期するファイルへ書く（内容が変わったときだけ）。
  await writePrivacyPatternsLocked(config,vault);
  // 端末が、この本体の受け付ける依頼と欄を知るための一覧（内容が変わったときだけ書く）。
- await writeIntakeFeaturesLocked(vault);
+ await writeIntakeFeaturesLocked(config,vault);
  {
   // 不正なプロジェクト定義があると一覧・方針・候補を組み立てられない。どのファイルのどの項目かをHOMEに示して止める。
   const definitionIssues=(await inspectProjects(config)).issues;

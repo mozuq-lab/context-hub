@@ -100,6 +100,10 @@ test('端末が出来事の日付と方針の見直しに対応した本体か�
   expect(features.schema_version).toBe(1);
   expect(features.capture_fields).toContain('happened_on');
   expect(features.operations).toEqual(expect.arrayContaining(['capture', 'policy-keep', 'item-schedule']));
+  expect(features).toMatchObject({ max_backdate_days: 365, calendar_titles: 'item' });
+  // 端末が本体の設定に合わせられるよう、さかのぼれる日数と予定の件名の設定も書く。
+  await rebuildDashboard({ ...config, capture: { ...config.capture, maxBackdateDays: 30 }, calendar: { enabled: false, reviewDates: false, titles: 'project' } });
+  expect(JSON.parse((await vault.read('90_system/intake-features.json'))!)).toMatchObject({ max_backdate_days: 30, calendar_titles: 'project' });
 });
 
 test('出来事の日付は同じ日の夕方の根拠より後として比べ、検索とふりかえりでは時刻を出さない', async () => {

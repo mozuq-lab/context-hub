@@ -22,7 +22,7 @@ import { setIdeaLink,IdeaLinkError,ideaLinkIdSchema,ideaLinkActionSchema } from 
 import { parseIntake,decodeIntake,requestIdSchema,type IntakeRequest } from './intake-format.js';
 import { setInsightReaction,InsightReactionError } from './insights.js';
 import { insightItemKeySchema,insightReactionIdSchema,insightReactionValueSchema,insightRunIdSchema } from './insight-feedback.js';
-import { HappenedOnError,happenedOnMessage,effectiveHappenedOn } from './happened.js';
+import { DEFAULT_MAX_BACKDATE_DAYS,HappenedOnError,happenedOnMessage,effectiveHappenedOn } from './happened.js';
 import { keepPolicy,PolicyReviewError,policyReviewMessage,policyReviewIdSchema } from './policy-reviews.js';
 import type { HubConfig } from './types.js';
 export interface IntakeRunResult { accepted:number; rejected:number; deferred:number; deduped:number; conflicts:string[]; requestIds:string[]; dryRun:boolean }
@@ -34,8 +34,12 @@ export const intakeReceiptSchema=z.object({schema_version:z.literal(1),request_i
  * 端末が出さずに済むようにする（ファイルがなければ、端末は対応前の本体として扱う）。HOMEの生成のたびに、内容が変わったときだけ書く。
  */
 export const INTAKE_FEATURES_PATH='90_system/intake-features.json';
-export function intakeFeatures(){return{schema_version:1 as const,operations:[...operations.options],capture_fields:['happened_on']};}
-export async function writeIntakeFeaturesLocked(vault:Vault):Promise<void>{const raw=JSON.stringify(intakeFeatures(),null,2)+'\n';if(await vault.read(INTAKE_FEATURES_PATH)!==raw)await vault.write(INTAKE_FEATURES_PATH,raw);}
+/**
+ * 端末が使える依頼の種類と、端末が本体の設定に合わせるための値。max_backdate_daysは出来事の日付をさかのぼれる日数、
+ * calendar_titlesは端末からカレンダーへ入れる予定の件名に項目の本文を入れるか（projectなら入れない）。
+ */
+export function intakeFeatures(config:Pick<HubConfig,'capture'|'calendar'>){return{schema_version:1 as const,operations:[...operations.options],capture_fields:['happened_on'],max_backdate_days:config.capture.maxBackdateDays??DEFAULT_MAX_BACKDATE_DAYS,calendar_titles:config.calendar?.titles??'item'};}
+export async function writeIntakeFeaturesLocked(config:Pick<HubConfig,'capture'|'calendar'>,vault:Vault):Promise<void>{const raw=JSON.stringify(intakeFeatures(config),null,2)+'\n';if(await vault.read(INTAKE_FEATURES_PATH)!==raw)await vault.write(INTAKE_FEATURES_PATH,raw);}
 const pendingSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),raw:z.string()}).strict();
 const intakeReasonSchema=z.discriminatedUnion('code',[
  z.object({code:z.literal('stale-correction-target'),latest_input_id:inputIdSchema}).strict(),
