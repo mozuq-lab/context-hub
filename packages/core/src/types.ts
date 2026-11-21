@@ -3,8 +3,8 @@ export interface HubConfig {
   vaultPath: string;
   statePath: string;
   timezone: string;
-  policy: { projectRoots: {path:string;projectId:string}[] };
-  capture: { maxInputChars: number; allowedSenderIds: string[] };
+  policy: { projectRoots: {path:string;projectId:string}[]; /** 採用した方針（判断・好み）を、採用か前回「まだ有効」と確かめてからこの日数でHOMEの見直しに出す。0で出さない。既定90。 */ reviewDays?: number };
+  capture: { maxInputChars: number; allowedSenderIds: string[]; /** 出来事の日付として受け付ける、記録した日からの日数の上限（既定365）。 */ maxBackdateDays?: number };
   organize: {
     maxItemsPerRun: number; maxAttempts: number; timeoutSec: number; projectThreshold: number; /** 非推奨・未使用。旧設定の互換のため受け付ける。 */ lockStaleSec?: number;
     llm: { provider: 'mock' | 'openclaw-infer'; model: string | null; maxOutputChars: number; executable: string; agent?: string; thinking?: ThinkingLevel };
@@ -31,6 +31,11 @@ export interface HubConfig {
    * アプリからの問いはcycleで1回にmaxPerCycle件まで答え、直近24時間の呼び出しがdailyLimitに達したら次の日まで待たせる。
    */
   ask: { enabled: boolean; maxSources: number; timeoutSec: number; maxPerCycle: number; dailyLimit: number };
+  /**
+   * 本人が付けた期日（と、選んだときは次に見直す日）を、カレンダーに読み込めるファイル（90_system/calendar/contexthub.ics）へ書き出す。既定では無効。
+   * titlesがprojectなら、件名と説明に項目の本文を入れず、プロジェクト名と「次の一手」「未解決」だけにする。
+   */
+  calendar?: { enabled: boolean; reviewDates: boolean; titles: 'item' | 'project' };
   /** 秘密情報らしい文字列（APIキー・トークン・パスワード等）を、モデルへ渡す前と別AI向けのcontextで伏せる。原文は変えない。 */
   privacy?: { redactSecrets: boolean; /** 追加の検出規則。labelは伏せ字に出す種類名、patternはJavaScriptの正規表現。 */ patterns: { label: string; pattern: string }[] };
 }
@@ -38,12 +43,16 @@ export interface HubConfig {
 export interface CaptureRequest {
   source: string; sourceEventId?: string; text: string; occurredAt: string; receivedAt?: string;
   kind?: 'memo' | 'work-summary'; project?: string; tool?: string; meta?: Record<string, string>;
+  /** 本人が後から記録した出来事の日付（YYYY-MM-DD）。occurredAtは実際に書いた日時のまま渡す。 */
+  happenedOn?: string;
 }
 export interface CaptureResult { inputId: string; deduped: boolean; path: string; receivedAt: string }
 export interface Input {
   schema_version: 1; id: string; kind: 'memo' | 'work-summary' | 'correction'; source: string; source_event_id: string; corrects_input_id?: string;
   occurred_at: string; received_at: string; project?: string; tool?: string;
   meta?: Record<string, string>; origin: 'user-note' | 'ai-self-report'; text: string; path: string;
+  /** 本人が指定した出来事の日付。あるときoccurred_atはその日の正午で、recorded_atが実際に書いた日時。 */
+  happened_on?: string; recorded_at?: string;
 }
 export interface Project {
   id: string; title: string; aliases: string[]; keywords: string[]; status: string;

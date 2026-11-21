@@ -29,7 +29,7 @@ node packages/core/dist/cli.js --config "<設定ファイル>" ask "配布方法
 
 アプリからの問いは、`cycle`が1回に`ask.maxPerCycle`件（既定3件）まで答えます。直近24時間に試した回数が`ask.dailyLimit`（既定30回）に達したら、答え待ちのまま次の機会に回します。試す前に回数を記録し、途中で止められた（再起動など）問いは3回で失敗として閉じます。答えた記録は30日で片付けます（問いの受付ファイルと受領記録は残ります）。
 
-設定の`ask.enabled`を`false`にすると、CLIとアプリの問いを受け付けません（受付ファイルは理由付きで断り、再試行しません）。アプリは`90_system/capabilities.json`を見て「記録に聞く」を出さなくなります。無効にする前に受け付けた問いは答え待ちのまま残り、有効に戻すと答えます。
+設定の`ask.enabled`を`false`にすると、CLIとアプリの問いを受け付けません（受付ファイルは理由付きで断り、再試行しません）。アプリは`90_system/intake-features.json`の`ask.enabled`を見て「記録に聞く」を出さなくなります。無効にする前に受け付けた問いは答え待ちのまま残り、有効に戻すと答えます。
 
 ```json
 "ask": { "enabled": true, "maxSources": 20, "timeoutSec": 90, "maxPerCycle": 3, "dailyLimit": 30 }

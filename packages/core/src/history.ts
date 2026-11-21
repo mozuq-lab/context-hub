@@ -13,6 +13,7 @@ import { readProjectMerges, type ProjectMerge } from './project-merges.js';
 import { mergeTargets } from './projects.js';
 import { knowledgePaths } from './knowledge-scope.js';
 import { retirementPath, retirementSchema } from './knowledge-retirement.js';
+import { readPolicyReviews, type PolicyReview } from './policy-reviews.js';
 import type { HubConfig, Input, Project, Receipt } from './types.js';
 
 /**
@@ -31,11 +32,13 @@ interface Event { at: string; order: number; line: string }
 interface HistorySources {
   config: HubConfig; projects: Project[]; units: EffectiveInput[]; receipts: Receipt[]; resolutions: ItemResolution[]; occurrences: ItemOccurrence[]; statuses: ProjectStatusChange[];
   /** 読めなかった記録の種類。経緯からは省き、本文にその旨を書く（cycleとHOMEを止めない）。 */ problems: string[];
-  creations: Awaited<ReturnType<typeof readProjectCreations>>; definitions: Awaited<ReturnType<typeof readProjectDefinitionChanges>>; merges: ProjectMerge[]; knowledge: { projectId: string; id: string; kind: string; claim: string; approvedAt: string; retiredAt?: string }[];
+  creations: Awaited<ReturnType<typeof readProjectCreations>>; definitions: Awaited<ReturnType<typeof readProjectDefinitionChanges>>; merges: ProjectMerge[]; knowledge: { projectId: string; id: string; kind: string; claim: string; approvedAt: string; retiredAt?: string; reviewedAt: string[] }[];
 }
 
 async function readSources(config: HubConfig, vault: Vault): Promise<HistorySources> {
   const knowledge: HistorySources['knowledge'] = [];
+  let reviews: PolicyReview[] = [];
+  try { reviews = (await readPolicyReviews(vault)).records; } catch { /* 読めない見直しの記録はHOMEとdoctorで示す。 */ }
   for (const path of await knowledgePaths(vault)) {
     const match = /^10_projects\/([a-z0-9][a-z0-9-]{1,40})\/knowledge\/(KNW-[0-9A-HJKMNP-TV-Z]{26})\.md$/.exec(path);
     if (!match) continue;
@@ -47,7 +50,7 @@ async function readSources(config: HubConfig, vault: Vault): Promise<HistorySour
       let retiredAt: string | undefined;
       const raw = await vault.read(retirementPath(match[2]));
       if (raw !== undefined) try { retiredAt = retirementSchema.parse(JSON.parse(raw)).retired_at; } catch { /* 不正な適用停止記録はdoctorと方針の生成で報告する。 */ }
-      knowledge.push({ projectId: match[1]!, id: match[2]!, kind: typeof meta.kind === 'string' ? meta.kind : 'knowledge', claim, approvedAt: meta.approved_at, ...(retiredAt ? { retiredAt } : {}) });
+      knowledge.push({ projectId: match[1]!, id: match[2]!, kind: typeof meta.kind === 'string' ? meta.kind : 'knowledge', claim, approvedAt: meta.approved_at, ...(retiredAt ? { retiredAt } : {}), reviewedAt: reviews.filter(r => r.knowledge_id === match[2]).map(r => r.reviewed_at) });
     } catch { /* 読めない知識は方針の生成とdoctorで報告する。経緯からは省く。 */ }
   }
   const problems: string[] = [];
@@ -122,6 +125,7 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
   }
   for (const k of sources.knowledge.filter(k => k.projectId === id)) {
     events.push({ at: k.approvedAt, order: 4, line: `- ${day(k.approvedAt)} ${kindLabels[k.kind] ?? '知識'}を採用: ${clip(k.claim)}（[${k.id}](knowledge/${k.id}.md)）` });
+    for (const at of k.reviewedAt) events.push({ at, order: 4, line: `- ${day(at)} ${kindLabels[k.kind] ?? '知識'}がまだ有効と確かめた: ${clip(k.claim)}（${k.id}）` });
     if (k.retiredAt) events.push({ at: k.retiredAt, order: 4, line: `- ${day(k.retiredAt)} ${kindLabels[k.kind] ?? '知識'}の適用を停止: ${clip(k.claim)}（${k.id}）` });
   }
   for (const [key, units] of inputsByMonth) {

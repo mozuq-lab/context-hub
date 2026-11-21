@@ -125,7 +125,7 @@ test('アプリの問いを受付で答え待ちにし、cycleで答え、上限
   const [answered] = (await readAskRecords(vault)).records;
   expect(answered).toMatchObject({ status: 'answered', attempts: 1, error: null, model: 'mock' });
   expect(answered!.sentences[0]!.text).toContain('バックアップは毎晩tarで固めて');
-  expect(JSON.parse((await vault.read('90_system/capabilities.json'))!)).toMatchObject({ features: expect.arrayContaining(['ask', 'item-occurrence', 'client-preferences']), ask: { enabled: true, max_question_chars: 500 } });
+  expect(JSON.parse((await vault.read('90_system/intake-features.json'))!)).toMatchObject({ operations: expect.arrayContaining(['ask', 'item-occurrence', 'client-preferences']), item_schedule_fields: ['repeat'], ask: { enabled: true, max_question_chars: 500 } });
 
   // 1回のcycleで答える件数と、直近24時間の上限。上限に達した問いは答え待ちのまま残す。
   for (let i = 0; i < 4; i++) await requestAnswer(config, { question: `バックアップの暗号化 ${i}`, source: 'flutter', sourceEventId: `e${i}` });
@@ -150,5 +150,5 @@ test('アプリの問いを受付で答え待ちにし、cycleで答え、上限
   // 理由付きで断った受付ファイルは、次の受付で試し直さない。
   expect((await ingest(off)).rejected).toBe(0);
   await runCycle(off, new MockLlm());
-  expect(JSON.parse((await vault.read('90_system/capabilities.json'))!).features).not.toContain('ask');
+  expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).ask).toEqual({ enabled: false, max_question_chars: 500 });
 });

@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 import {readPolicies,formatPolicies,rebuildPoliciesLocked,resolvePolicyProject,policyProjectFor} from './policies.js';
 import {retireKnowledge} from './knowledge-retirement.js';
+import {keepPolicy,policyReviewItems,policyReviewDays} from './policy-reviews.js';
+import {readInputs} from './capture.js';
 import { Command, Option } from 'commander';
 import { open } from 'node:fs/promises';
 import { loadConfig, type ConfigOverrides } from './config.js';
 import { capture } from './capture.js';
 import { correctInput } from './corrections.js';
 import { listProjectCandidates,decideProject } from './project-proposals.js';
-import { ingest } from './intake.js';
+import { ingest, writeIntakeFeaturesLocked } from './intake.js';
 import { runCycle } from './cycle.js';
 import { rebuildDashboard } from './dashboard.js';
 import { rebuildDigest } from './digest.js';
@@ -27,7 +29,6 @@ import { find, findKinds, recent, pending, resume, context, bundle, bundleMaxIds
 import { doctor } from './doctor.js';
 import { userFacingError } from './error-message.js';
 import { writePrivacyPatternsLocked } from './secrets.js';
-import { writeCapabilitiesLocked } from './capabilities.js';
 import { verifyBackup,readBackupChecks,backupStatus } from './backup-check.js';
 import { rebuildIdeaIndexLocked,setIdeaLink } from './idea-links.js';
 import { listConflicts,resolveConflict } from './conflicts.js';
@@ -59,12 +60,12 @@ async function inputText(text:string|undefined, file:string|undefined,max:number
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)); }
   catch { throw new Error('文字コードがUTF-8ではありません。変換してから取り込んでください'); }
 }
-program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(async()=>{await rebuildPoliciesLocked(c,vault);await writePrivacyPatternsLocked(c,vault);await writeCapabilitiesLocked(c,vault);});output({vaultPath:c.vaultPath,initialized:true});});
+program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(async()=>{await rebuildPoliciesLocked(c,vault);await writePrivacyPatternsLocked(c,vault);await writeIntakeFeaturesLocked(c,vault);});output({vaultPath:c.vaultPath,initialized:true});});
 program.command('add [text]').description('原文を保存').option('--file <path>','Markdown/テキストファイル')
-  .option('--event-id <id>','再送判定用ID').option('--source <name>','出典名').option('--occurred-at <iso>','タイムゾーン付き発生日時')
+  .option('--event-id <id>','再送判定用ID').option('--source <name>','出典名').option('--occurred-at <iso>','タイムゾーン付き発生日時').option('--happened-on <date>','後から記録する出来事の日付（YYYY-MM-DD。記録した日から設定のcapture.maxBackdateDays日前まで）')
   .addOption(new Option('--kind <kind>','入力の種別').choices(['memo','work-summary']).default('memo'))
   .option('--project <id>','人が指定する既存プロジェクト').option('--tool <name>','作業したAI/ツール').option('--session <reference>','元セッションの参照先')
-  .action(async(text,opts)=>{const c=await config();const body=await inputText(text,opts.file,c.capture.maxInputChars);output(await capture(c,{text:body,source:opts.source??(opts.file?'file':text!==undefined?'cli':'stdin'),sourceEventId:opts.eventId,occurredAt:opts.occurredAt??new Date().toISOString(),kind:opts.kind,project:opts.project,tool:opts.tool,meta:opts.session?{session:opts.session}:undefined}));});
+  .action(async(text,opts)=>{const c=await config();const body=await inputText(text,opts.file,c.capture.maxInputChars);output(await capture(c,{text:body,source:opts.source??(opts.file?'file':text!==undefined?'cli':'stdin'),sourceEventId:opts.eventId,occurredAt:opts.occurredAt??new Date().toISOString(),kind:opts.kind,project:opts.project,tool:opts.tool,meta:opts.session?{session:opts.session}:undefined,happenedOn:opts.happenedOn}));});
 const project=program.command('project').description('人によるプロジェクト管理');
 program.command('correct <id> [text]').description('元原文を保持して最新入力を訂正').option('--file <path>','訂正文ファイル').option('--event-id <id>','再送判定ID').option('--source <name>','出典名','cli-correction')
   .action(async(id,text,opts)=>{const c=await config();output(await correctInput(c,id,{text:await inputText(text,opts.file,c.capture.maxInputChars),source:opts.source,sourceEventId:opts.eventId,occurredAt:new Date().toISOString()}));});
@@ -186,6 +187,9 @@ program.command('resume <project>').action(async id=>output(await resume(await c
 program.command('context <project>').option('--max-chars <n>','最大文字数',positive).action(async(id,opts)=>output(await context(await config(),id,opts.maxChars)));
 program.command('bundle <ids...>').description(`選んだ記録（IN・IDEA・KNWのID、NOWはプロジェクトID。最大${bundleMaxIds}件）を、出典・訂正の注意・方針付きの1つの資料にする`).option('--max-chars <n>','最大文字数',positive).action(async(ids,opts)=>output(await bundle(await config(),ids,opts.maxChars)));
 program.command('policies').description('同期版の有効方針を読取専用で取得').option('--project <id>','ContextHubプロジェクト').option('--cwd <path>','対応付ける作業フォルダー').option('--json','JSON出力').action(async opts=>{const c=await config(),id=opts.project?await policyProjectFor(c,opts.project):(opts.cwd?await resolvePolicyProject(c,opts.cwd):undefined),b=await readPolicies(c,id);output(opts.json?b:formatPolicies(b));});
+const policy=program.command('policy').description('採用した方針（判断・好み）を、本人が定期的に見直す');
+policy.command('review').description('有効な方針と、採用（または前回「まだ有効」と確かめて）からの日数。見直す時期の方針が先頭').option('--all','見直す時期でない方針も表示').action(async opts=>{const c=await config(),vault=new Vault(c);const {items,problems}=await policyReviewItems(c,vault,{inputs:await readInputs(c)});output({review_days:policyReviewDays(c),policies:items.filter(i=>opts.all||i.due).map(i=>({id:i.knowledgeId,hash:i.hash,kind:i.kind,scope:i.projectId??'global',claim:i.claim,approved_at:i.approvedAt,confirmed_at:i.confirmedAt??null,days:i.days,due:i.due,...(i.newInputs!==undefined?{new_inputs:i.newInputs}:{})})),problems});});
+policy.command('keep <id>').description('方針がまだ有効だと確かめた記録を残す（見直しの日数をここから数え直す）。止めるときは retire を使う').requiredOption('--hash <sha256>','policy reviewで確認した方針のハッシュ').requiredOption('--confirm','方針を確認した本人による操作').action(async(id,opts)=>{const c=await config();const result=await keepPolicy(c,{knowledgeId:id,expectedHash:opts.hash,source:'cli'});await rebuildDashboard(c);output(result);});
 program.command('retire <id>').requiredOption('--hash <sha256>','確認した正式知識のハッシュ').requiredOption('--confirm','本人による適用停止').action(async(id,opts)=>output(await retireKnowledge(await config(),id,opts.hash)));
 program.command('candidates').action(async()=>output(await listCandidates(await config())));
 program.command('approve <id>').requiredOption('--hash <sha256>','候補一覧で確認した内容ハッシュ').requiredOption('--scope <scope>','global または project').option('--project <id>','採用先ContextHubプロジェクト').option('--project-hash <sha256>','確認したproject.mdのハッシュ').action(async(id,opts)=>output(await approve(await config(),id,opts.hash,opts.scope==='project'?{scope:'project',projectId:opts.project,projectHash:opts.projectHash}:{scope:opts.scope})));
