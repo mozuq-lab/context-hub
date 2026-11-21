@@ -21,7 +21,7 @@ if [ -n "$RECIPIENTS" ]; then
   # 秘密鍵を受取人ファイルとして渡す取り違えは、秘密鍵をMac miniの設定に残す原因になるため止める。
   if grep -q 'AGE-SECRET-KEY-' "$RECIPIENTS"; then echo "受取人ファイルに秘密鍵が入っています。公開鍵（age1…）だけを書いたファイルを指定してください" >&2; exit 2; fi
   grep -q '^[[:space:]]*age1' "$RECIPIENTS" || grep -q '^[[:space:]]*ssh-' "$RECIPIENTS" || { echo "受取人ファイルに公開鍵（age1…）がありません: $RECIPIENTS" >&2; exit 2; }
-  command -v "$AGE" >/dev/null 2>&1 || { echo "ageのコマンドが見つかりません: $AGE（CTX_BACKUP_AGEに絶対パスを指定してください）" >&2; exit 2; }
+  command -v "$AGE" >/dev/null 2>&1 || { echo "ageのコマンドが見つかりません: ${AGE}（CTX_BACKUP_AGEに絶対パスを指定してください）" >&2; exit 2; }
 fi
 # 存在する各要素のリンクを解決する。未作成の保存先も、mkdirの前に同じ基準で比較する。
 physical_directory_path() {
