@@ -24,6 +24,16 @@ test('候補だけでは定義を作らず古い候補の承認を拒否する',
  await correctInput(config,c.rootInputId,{source:'cli',occurredAt:'2026-10-03T11:00:00Z',text:'菜園案を取り消す'});
  expect((await listProjectCandidates(config))[0].status).toBe('stale');await expect(decideProject(config,request(c))).rejects.toThrow();expect(await readProjects(config)).toHaveLength(0);
 });
+test('古くなった案は採用できないが、1件ずつ却下して片付けられる',async()=>{
+ const{config}=await setup();const c=await candidate(config);await addProject(config,{id:'existing',title:'栽培日記',aliases:['菜園']});
+ expect((await listProjectCandidates(config))[0].status).toBe('stale');
+ // まとめた判断と、確認情報の合わない却下は受け付けない。
+ await expect(decideProject(config,{...request(c,'reject'),covers:[{candidateId:'PCAN-'+'A'.repeat(26),expectedHash:'0'.repeat(64)}]})).rejects.toThrow();
+ await expect(decideProject(config,{...request(c,'reject'),confirmationToken:'0'.repeat(64)})).rejects.toThrow();
+ expect(await decideProject(config,request(c,'reject'))).toMatchObject({candidateId:c.candidateId,deduped:false});
+ expect((await listProjectCandidates(config))[0].status).toBe('rejected');expect(await readProjects(config)).toHaveLength(1);
+ await expect(decideProject(config,request(c))).rejects.toThrow();
+});
 test('承認記録後の停止を同じ定義へ回復する',async()=>{
  const{config,vault}=await setup();const c=await candidate(config);const create=Vault.prototype.create;
  vi.spyOn(Vault.prototype,'create').mockImplementation(async function(this:Vault,path,text){if(path===`10_projects/${c.projectId}/project.md`)throw new Error('停止');return create.call(this,path,text);});

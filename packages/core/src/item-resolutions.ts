@@ -27,9 +27,17 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const resolutionIdSchema = z.string().regex(/^RES-[0-9A-HJKMNP-TV-Z]{26}$/);
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
 export const itemKeySchema = digest;
+/**
+ * どのプロジェクトにも結び付いていないメモの行（HOMEとアプリの「プロジェクト未定」）を指す、項目の置き場。
+ * プロジェクトIDの形（英小文字・数字で始まる）と重ならないよう、下線で始める。完了・誤りとして外す記録と項目一覧で、プロジェクトIDの代わりに使う。
+ */
+export const UNASSIGNED_SCOPE = '_unassigned';
+export const itemScopeSchema = z.union([projectIdSchema, z.literal(UNASSIGNED_SCOPE)]);
+/** プロジェクト未定の行のうち、本人が外せる理由。行動ではない・もうやらない行を一覧から外すだけで、メモは読み直さない。 */
+export const UNASSIGNED_EXCLUSION_REASON: ExclusionReason = 'outdated';
 export const itemActionSchema = z.enum(itemActions);
 export const itemResolutionSchema = z.object({
-  schema_version: z.literal(1), id: resolutionIdSchema, project_id: projectIdSchema, item_key: digest, section: z.enum(itemSections),
+  schema_version: z.literal(1), id: resolutionIdSchema, project_id: itemScopeSchema, item_key: digest, section: z.enum(itemSections),
   text: z.string().max(4000), input_id: inputIdSchema, action: z.enum(itemActions), source: z.string().min(1).max(200),
   source_event_id: z.string().min(1).max(200).optional(), created_at: z.string().datetime({ offset: true }),
   reason: exclusionReasonSchema.optional(), note: exclusionNoteSchema.optional(),
@@ -48,7 +56,7 @@ const nowItemSchema = z.object({
   action: z.object({ from: z.object({ input_id: inputIdSchema, text: z.string().min(1).max(2000), key: digest.optional() }).strict().optional() }).strict().optional(),
 }).strict();
 export type NowItem = z.infer<typeof nowItemSchema>;
-export const nowItemsSchema = z.object({ schema_version: z.literal(1), project: projectIdSchema, generated_at: z.string().datetime({ offset: true }), items: z.array(nowItemSchema) }).strict();
+export const nowItemsSchema = z.object({ schema_version: z.literal(1), project: itemScopeSchema, generated_at: z.string().datetime({ offset: true }), items: z.array(nowItemSchema) }).strict();
 export type NowItems = z.infer<typeof nowItemsSchema>;
 
 /**
@@ -188,7 +196,7 @@ export async function readNowItems(vault: Vault, projectId: string): Promise<Now
 
 export interface ItemResolutionRequest { projectId: string; itemKey: string; action: ItemAction; source: string; sourceEventId?: string; /** 誤りとして外す理由（action: exclude のときだけ、必須）。 */ reason?: ExclusionReason; /** 本人の一言（任意）。 */ note?: string }
 export interface ItemResolutionResult { projectId: string; itemKey: string; action: ItemAction; resolutionId: string; deduped: boolean }
-const requestSchema = z.object({ projectId: projectIdSchema, itemKey: digest, action: z.enum(itemActions), source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(), reason: exclusionReasonSchema.optional(), note: exclusionNoteSchema.optional() }).strict();
+const requestSchema = z.object({ projectId: itemScopeSchema, itemKey: digest, action: z.enum(itemActions), source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(), reason: exclusionReasonSchema.optional(), note: exclusionNoteSchema.optional() }).strict();
 
 /**
  * 直近に生成したNOW項目の一覧にある項目だけを、完了・解決にする、誤りとして外す、または未解決へ戻す。
@@ -200,12 +208,18 @@ export async function setItemResolution(config: HubConfig, request: ItemResoluti
   if (!exclusionFields(r)) throw new Error(r.action === 'exclude' ? '誤りとして外す理由を指定してください' : '理由と一言は、誤りとして外すときだけ指定できます');
   // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
   const { rebuildNowLocked, rebuildNowsForInputLocked, readReceipts } = await import('./views.js');
+  const unassigned = r.projectId === UNASSIGNED_SCOPE;
+  // プロジェクト未定の行は、メモの読み直しや関連の変更をしない。外す理由は「もう古い」（行動ではない・もうやらない）だけ。
+  if (unassigned && r.action === 'exclude' && r.reason !== UNASSIGNED_EXCLUSION_REASON) throw new Error('プロジェクト未定の行は、「もう古い」としてだけ外せます（メモの読み直しはしません）');
+  const { rebuildUnassignedLocked } = unassigned ? await import('./unassigned-actions.js') : { rebuildUnassignedLocked: undefined };
   return vault.withLock(async () => {
     const projects = await readProjects(config);
-    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
+    if (!unassigned && !projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
     const records = await readItemResolutions(vault);
     // 誤りとして外す・それを戻す操作は、読み直しの結果や帰属の取り消しを通じてほかのプロジェクトのNOWにも及ぶ。
+    // プロジェクト未定の行は、その一覧だけを作り直す。
     const rebuild = async (inputId?: string) => {
+      if (rebuildUnassignedLocked) { await rebuildUnassignedLocked(config, vault); return; }
       const inputs = await readInputs(config), receipts = await readReceipts(config);
       if (inputId) await rebuildNowsForInputLocked(vault, config, projects.map(p => p.id), inputId, r.projectId, inputs, receipts);
       else await rebuildNowLocked(vault, config, r.projectId, inputs, receipts);
@@ -222,7 +236,7 @@ export async function setItemResolution(config: HubConfig, request: ItemResoluti
       }
     }
     // 統合済みのプロジェクトの項目は統合先のNOWにある（キーも統合先のものになる）。
-    assertNotMerged(projects, r.projectId);
+    if (!unassigned) assertNotMerged(projects, r.projectId);
     const items = await readNowItems(vault, r.projectId);
     const item = items?.items.find(i => i.key === r.itemKey);
     if (!item) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');

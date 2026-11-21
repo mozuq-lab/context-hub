@@ -3,7 +3,7 @@ import { inputIdSchema } from './capture.js';
 import { projectIdSchema } from './projects.js';
 import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, PROJECT_TITLE_CHARS } from './project-definition.js';
 import { projectStatusSchema } from './project-status.js';
-import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema } from './item-resolutions.js';
+import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema, itemScopeSchema } from './item-resolutions.js';
 import { occurrenceActionSchema, repeatRuleSchema, scheduleDateSchema } from './item-schedules.js';
 import { calendarDateSchema } from './happened.js';
 import { parseMarkdown } from './storage.js';
@@ -34,7 +34,7 @@ const knowledgeReject=z.object({...knowledgeBase,operation:z.literal('knowledge-
 const knowledgeRetire=z.object({...base,operation:z.literal('knowledge-retire'),target_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 const projectStatus=z.object({...base,operation:z.literal('project-status'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),status:projectStatusSchema,confirmed:z.literal(true),text:z.string()}).strict();
 // 誤りとして外す（exclude）ときだけ理由が必須で、一言を添えられる。承認操作の本文は空のままにするため、一言はfrontmatterで送る。
-const itemResolution=z.object({...base,operation:z.literal('item-resolution'),project_id:projectIdSchema,item_key:itemKeySchema,action:itemActionSchema,reason:exclusionReasonSchema.optional(),note:exclusionNoteSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='exclude'?v.reason!==undefined:v.reason===undefined&&v.note===undefined,'理由は誤りとして外すときだけ指定します');
+const itemResolution=z.object({...base,operation:z.literal('item-resolution'),project_id:itemScopeSchema,item_key:itemKeySchema,action:itemActionSchema,reason:exclusionReasonSchema.optional(),note:exclusionNoteSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='exclude'?v.reason!==undefined:v.reason===undefined&&v.note===undefined,'理由は誤りとして外すときだけ指定します');
 // 期日と見直す日は変更後の全体を送る。両方nullは日付を外す依頼。
 // repeat（定例の繰り返し）は省略すると今の繰り返しを保ち、nullで外す。繰り返しを知らない版のアプリの依頼で定例を外さないため。
 const itemSchedule=z.object({...base,operation:z.literal('item-schedule'),project_id:projectIdSchema,item_key:itemKeySchema,due:scheduleDateSchema.nullable(),review_after:scheduleDateSchema.nullable(),repeat:repeatRuleSchema.nullable().optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>!v.repeat||v.due!==null,'繰り返しには期日が必要です');

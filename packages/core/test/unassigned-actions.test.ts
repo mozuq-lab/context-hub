@@ -11,7 +11,11 @@ import { MockLlm } from '../src/llm.js';
 import { addProject } from '../src/projects.js';
 import { readEffectiveInputs } from '../src/effective-inputs.js';
 import { rebuildDashboard } from '../src/dashboard.js';
-import { UNASSIGNED_HOME_MEMOS, UNASSIGNED_MEMOS_MAX, UNASSIGNED_SUGGESTIONS_PER_MEMO, buildUnassignedActions, unassignedActionsPath, unassignedActionsSchema } from '../src/unassigned-actions.js';
+import { UNASSIGNED_CLOSED_MAX, UNASSIGNED_HOME_MEMOS, UNASSIGNED_MEMOS_MAX, UNASSIGNED_SUGGESTIONS_PER_MEMO, buildUnassignedActions, unassignedActionsPath, unassignedActionsSchema, unassignedItemKey, unassignedItemsPath } from '../src/unassigned-actions.js';
+import { ItemTargetError, UNASSIGNED_SCOPE, nowItemsSchema, readItemResolutions, readNowItems, setItemResolution } from '../src/item-resolutions.js';
+import { setItemSchedule } from '../src/item-schedules.js';
+import { ingest } from '../src/intake.js';
+import { packet } from './workflow-fixtures.js';
 import type { HubConfig, OrganizeResult } from '../src/types.js';
 
 const roots: string[] = [];
@@ -177,5 +181,65 @@ describe('プロジェクト未定の次の一手', () => {
     const home = (await vault.read('HOME.md'))!, order = ['## 次の一手（進行中のプロジェクト）', '## プロジェクト未定の次の一手', '## プロジェクト一覧', '## 確認待ち', '## 受領と整理状況', '## 失敗と競合'].map(h => home.indexOf(h));
     expect(order.every(i => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  test('行ごとに項目キーを付け、完了・却下した行を一覧から外し、未解決へ戻すと戻す', async () => {
+    const { config, vault } = await setup();
+    const id = await memo(config, '講習の申込をする', '2026-11-01T09:00:00+09:00', result({ category: 'task', next_action_suggestions: ['日程を調べる', '費用を確かめる'] }));
+    await rebuildDashboard(config, { now: new Date('2026-11-10T00:00:00Z') });
+    const items = nowItemsSchema.parse(JSON.parse((await vault.read(unassignedItemsPath))!));
+    expect(unassignedItemsPath).toBe('90_system/now-items/_unassigned.json');
+    expect(items).toMatchObject({ project: UNASSIGNED_SCOPE, items: [
+      { key: unassignedItemKey(id, '講習の申込をする'), section: 'next', label: '', text: '講習の申込をする', input_id: id, resolution: null },
+      { key: unassignedItemKey(id, '日程を調べる'), label: 'AI提案: ', text: '日程を調べる', resolution: null },
+      { key: unassignedItemKey(id, '費用を確かめる'), label: 'AI提案: ', text: '費用を確かめる', resolution: null },
+    ] });
+    // 提案を完了、メモの行を却下（もう古い）にする。却下は「もう古い」だけを受け付ける。
+    await expect(setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[0]!.key, action: 'exclude', reason: 'misread', source: 'cli' })).rejects.toThrow('もう古い');
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[1]!.key, action: 'resolve', source: 'cli' });
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[0]!.key, action: 'exclude', reason: 'outdated', note: 'もう申し込んだ', source: 'cli' });
+    // 記録の直後に一覧と項目一覧を作り直す（HOMEの作り直しを待たない）。
+    expect(JSON.parse((await vault.read(unassignedActionsPath))!).memos).toEqual([expect.objectContaining({ input_id: id, task: false, suggestions: ['費用を確かめる'] })]);
+    const after = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items;
+    expect(after.map(i => [i.text, i.resolution?.action ?? (i.resolution ? 'resolve' : null)])).toEqual([['費用を確かめる', null], ['講習の申込をする', 'exclude'], ['日程を調べる', 'resolve']]);
+    expect(after[1]!.resolution).toMatchObject({ reason: 'outdated', note: 'もう申し込んだ' });
+    await expect(setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[1]!.key, action: 'resolve', source: 'cli' })).rejects.toBeInstanceOf(ItemTargetError);
+    // 残りの行も片付けるとメモごと一覧から外れ、HOMEからも消える。
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[2]!.key, action: 'resolve', source: 'cli' });
+    await rebuildDashboard(config, { now: new Date('2026-11-11T00:00:00Z') });
+    expect(JSON.parse((await vault.read(unassignedActionsPath))!)).toMatchObject({ total_memos: 0, memos: [] });
+    expect(await vault.read('HOME.md')).not.toContain('## プロジェクト未定の次の一手');
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items).toHaveLength(3);
+    // 未解決へ戻すと、元の行へ戻る。
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[0]!.key, action: 'reopen', source: 'cli' });
+    expect(JSON.parse((await vault.read(unassignedActionsPath))!).memos).toEqual([expect.objectContaining({ input_id: id, task: true, suggestions: [] })]);
+    // 記録はプロジェクトの代わりに置き場を残す。期日は付けられない。
+    expect((await readItemResolutions(vault)).every(r => r.project_id === UNASSIGNED_SCOPE)).toBe(true);
+    await expect(setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: items.items[0]!.key, due: '2026-11-20', reviewAfter: null, source: 'cli' })).rejects.toThrow();
+  });
+
+  test('受付ファイルから完了・却下を受け付ける', async () => {
+    const { config, vault } = await setup();
+    const id = await memo(config, '講習の申込をする', '2026-11-01T09:00:00+09:00', result({ category: 'task' }));
+    await rebuildDashboard(config);
+    const key = unassignedItemKey(id, '講習の申込をする');
+    await packet(config, { operation: 'item-resolution', source: 'flutter', project_id: UNASSIGNED_SCOPE, item_key: key, action: 'exclude', reason: 'outdated', confirmed: true }, '');
+    const run = await ingest(config);
+    expect(run).toMatchObject({ accepted: 1 });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items[0]!.resolution).toMatchObject({ action: 'exclude', reason: 'outdated' });
+    expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).item_scopes).toEqual([UNASSIGNED_SCOPE]);
+  });
+
+  test('片付けた行は新しい報告から上限までを項目一覧に残す', async () => {
+    const { config, vault } = await setup();
+    const suggestions = Array.from({ length: 10 }, (_, i) => `提案${i}`);
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push(await memo(config, `メモ${i}`, `2026-11-0${i + 1}T09:00:00+09:00`, result({ next_action_suggestions: suggestions })));
+    await rebuildDashboard(config);
+    for (const id of ids) for (const s of suggestions) await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: unassignedItemKey(id, s), action: 'resolve', source: 'cli' });
+    const items = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items;
+    expect(items).toHaveLength(UNASSIGNED_CLOSED_MAX);
+    expect(items.every(i => i.resolution !== null)).toBe(true);
+    expect(items[0]!.input_id).toBe(ids[3]);
   });
 });

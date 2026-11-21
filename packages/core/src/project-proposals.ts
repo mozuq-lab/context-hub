@@ -152,7 +152,10 @@ export async function decideProject(config:HubConfig,request:ProjectDecisionRequ
    await materialize(vault,lead);
    return{candidateId:candidate.candidateId,projectId:parseCandidate(candidatePath(coveredBy.by),lead.candidate_snapshot).project_id,decisionId:lead.id,deduped:true};
   }
-  if(!candidate||candidate.status!=='pending')throw new Error('候補が古いか確認情報が不足しています。同期後に最新候補を確認してください');
+  // 古くなった案（同じ名前のプロジェクトが既にある・元のメモに新しい訂正があるなど）は採用できないが、1件ずつ却下して片付けられる。
+  // 確認情報のない案は、本人が確かめた内容と結び付けられないので却下も受け付けない（confirmationTokenの照合で断る）。
+  const staleReject=candidate?.status==='stale'&&request.action==='reject'&&!covers.length;
+  if(!candidate||(candidate.status!=='pending'&&!staleReject))throw new Error('候補が古いか確認情報が不足しています。同期後に最新候補を確認してください');
   if(candidate.candidateHash!==request.expectedHash||candidate.confirmationToken!==request.confirmationToken)throw new Error('表示した候補と承認の確認情報が一致しません');
   const raw=(await vault.read(candidate.path))!;
   if(hash(raw)!==request.expectedHash)throw new Error('候補の内容が変更されました');
