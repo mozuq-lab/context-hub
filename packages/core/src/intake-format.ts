@@ -4,8 +4,10 @@ import { projectIdSchema } from './projects.js';
 import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, PROJECT_TITLE_CHARS } from './project-definition.js';
 import { projectStatusSchema } from './project-status.js';
 import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema } from './item-resolutions.js';
-import { scheduleDateSchema } from './item-schedules.js';
+import { occurrenceActionSchema, repeatRuleSchema, scheduleDateSchema } from './item-schedules.js';
 import { parseMarkdown } from './storage.js';
+import { ASK_QUESTION_CHARS } from './ask.js';
+import { parsePreferencesPayload } from './client-preferences.js';
 import { newProjectIdSchema, projectCreateFieldsSchema } from './project-creations.js';
 import { resolvableTargetSchema } from './conflicts.js';
 import { ideaIdSchema, ideaLinkActionSchema } from './idea-links.js';
@@ -30,7 +32,10 @@ const projectStatus=z.object({...base,operation:z.literal('project-status'),proj
 // 誤りとして外す（exclude）ときだけ理由が必須で、一言を添えられる。承認操作の本文は空のままにするため、一言はfrontmatterで送る。
 const itemResolution=z.object({...base,operation:z.literal('item-resolution'),project_id:projectIdSchema,item_key:itemKeySchema,action:itemActionSchema,reason:exclusionReasonSchema.optional(),note:exclusionNoteSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='exclude'?v.reason!==undefined:v.reason===undefined&&v.note===undefined,'理由は誤りとして外すときだけ指定します');
 // 期日と見直す日は変更後の全体を送る。両方nullは日付を外す依頼。
-const itemSchedule=z.object({...base,operation:z.literal('item-schedule'),project_id:projectIdSchema,item_key:itemKeySchema,due:scheduleDateSchema.nullable(),review_after:scheduleDateSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
+// repeat（定例の繰り返し）は省略すると今の繰り返しを保ち、nullで外す。繰り返しを知らない版のアプリの依頼で定例を外さないため。
+const itemSchedule=z.object({...base,operation:z.literal('item-schedule'),project_id:projectIdSchema,item_key:itemKeySchema,due:scheduleDateSchema.nullable(),review_after:scheduleDateSchema.nullable(),repeat:repeatRuleSchema.nullable().optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>!v.repeat||v.due!==null,'繰り返しには期日が必要です');
+// 定例の今回を完了（done）・見送り（skip）。dueは本人が確認した回の期日で、今の期日と違えば受け付けない。
+const itemOccurrence=z.object({...base,operation:z.literal('item-occurrence'),project_id:projectIdSchema,item_key:itemKeySchema,action:occurrenceActionSchema,due:scheduleDateSchema,confirmed:z.literal(true),text:z.string()}).strict();
 const itemHintDismiss=z.object({...base,operation:z.literal('item-hint-dismiss'),project_id:projectIdSchema,item_key:itemKeySchema,input_id:inputIdSchema,confirmed:z.literal(true),text:z.string()}).strict();
 const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss'),draft_id:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),draft_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 名前・別名・キーワードは変更後の全体を送る。上限と重複の整理は本体が検証する。
@@ -44,7 +49,11 @@ const ideaLink=z.object({...base,operation:z.literal('idea-link'),idea_ids:z.tup
 const projectMerge=z.object({...base,operation:z.enum(['project-merge','project-unmerge']),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),into_id:projectIdSchema,into_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 今週の気づきの項目への反応。noneは前の反応を外す。問いへの答えは、反応ではなくmeta付きのcaptureで送る。
 const insightReaction=z.object({...base,operation:z.literal('insight-reaction'),run_id:insightRunIdSchema,item_key:insightItemKeySchema,reaction:insightReactionValueSchema,confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction]);
+// 記録に聞く。本文が問い。projectを付けると、そのプロジェクトに帰属・関連する記録から答える。答えはcycleで作る。
+const askSchema=z.object({...base,operation:z.literal('ask'),project:projectIdSchema.optional(),text:z.string()}).strict();
+// アプリの好みを端末間でそろえる。本文が好みのJSON（変えたまとまりだけ）。
+const preferencesSchema=z.object({...base,operation:z.literal('client-preferences'),confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
@@ -57,6 +66,10 @@ export function parseIntake(path: string, content: string, maxInputChars: number
   if (path !== `Input/${packet.request_id}.md`) throw new Error('受付IDとパスが一致しません');
   if (packet.operation === 'capture' || packet.operation === 'correct') {
     if (!text.trim() || text.length > maxInputChars) throw new Error('受付本文が空か文字数上限を超えています');
+  } else if (packet.operation === 'ask') {
+    if (!text.trim() || text.length > ASK_QUESTION_CHARS) throw new Error(`問いは1〜${ASK_QUESTION_CHARS}文字にしてください`);
+  } else if (packet.operation === 'client-preferences') {
+    parsePreferencesPayload(text);
   } else if (packet.operation === 'project-create') {
     if (text.length > maxInputChars) throw new Error('最初のメモが文字数上限を超えています');
   } else if (text.trim()) throw new Error('承認操作に本文は指定できません');

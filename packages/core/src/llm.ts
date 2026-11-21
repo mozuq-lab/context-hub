@@ -172,6 +172,16 @@ function mockSynthesis(payload: MockSynthesisPayload): string {
   });
 }
 
+interface MockAskPayload { sources?: { ref: string; text: string }[] }
+/** デモ・検証用: 記録に聞くの依頼へ、問いに最も近い記録（先頭）の最初の行をそのまま引用して答える。 */
+function mockAsk(payload: MockAskPayload): string {
+  const first = payload.sources?.[0];
+  const line = first?.text.split(/\r?\n/).map(l => l.replace(/^[-*#\s]+/, '').trim()).find(l => (l.match(/[\p{L}\p{N}]/gu)?.length ?? 0) >= 4);
+  if (!first || !line) return JSON.stringify({ not_found: true, sentences: [] });
+  const quote = [...line].slice(0, 60).join('');
+  return JSON.stringify({ not_found: false, sentences: [{ text: `記録では「${quote}」とされています（mock）`, evidence: [{ ref: first.ref, quote }] }] });
+}
+
 export class MockLlm implements LlmClient {
   private readonly fixtures: (string | OrganizeResult | Error)[];
   constructor(fixtures: (string | OrganizeResult | Error)[] = []) { this.fixtures = [...fixtures]; }
@@ -181,6 +191,7 @@ export class MockLlm implements LlmClient {
     if (fixture !== undefined) return { text: typeof fixture === 'string' ? fixture : JSON.stringify(fixture), model: 'mock' };
     const payload = JSON.parse(prompt.slice(prompt.indexOf(dataMarker) + dataMarker.length)) as { operation?:string; metadata: { kind: string }; existing_projects: Pick<Project, 'id' | 'title' | 'aliases' | 'keywords'>[]; source_text: string; open_items?: { ref: string; text: string }[]; excluded_items?: { text: string; reason: string; own: boolean }[] };
     if (payload.operation === 'synthesis') return { text: mockSynthesis(payload as unknown as MockSynthesisPayload), model: 'mock' };
+    if (payload.operation === 'ask') return { text: mockAsk(payload as unknown as MockAskPayload), model: 'mock' };
     const text = payload.source_text;
     const result: OrganizeResult = { category: 'unclassified', summary: text.trim().replace(/\s+/g, ' ').slice(0, 200), project_candidates: [], next_action_suggestions: [], extracted: { current: [], next: [], open: [] }, knowledge_candidate: null, new_project_hint: null };
     if (payload.metadata.kind === 'work-summary') {

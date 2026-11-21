@@ -16,23 +16,26 @@ import { setProjectStatus,projectStatuses,lifecycleOf } from './project-status.j
 import { setProjectDefinition,editDefinition,normalizeDefinition,definitionLimitMessage } from './project-definition.js';
 import { mergeProjects,unmergeProject,readProjectMerges } from './project-merges.js';
 import { readProjectCatalog } from './knowledge-scope.js';
-import { setItemResolution,readNowItems,readItemResolutions,exclusionReasons,exclusionReasonLabels } from './item-resolutions.js';
-import { setItemSchedule,readItemSchedules,activeSchedules } from './item-schedules.js';
+import { setItemResolution,readNowItems,readItemResolutions,activeResolutions,exclusionReasons,exclusionReasonLabels } from './item-resolutions.js';
+import { setItemSchedule,readItemSchedules,activeSchedules,effectiveSchedules,completeOccurrence,readItemOccurrences,repeatLabel,REPEAT_EVERY_MAX,type RepeatRule } from './item-schedules.js';
 import { rebuildHistories } from './history.js';
 import { dismissResolutionHint } from './resolution-hints.js';
 import { collectGitDrafts,readGitDrafts,useGitDraft,dismissGitDraft } from './git-drafts.js';
 import { Vault, unlockVault, LOCK_SCOPES, hash, releaseLocksOnSignal } from './storage.js';
-import { addProject, readProjects } from './projects.js';
+import { addProject, readProjects, resolveProject } from './projects.js';
 import { find, findKinds, recent, pending, resume, context, bundle, bundleMaxIds, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
 import { userFacingError } from './error-message.js';
 import { writePrivacyPatternsLocked } from './secrets.js';
+import { writeCapabilitiesLocked } from './capabilities.js';
 import { verifyBackup,readBackupChecks,backupStatus } from './backup-check.js';
 import { rebuildIdeaIndexLocked,setIdeaLink } from './idea-links.js';
 import { listConflicts,resolveConflict } from './conflicts.js';
 import { organize } from './organize.js';
 import { previewSynthesis,runSynthesis,synthesisLlmConfig } from './synthesis.js';
 import { MockLlm } from './llm.js';
+import { answerQuestion,askSourcesFrom,formatAnswer,selectAskSources } from './ask.js';
+import { readEffectiveInputs } from './effective-inputs.js';
 import { OpenClawInferLlm } from './infer.js';
 import { listCandidates, approve, reject, propose } from './approvals.js';
 import type { HubConfig } from './types.js';
@@ -56,7 +59,7 @@ async function inputText(text:string|undefined, file:string|undefined,max:number
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)); }
   catch { throw new Error('文字コードがUTF-8ではありません。変換してから取り込んでください'); }
 }
-program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(async()=>{await rebuildPoliciesLocked(c,vault);await writePrivacyPatternsLocked(c,vault);});output({vaultPath:c.vaultPath,initialized:true});});
+program.command('init').description('保存先を初期化（既存ノートは保持）').action(async()=>{const c=await config();const vault=new Vault(c);await vault.init();await vault.withLock(async()=>{await rebuildPoliciesLocked(c,vault);await writePrivacyPatternsLocked(c,vault);await writeCapabilitiesLocked(c,vault);});output({vaultPath:c.vaultPath,initialized:true});});
 program.command('add [text]').description('原文を保存').option('--file <path>','Markdown/テキストファイル')
   .option('--event-id <id>','再送判定用ID').option('--source <name>','出典名').option('--occurred-at <iso>','タイムゾーン付き発生日時')
   .addOption(new Option('--kind <kind>','入力の種別').choices(['memo','work-summary']).default('memo'))
@@ -100,7 +103,7 @@ project.command('unmerge <from>').description('統合を取り消し、統合元
 project.command('candidates').action(async()=>output(await listProjectCandidates(await config())));
 for(const action of ['approve','reject'] as const)project.command(`${action} <id>`).requiredOption('--hash <sha256>','確認した候補のハッシュ').requiredOption('--token <token>','候補の確認トークン').requiredOption('--confirm','候補詳細を読んだ人の明示確認').action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`})));
 const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決にする、誤りとして外す、または未解決へ戻す');
-item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{})})));});
+item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,repeat:i.schedule?.repeat?repeatLabel(i.schedule.repeat):null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{})})));});
 for(const action of ['resolve','reopen'] as const)item.command(`${action} <project> <key>`).description(action==='resolve'?'項目を完了・解決にする':'解決済み、または誤りとして外した項目を未解決へ戻す').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,_opts)=>{const c=await config(),vault=new Vault(c);
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ操作なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.action===action&&last.source_event_id?last.source_event_id:`cli:${key}:${action}:${last?.id??'none'}`;const result=await setItemResolution(c,{projectId:id,itemKey:key,action,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
@@ -108,15 +111,35 @@ item.command('exclude <project> <key>').description(`AIの読み違いなどの�
 // 完了報告と同じく、直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.action==='exclude'&&last.reason===opts.reason&&last.note===opts.note&&last.source_event_id?last.source_event_id:`cli:${key}:exclude:${last?.id??'none'}`;const result=await setItemResolution(c,{projectId:id,itemKey:key,action:'exclude',reason:opts.reason,note:opts.note,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
 item.command('dismiss-hint <project> <key> <input-id>').description('「片付いたかも」が違うとき、そのメモからの候補を見送る（項目は未解決のまま）').requiredOption('--confirm','候補と引用を確認した本人による見送り').action(async(id,key,inputId,_opts)=>{const c=await config();const result=await dismissResolutionHint(c,{projectId:id,itemKey:key,inputId,source:'cli',sourceEventId:`cli:${key}:${inputId}:dismiss-hint`});await rebuildDashboard(c);output(result);});
-item.command('schedule <project> <key>').description('項目に期日・次に見直す日を付ける（noneで外す。指定しなかった方は今の日付を保つ）').option('--due <date>','期日（YYYY-MM-DD、またはnone）').option('--review <date>','次に見直す日（YYYY-MM-DD、またはnone）。この日まではHOMEの一覧でたたむ').option('--clear','期日と見直す日を両方外す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
-if(opts.clear&&(opts.due!==undefined||opts.review!==undefined))throw new Error('--clearと--due・--reviewは同時に指定できません');
-if(!opts.clear&&opts.due===undefined&&opts.review===undefined)throw new Error('--due・--review・--clearのいずれかを指定してください');
+/** 定例の繰り返しの指定。daily・weekly・monthly、またはN日・N週・Nか月ごと（例: 14d・2w・3m）。noneで外す。 */
+function parseRepeat(value:string):RepeatRule|null{
+ if(value==='none')return null;
+ const named:Record<string,RepeatRule>={daily:{unit:'day',every:1},weekly:{unit:'week',every:1},monthly:{unit:'month',every:1}};
+ if(named[value])return named[value]!;
+ const m=/^(\d{1,2})([dwm])$/.exec(value),every=m?Number(m[1]):0;
+ if(!m||every<1||every>REPEAT_EVERY_MAX)throw new Error(`繰り返しはdaily・weekly・monthly・none、または1〜${REPEAT_EVERY_MAX}の数とd・w・m（例: 14d・2w・3m）で指定してください`);
+ return {unit:m[2]==='d'?'day':m[2]==='w'?'week':'month',every};
+}
+item.command('schedule <project> <key>').description('項目に期日・次に見直す日・繰り返しを付ける（noneで外す。指定しなかったものは今のものを保つ）').option('--due <date>','期日（YYYY-MM-DD、またはnone）').option('--review <date>','次に見直す日（YYYY-MM-DD、またはnone）。この日まではHOMEの一覧でたたむ').option('--repeat <rule>','定例の繰り返し（daily・weekly・monthly・14d・2w・3mなど、またはnone）。期日が必要').option('--clear','期日・見直す日・繰り返しをすべて外す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
+if(opts.clear&&(opts.due!==undefined||opts.review!==undefined||opts.repeat!==undefined))throw new Error('--clearと--due・--review・--repeatは同時に指定できません');
+if(!opts.clear&&opts.due===undefined&&opts.review===undefined&&opts.repeat===undefined)throw new Error('--due・--review・--repeat・--clearのいずれかを指定してください');
+const rule=opts.repeat===undefined?undefined:parseRepeat(opts.repeat);
 const c=await config(),vault=new Vault(c),records=(await readItemSchedules(vault)).records,current=activeSchedules(records,id).get(key);
 const pick=(value:string|undefined,kept:string|null)=>value===undefined?kept:value==='none'?null:value;
 const due=opts.clear?null:pick(opts.due,current?.due??null),reviewAfter=opts.clear?null:pick(opts.review,current?.review_after??null);
 // 直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
-const last=records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.due===due&&last.review_after===reviewAfter&&last.source_event_id?last.source_event_id:`cli:${key}:schedule:${due??'-'}:${reviewAfter??'-'}:${last?.id??'none'}`;
-const result=await setItemSchedule(c,{projectId:id,itemKey:key,due,reviewAfter,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,due,review_after:reviewAfter});});
+const tag=rule===undefined?'keep':rule===null?'none':`${rule.every}${rule.unit}`;
+const last=records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.due===due&&last.review_after===reviewAfter&&last.source_event_id?.endsWith(`:${tag}`)?last.source_event_id:`cli:${key}:schedule:${due??'-'}:${reviewAfter??'-'}:${last?.id??'none'}:${tag}`;
+const result=await setItemSchedule(c,{projectId:id,itemKey:key,due,reviewAfter,...(opts.clear?{repeat:null}:rule!==undefined?{repeat:rule}:{}),source:'cli',sourceEventId:event});await rebuildDashboard(c);const saved=(await readItemSchedules(vault)).records.find(r=>r.id===result.scheduleId);output({...result,due,review_after:reviewAfter,repeat:saved?.repeat?repeatLabel(saved.repeat):null});});
+for(const action of ['done','skip'] as const)item.command(`${action}-round <project> <key>`).description(action==='done'?'定例の項目の今回を完了にし、期日を次の回へ進める（項目は残る）':'定例の項目の今回だけを見送り、期日を次の回へ進める').requiredOption('--confirm','項目と期日を確認した本人による報告').action(async(id,key)=>{const c=await config(),vault=new Vault(c),list=(await readNowItems(vault,id))?.items??[];
+// 今の回はNOWではなく日付の記録から決める（次の回の記録を作った後、NOWの再生成の前に停止しても、記録どおりの回を示す）。
+const current=list.find(i=>i.key===key)?effectiveSchedules((await readItemSchedules(vault)).records,id,list,activeResolutions(await readItemResolutions(vault),id)).byKey.get(key):undefined;
+if(!current?.due||!current.repeat)throw new Error('この項目には繰り返しが付いていません。item listで確かめてください');
+// 直前の回の記録がCLIの同じ回・同じ操作で、次の回の日付をまだ作れていなければ（記録後の停止）、同じ受付IDで再送して続きを作る。
+const due=current.due,last=(await readItemOccurrences(vault)).records.filter(o=>o.project_id===id&&o.item_key===key).at(-1);
+const resume=last&&last.source==='cli'&&last.due===due&&last.action===action&&last.source_event_id&&(await vault.read(`90_system/item-schedules/${last.schedule_id}.json`))===undefined;
+const event=resume?last.source_event_id!:`cli:${key}:round:${due}:${action}:${last?.id??'none'}`;
+const result=await completeOccurrence(c,{projectId:id,itemKey:key,action,due,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
 program.command('history [project]').description('プロジェクトの経緯HISTORY.mdを根拠と処理記録から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildHistories(await config(),id?{projectId:id}:{})));
 program.command('references [project]').description('プロジェクトの資料REFERENCES.md（AIが参考資料に分類したメモとURLの一覧）を整理結果から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildReferences(await config(),id?{projectId:id}:{})));
 const git=program.command('git').description('設定したローカルリポジトリのコミット履歴から作業記録の下書きを作る（既定は無効）');
@@ -140,6 +163,14 @@ program.command('find [query]').description('原文・アイデア・知識・NO
   .option('--kind <kinds>',`種類、カンマ区切り（${findKinds.join(', ')}）`).option('--since <date>','この日付（YYYY-MM-DD、JST）または日時以降').option('--until <date>','この日付（YYYY-MM-DD、JST）または日時以前')
   .addOption(new Option('--sort <order>','並び順。検索語がなければnewest').choices(['relevance','newest'])).option('--limit <n>','表示件数（1〜200、既定50）',positive).option('--offset <n>','先頭から飛ばす件数',(v:string)=>{const n=Number(v);if(!Number.isSafeInteger(n)||n<0)throw new Error('開始位置は0以上の整数にしてください');return n;})
   .action(async(query,opts)=>output(await find(await config(),query??'',{project:opts.project,kinds:opts.kind?.split(',').map((k:string)=>k.trim()).filter(Boolean) as FindKind[]|undefined,since:opts.since,until:opts.until,sort:opts.sort,limit:opts.limit,offset:opts.offset,pagingHint:true})));
+program.command('ask <question...>').description('記録だけを根拠に、問いへ引用付きで答える（AI生成・未検証。引用は記録と一致するものだけを残す）。整理と同じモデルを1回呼ぶ').option('--project <id>','このプロジェクトに帰属・関連する記録から答える').option('--dry-run','根拠の候補として渡す記録だけを表示。モデルは呼ばない').option('--json','JSONで出力')
+  .action(async(words:string[],opts)=>{const c=await config(),question=words.join(' ');
+  if(opts.dryRun){let project=opts.project as string|undefined;if(project!==undefined){const projects=await readProjects(c);if(!projects.some(p=>p.id===project))throw new Error('プロジェクトが見つかりません');project=resolveProject(projects,project);}
+   const chosen=selectAskSources(question,askSourcesFrom(await readEffectiveInputs(c),c),{project,limit:c.ask.maxSources});output(chosen.length?chosen.map(s=>`- ${s.ref} ${s.inputId} | ${s.occurredAt} | ${s.text.slice(0,80).replace(/\r?\n/g,' ')}`).join('\n'):'問いに近い記録が見つかりません');return;}
+  if(!c.ask.enabled)throw new Error('記録に聞くは無効です。設定のask.enabledをtrueにしてください');
+  const llm=c.organize.llm.provider==='mock'?new MockLlm():new OpenClawInferLlm(c.organize.llm),answer=await answerQuestion(c,llm,question,opts.project?{project:opts.project}:{});
+  if(opts.json){output({question,...answer});}else{const paths=new Map((await readEffectiveInputs(c)).flatMap(u=>[u.chain.root,...u.chain.revisions].map(i=>[i.id,i.path] as [string,string])));output(formatAnswer(question,answer,paths));}
+  if(answer.status==='failed')process.exitCode=1;});
 program.command('ingest').description('同期受付ファイルを正式保存').option('--limit <n>','受付操作の上限',positive).option('--dry-run','書き込みなし').action(async opts=>{const result=await ingest(await config(),{limit:opts.limit,dryRun:opts.dryRun});output(result);if(result.rejected)process.exitCode=1;});
 program.command('digest').description('直近の期間のふりかえりREVIEW.mdを生成').option('--days <n>','集計日数（既定は設定のretrieve.digestDays）',positive).action(async opts=>output(await rebuildDigest(await config(),opts.days?{days:opts.days}:{})));
 program.command('dashboard').description('プロジェクト一覧と処理状況のHOMEを生成').action(async()=>output(await rebuildDashboard(await config())));

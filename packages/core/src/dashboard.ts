@@ -3,7 +3,8 @@ import {rebuildPoliciesLocked,readPolicies} from './policies.js';
 import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions } from './item-resolutions.js';
-import { effectiveSchedules,readItemSchedules,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
+import { effectiveSchedules,readItemOccurrences,readItemSchedules,repeatLabel,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
+import { readAskRecords } from './ask.js';
 import { Vault,hash,parseMarkdown } from './storage.js';
 import { lifecycleOf,projectStatusLabels } from './project-status.js';
 import { decodeIntake } from './intake-format.js';
@@ -17,6 +18,7 @@ import { historyStopped,historyPath } from './history.js';
 import { referencesStopped,referencesPath,unassignedReferenceSection } from './references.js';
 import type { HubConfig, Input } from './types.js';
 import { describeFindings, findSecrets, secretSettings, writePrivacyPatternsLocked } from './secrets.js';
+import { writeCapabilitiesLocked } from './capabilities.js';
 import { rebuildIdeaIndexLocked, ideaSection } from './idea-links.js';
 import { rebuildUnassignedActionsLocked, unassignedActionsSection } from './unassigned-actions.js';
 import { insightsNotices, insightsSection, rebuildInsightsLocked } from './insights.js';
@@ -56,6 +58,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
  const clock=options.now??new Date();
  // アプリが「選んで深掘り」で同じ追加規則を当てられるよう、設定の伏せ字の規則を同期するファイルへ書く（内容が変わったときだけ）。
  await writePrivacyPatternsLocked(config,vault);
+ // 本体が受け付ける新しい依頼（定例・記録に聞く・好みをそろえる）をアプリへ知らせる（内容が変わったときだけ）。
+ await writeCapabilitiesLocked(config,vault);
  {
   // 不正なプロジェクト定義があると一覧・方針・候補を組み立てられない。どのファイルのどの項目かをHOMEに示して止める。
   const definitionIssues=(await inspectProjects(config)).issues;
@@ -106,7 +110,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      const schedule=i.resolution===null?scheduled.get(i.key):undefined;if(!schedule)continue;
      const {bucket,hidden}=scheduleBucket(schedule,today);
      if(hidden){resting++;front.add(i.key);}
-     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
+     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
     for(const s of loose)orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
@@ -177,6 +181,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const project of projects)if(await historyStopped(vault,project.id))errors.push(`- [経緯の更新が止まっています](${historyPath(project.id)}): ${plain(project.title)} — HISTORY.mdが手で変更されています。経緯は根拠から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const project of projects)if(await referencesStopped(vault,project.id))errors.push(`- [資料の更新が止まっています](${referencesPath(project.id)}): ${plain(project.title)} — REFERENCES.mdが手で変更されています。資料は整理結果から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
+  for(const path of (await readItemOccurrences(vault)).problems)errors.push(`- [定例の回の記録が不正です](${path})`);
+  for(const path of (await readAskRecords(vault)).problems)errors.push(`- [記録に聞くの問いと答えの記録が不正です](${path})`);
   // バックアップから復元できるかの確認結果。バックアップ先を設定していないか、確認したことがない間は何も出さない。
   let backupLine='';
   try{

@@ -23,6 +23,12 @@ export interface HubConfig {
    * maxCallsを2以上にしたときだけ、全文で渡すメモを複数回の呼び出しに分ける。
    */
   synthesis: { enabled: boolean; intervalDays: number; thinking: ThinkingLevel; timeoutSec: number; maxFocusMemos: number; maxContextMemos: number; maxCalls: number };
+  /**
+   * 記録に聞く（ctx ask・アプリの「記録に聞く」）。問いに近い記録を最大maxSources件選び、整理と同じモデルに記録だけを根拠に答えさせる。
+   * 答えの各文には根拠の記録の引用を付けさせ、引用が記録にそのまま含まれない文はコードが落とす。
+   * アプリからの問いはcycleで1回にmaxPerCycle件まで答え、直近24時間の呼び出しがdailyLimitに達したら次の日まで待たせる。
+   */
+  ask: { enabled: boolean; maxSources: number; timeoutSec: number; maxPerCycle: number; dailyLimit: number };
   /** 秘密情報らしい文字列（APIキー・トークン・パスワード等）を、モデルへ渡す前と別AI向けのcontextで伏せる。原文は変えない。 */
   privacy?: { redactSecrets: boolean; /** 追加の検出規則。labelは伏せ字に出す種類名、patternはJavaScriptの正規表現。 */ patterns: { label: string; pattern: string }[] };
 }

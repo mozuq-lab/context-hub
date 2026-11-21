@@ -105,6 +105,27 @@ node packages/core/dist/cli.js --config "<設定ファイル>" item schedule <pr
 
 アプリの対応版では`operation: item-schedule`の受付ファイル（`due`と`review_after`に変更後の全体、両方`null`で外す）として依頼します。指定ごとに`90_system/item-schedules/SCH-*.json`を残し、項目ごとに最後の記録を有効とします。項目一覧（`90_system/now-items/`）の各項目にも、そのときの日付を`schedule`として書きます。読めない記録はNOW・HOMEの生成を止めず、HOMEの「失敗と競合」と`doctor`で示します。
 
+### 定例（繰り返す期日）
+
+「毎週月曜にバックアップを確かめる」「月末に請求書を出す」のように繰り返す作業は、期日に**繰り返し**を付けて定例にできます。繰り返しは毎日・毎週・毎月と、N日・N週・Nか月ごと（Nは1〜12）から選び、期日のある項目にだけ付けられます。
+
+- 定例の項目の**今回を完了**にすると、その回の完了を記録し、項目は欄に残したまま期日を次の回へ進めます。**今回だけ見送る**ときも同じく次の回へ進めます。次の回は、今の期日から間隔ずつ進めて今日より後になった最初の日です（遅れて片付けても過ぎた回をためず、早めに片付けたときは次の回へ進みます）。
+- 毎月の繰り返しは、付けた期日の日を覚えます。31日のように短い月にない日は月末にし、次の月では元の日へ戻します（月末に丸めた期日のまま見直す日だけを変えても、覚えた日は変わりません）。
+- 次の回には見直す日を引き継ぎません（見直す日はその回のためのものなので、必要なら次の回で付け直します）。次の回の期日が2099年を超えるときは進めず、理由を返します。
+- 今回の完了・見送りは、本人が確認した回の期日を添えて依頼します。今の期日と違えば受け付けません（2台の端末から同じ回を片付けても、2回分は進めません）。
+- 定例をやめるときは、繰り返しを外すか、ふつうの完了・解決の報告で項目を片付けます。
+- NOWの行末とHOMEには「期日 2026-11-23（毎週）」のように示し、経緯（HISTORY.md）には各回の完了・見送りを載せます。
+
+```sh
+node packages/core/dist/cli.js --config "<設定ファイル>" item schedule <project-id> <key> --due 2026-11-23 --repeat weekly --confirm
+node packages/core/dist/cli.js --config "<設定ファイル>" item schedule <project-id> <key> --repeat 2w --confirm     # 2週ごと（14d・3mなども使える）
+node packages/core/dist/cli.js --config "<設定ファイル>" item done-round <project-id> <key> --confirm                # 今回を完了
+node packages/core/dist/cli.js --config "<設定ファイル>" item skip-round <project-id> <key> --confirm                # 今回だけ見送る
+node packages/core/dist/cli.js --config "<設定ファイル>" item schedule <project-id> <key> --repeat none --confirm   # 繰り返しを外す
+```
+
+アプリの対応版では、`operation: item-schedule`の受付ファイルに`repeat`（`{unit: day|week|month, every: 1〜12}`、`null`で外す）を添え、今回の完了・見送りは`operation: item-occurrence`（`action: done|skip`と、確認した回の`due`）で依頼します。`repeat`を省いた依頼（繰り返しを知らない版のアプリ）は、今の繰り返しを保ちます。回の記録は`90_system/item-occurrences/OCC-*.json`に残し、次の回の期日は新しい`SCH-*.json`として付けます。
+
 ## コミット履歴からの作業記録の下書き
 
 既定では無効です。設定ファイルで本人が指定したローカルリポジトリだけを、Mac miniで読み取り専用で参照します。
