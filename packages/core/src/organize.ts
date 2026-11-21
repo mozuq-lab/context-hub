@@ -19,6 +19,7 @@ import { PromptTooLargeError } from './infer.js';
 import { candidateProjects } from './project-status.js';
 import { completeRedacted, redactText, secretSettings } from './secrets.js';
 import { shortMemoText } from './short-memo.js';
+import { evidenceBound } from './happened.js';
 
 export interface OrganizeOptions { limit?: number; dryRun?: boolean; retryFailed?: boolean; id?: string }
 export interface OrganizeRunResult { processed: number; failed: number; skipped: number; conflicts: string[]; dryRun: boolean; inputIds: string[]; recovered?:number; reassociated?:number; /** 本人が誤りとして外した項目の入力を読み直した件数。 */ reread?:number }
@@ -91,14 +92,14 @@ async function openItemsFor(vault: Vault, chain: CorrectionChain, projects: Proj
   let list;
   try { list = await readNowItems(vault, projectId); } catch { return []; }
   const own = new Set([chain.root, ...chain.revisions].map(i => i.id)), at = new Map(inputs.map(i => [i.id, Date.parse(i.occurred_at)]));
-  const memoAt = Date.parse(chain.root.occurred_at), itemAt = (id: string) => at.get(id) ?? Number.NEGATIVE_INFINITY;
+  const memoAt = evidenceBound(chain.root), itemAt = (id: string) => at.get(id) ?? Number.NEGATIVE_INFINITY;
   const candidates = (list?.items ?? []).filter(i => i.resolution === null && !own.has(i.input_id) && itemAt(i.input_id) <= memoAt);
   const ordered = [...candidates.filter(i => i.section === 'next'), ...candidates.filter(i => i.section === 'open').sort((a, b) => itemAt(b.input_id) - itemAt(a.input_id))];
   return ordered.slice(0, OPEN_ITEMS_MAX)
     .map((i, index) => ({ ref: `i${index + 1}`, key: i.key, section: i.section, text: `${i.label}${i.text}`.slice(0, OPEN_ITEM_CHARS) }));
 }
 function evidenceText(input: Input, config: HubConfig, prefix: string): string {
-  return `入力: [${input.id}](${prefix}${input.path})\n出典: ${input.source}${input.tool ? ` / ${input.tool}` : ''}\n発生日時: ${dateLabel(input.occurred_at, config.timezone)} ${config.timezone}\n受信日時: ${dateLabel(input.received_at, config.timezone)} ${config.timezone}\n性質: ${input.origin}（未検証）\n`;
+  return `入力: [${input.id}](${prefix}${input.path})\n出典: ${input.source}${input.tool ? ` / ${input.tool}` : ''}\n${input.happened_on !== undefined && input.recorded_at !== undefined ? `出来事の日付: ${input.happened_on}（本人が指定）\n記録日時: ${dateLabel(input.recorded_at, config.timezone)} ${config.timezone}\n` : `発生日時: ${dateLabel(input.occurred_at, config.timezone)} ${config.timezone}\n`}受信日時: ${dateLabel(input.received_at, config.timezone)} ${config.timezone}\n性質: ${input.origin}（未検証）\n`;
 }
 
 async function readJournal(vault: Vault, inputId: string): Promise<Receipt | undefined> {

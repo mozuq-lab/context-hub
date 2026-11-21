@@ -5,6 +5,7 @@ import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, PROJECT_TITLE_CHARS } from './pr
 import { projectStatusSchema } from './project-status.js';
 import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema } from './item-resolutions.js';
 import { scheduleDateSchema } from './item-schedules.js';
+import { calendarDateSchema } from './happened.js';
 import { parseMarkdown } from './storage.js';
 import { newProjectIdSchema, projectCreateFieldsSchema } from './project-creations.js';
 import { resolvableTargetSchema } from './conflicts.js';
@@ -16,7 +17,8 @@ import { PERSON_ALIASES_MAX, PERSON_NAME_CHARS, personActions, personIdSchema } 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
 const base = { schema_version: z.literal(1), request_id: requestIdSchema, source: z.string().min(1).max(200), occurred_at: intakeTimestamp };
-const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), text: z.string() }).strict();
+// happened_onは本人が後から記録した出来事の日付。occurred_atは実際に書いた日時のまま送る。
+const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), text: z.string() }).strict();
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
 // cover_idsは、同じ対象の案として同じ判断にまとめる確認待ちの案。cover_hashesは同じ順で、本人が確認した内容のハッシュ。本体が同じ組の案かを検証する。
 const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), cover_ids: z.array(z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), cover_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), confirmed: z.literal(true), text: z.string() }).strict().refine(v => (v.cover_ids?.length ?? 0) === (v.cover_hashes?.length ?? 0), 'まとめる案のIDとハッシュの数が一致しません');
@@ -48,7 +50,9 @@ const insightReaction=z.object({...base,operation:z.literal('insight-reaction'),
 // 人の登録（add）・名前と呼び名の変更（edit）・外す（remove）。変更と外すは、本人が確認したperson.mdのハッシュに結び付ける。
 const personDefinition=z.object({...base,operation:z.literal('person-definition'),person_id:personIdSchema,action:z.enum(personActions),person_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),name:z.string().max(PERSON_NAME_CHARS).optional(),aliases:z.array(z.string().max(PERSON_NAME_CHARS)).max(PERSON_ALIASES_MAX).optional(),confirmed:z.literal(true),text:z.string()}).strict()
  .refine(v=>v.action==='add'?v.person_hash===undefined&&v.name!==undefined:v.person_hash!==undefined&&(v.action==='edit'?v.name!==undefined&&v.aliases!==undefined:v.name===undefined&&v.aliases===undefined),'人の定義の依頼の項目が操作と合いません');
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, personDefinition]);
+// 採用した方針を本人が「まだ有効」と確かめた。ハッシュは確かめた時点の知識のファイルのもの。
+const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, policyKeep, personDefinition]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
