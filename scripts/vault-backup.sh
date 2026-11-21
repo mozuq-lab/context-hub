@@ -52,11 +52,12 @@ physical_directory_path() {
 VAULT=$(physical_directory_path "$VAULT")
 DEST=$(physical_directory_path "$DEST")
 # 大小文字を同一視するファイルシステムでも、同じディレクトリを親に持つ場所を拒否する。
-reject_inside_vault() {
+# reject_inside <場所> <基準のフォルダー> <メッセージ>
+reject_inside() {
   ctx_ancestor=$1
   while :; do
-    if [ "$ctx_ancestor" -ef "$VAULT" ]; then
-      echo "$2がVaultの中です: $1" >&2
+    if [ "$ctx_ancestor" -ef "$2" ]; then
+      echo "$3: $1" >&2
       exit 2
     fi
     [ "$ctx_ancestor" != / ] || break
@@ -64,14 +65,22 @@ reject_inside_vault() {
     [ -n "$ctx_ancestor" ] || ctx_ancestor=/
   done
 }
-reject_inside_vault "$DEST" 保存先
+reject_inside "$DEST" "$VAULT" 保存先がVaultの中です
 if [ -n "$RECIPIENTS" ]; then
   WORK_PARENT=$(physical_directory_path "$WORK_PARENT")
   [ -d "$WORK_PARENT" ] || { echo "一時フォルダーが見つかりません: $WORK_PARENT" >&2; exit 2; }
   # 暗号化の前の平文を、同期されるVaultや、別の場所へ複製するかもしれない保存先に置かない。
-  reject_inside_vault "$WORK_PARENT" 一時フォルダー
+  reject_inside "$WORK_PARENT" "$VAULT" 一時フォルダーがVaultの中です
+  # 保存先がまだないときは、パスの文字列で比べる。
   case "$WORK_PARENT/" in "$DEST"/*) echo "一時フォルダーが保存先の中です: $WORK_PARENT" >&2; exit 2;; esac
+  reject_inside "$WORK_PARENT" "$DEST" 一時フォルダーが保存先の中です
+  # 電源断などで前回の後片付けができずに残った平文（2日以上前のもの）を消す。
+  find "$WORK_PARENT" -maxdepth 1 -type d -name 'ctx-backup-??????' -user "$(id -u)" -mtime +1 -exec rm -rf {} + 2>/dev/null || true
 fi
+# 中断（Ctrl-C・launchdの停止など）でも、EXITの後片付けで一時ファイルと平文を消してから終わる。
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 mkdir -p "$DEST"
 TS=$(date +%Y%m%d-%H%M%S)
 # 書き込み途中の一時ファイルは除外する。原文は一時ファイル→renameで公開されるため、tarには完成したファイルだけが入る。

@@ -112,7 +112,7 @@ launchd例を使う場合は、EnvironmentVariablesの`__VAULT_PATH__`と`__BACK
    CTX_VAULT="<Vaultの絶対パス>" CTX_BACKUP_DIR="<Vault外のバックアップ先>" CTX_BACKUP_AGE_RECIPIENTS="<公開鍵のファイル>" sh scripts/vault-backup.sh
    ```
 
-   `vault-YYYYMMDD-HHMMSS.tar.gz.age`ができます。スクリプトは、平文のtar.gzを一時フォルダー（`CTX_BACKUP_WORK_DIR`、既定はOSの一時フォルダー）で作って読めることを確かめ、暗号化したものだけを保存先へ置き、平文は消します。一時フォルダーがVaultや保存先の中にあるとき、受取人のファイルに秘密鍵が入っているとき、公開鍵がないとき、ageが見つからないときは、何も作らずに止めます。launchdはPATHが短いため、EnvironmentVariablesに`CTX_BACKUP_AGE_RECIPIENTS`と、`CTX_BACKUP_AGE`（ageの絶対パス。例: `/opt/homebrew/bin/age`）を追加します。保持日数は、暗号化したものとしないものの両方に同じように当てます。
+   `vault-YYYYMMDD-HHMMSS.tar.gz.age`ができます。スクリプトは、平文のtar.gzを一時フォルダー（`CTX_BACKUP_WORK_DIR`、既定はOSの一時フォルダー）で作って読めることを確かめ、暗号化したものだけを保存先へ置き、平文は消します。途中で止められた（Ctrl-C・launchdの停止など）ときも平文を消してから終わり、電源断などで残った2日以上前の平文（`ctx-backup-`で始まるフォルダー）は次の実行で消します。一時フォルダーがVaultや保存先の中にあるとき、受取人のファイルに秘密鍵が入っているとき、公開鍵がないとき、ageが見つからないときは、何も作らずに止めます。launchdはPATHが短いため、EnvironmentVariablesに`CTX_BACKUP_AGE_RECIPIENTS`と、`CTX_BACKUP_AGE`（ageの絶対パス。例: `/opt/homebrew/bin/age`）を追加します。保持日数は、暗号化したものとしないものの両方に同じように当てます。
 
 4. 暗号化したバックアップを`backup verify`で確かめるには、設定に秘密鍵のファイルを書きます。設定がなければ、暗号化したアーカイブは「確かめられない」として、確認結果を記録せずに止まります（終了コードは0以外です）。
 
@@ -120,7 +120,7 @@ launchd例を使う場合は、EnvironmentVariablesの`__VAULT_PATH__`と`__BACK
    "backup": { "dir": "<Vault外のバックアップ先>", "verifyMaxAgeDays": 7, "ageIdentity": "<秘密鍵のファイル>", "ageCommand": "/opt/homebrew/bin/age" }
    ```
 
-   `ageIdentity`はVaultの中にもバックアップ先の中にも設定できません。`ageCommand`は省略すると`age`です。確認ではageで復号した出力をそのまま展開し、平文のアーカイブをファイルとしては残しません。鍵が違う、壊れている、途中で切れているアーカイブは「暗号化したアーカイブを復号できません」として、復元できない確認として記録します。復号できたときの確認の内容は、暗号化しないアーカイブと同じです。HOMEの1行は「最後に確かめた復元点: 2026-11-01 03:30の暗号化したバックアップ（…）」になり、確認記録に`encrypted: true`を残します。秘密鍵の中身と場所は記録しません。
+   `ageIdentity`はVaultの中にもバックアップ先の中にも設定できません。`ageCommand`は省略すると`age`です。確認ではageで復号した出力をそのまま展開し、平文のアーカイブをファイルとしては残しません。鍵が違う、壊れている、途中で切れているアーカイブは「暗号化したアーカイブを復号できません」として、復元できない確認として記録します。復号できたときの確認の内容は、暗号化しないアーカイブと同じです。HOMEの1行は「最後に確かめた復元点: 2026-11-01 03:30の暗号化したバックアップ（…）」になり、確認記録に`encrypted: true`を残します。秘密鍵の中身と場所は記録しません。パスフレーズで守った秘密鍵は無人の確認では入力できないため、`ageIdentity`には指定できません（確認を始める前に止めます）。
 
 秘密鍵をMac miniに置くと、Mac miniを使える人は暗号化したバックアップも読めます。Mac miniにはもともと平文のVaultがあるため、暗号化で守るのは、Mac miniの外に置いたバックアップです。`backup verify`をMac miniで動かさない場合は、`ageIdentity`を書かず、秘密鍵のある別のMacでバックアップを写してから確かめることもできます。
 

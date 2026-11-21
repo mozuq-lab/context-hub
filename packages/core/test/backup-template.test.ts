@@ -1,9 +1,9 @@
 import { expect, test } from 'vitest';
-import { access, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const backupScript = fileURLToPath(new URL('../../../scripts/vault-backup.sh', import.meta.url));
 
@@ -151,6 +151,26 @@ test.skipIf(process.platform === 'win32' || !hasAge)('受取人の公開鍵を�
     const restored = spawnSync('tar', ['-xOzf', '-', './00_inbox/sample.md'], { input: plain.stdout, encoding: 'utf8' });
     expect(restored.stdout).toBe('架空の原文\n');
     expect((await readdir(vault)).sort()).toEqual(['00_inbox']);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === 'win32' || !hasAge)('暗号化の途中で止められても平文を残さず、前回の残りの平文も片付ける', async () => {
+  const folder = await mkdtemp(join(tmpdir(), 'ctx-backup-age-stop-'));
+  try {
+    const { backups, work, env } = await encryptedSetup(folder);
+    // 電源断などで残った2日以上前の平文と、他の名前のフォルダー。
+    const stale = join(work, 'ctx-backup-abcdef'), other = join(work, 'keep-me');
+    await mkdir(stale); await writeFile(join(stale, 'vault.tar.gz'), 'x'); await mkdir(other);
+    const old = new Date(Date.now() - 3 * 24 * 3600 * 1000); await utimes(stale, old, old);
+    // 暗号化に時間がかかる間に止められる（ageの代わりに待つだけのコマンド）。
+    const slow = join(folder, 'slow-age.sh'); await writeFile(slow, '#!/bin/sh\nsleep 1\nexit 1\n'); await chmod(slow, 0o755);
+    const child = spawn('/bin/sh', [backupScript], { env: { ...env, CTX_BACKUP_AGE: slow }, stdio: 'ignore' });
+    const exited = new Promise<number | null>(done => child.once('close', code => done(code)));
+    for (let i = 0; i < 100 && !(await readdir(work)).some(n => /^ctx-backup-.{6}$/.test(n) && n !== 'ctx-backup-abcdef'); i++) await new Promise(r => setTimeout(r, 20));
+    child.kill('SIGTERM');
+    expect(await exited).not.toBe(0);
+    expect(await readdir(work)).toEqual(['keep-me']);
+    expect((await readdir(backups).catch(() => [])).filter(n => n.includes('.tmp'))).toEqual([]);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 

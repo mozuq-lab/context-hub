@@ -208,6 +208,8 @@ export async function extractArchive(archive: string, dest: string, limits: Extr
   };
   // 暗号化したアーカイブはageで復号した出力を解凍する。ageは認証できた部分だけを書き出し、鍵違い・改ざん・途中で切れたものは0以外で終わる。
   let age: ReturnType<typeof spawn> | undefined, ageExit: Promise<number | 'spawn-error'> | undefined;
+  // ageの出力が終わったか。終わる前にこちらから止めたときは、ageの終わり方を復号の失敗として扱わない。
+  let ageOutputClosed = false, ageStopped = false;
   const ageFailed = () => new BackupArchiveError('暗号化したアーカイブを復号できません（鍵が違う、壊れている、または途中で切れています）');
   const ageMissing = () => new AgeCommandError(`ageのコマンドを起動できません（${decrypt!.command}）。設定のbackup.ageCommandにageの絶対パスを指定してください`);
   try {
@@ -216,6 +218,7 @@ export async function extractArchive(archive: string, dest: string, limits: Extr
       age = spawn(decrypt.command, ['-d', '-i', decrypt.identity, archive], { stdio: ['ignore', 'pipe', 'ignore'] });
       const child = age;
       ageExit = new Promise(done => { child.once('error', () => done('spawn-error')); child.once('close', code => done(code ?? 1)); });
+      child.stdout!.once('close', () => { ageOutputClosed = true; });
       // 読み込み側の失敗も解凍側へ伝え、反復を止める。
       pipeline(child.stdout!, gunzip, () => undefined);
     } else pipeline(createReadStream(archive), gunzip, () => undefined);
@@ -269,13 +272,21 @@ export async function extractArchive(archive: string, dest: string, limits: Extr
         if (!size && !padding) await finish();
       }
     }
+    // 解凍し終えた後に残る出力があっても、ageが書き込めずに失敗しないよう読み捨てる。
+    age?.stdout?.resume();
     if (ageExit) { const exit = await ageExit; if (exit === 'spawn-error') throw ageMissing(); if (exit !== 0) throw ageFailed(); }
   } catch (error) {
     if (current?.handle) await current.handle.close().catch(() => undefined);
-    if (age && age.exitCode === null && age.signalCode === null) age.kill();
-    if (error instanceof BackupArchiveError || error instanceof AgeCommandError) throw error;
-    // 復号が途中で止まると、解凍側は「途中で切れた」と見える。ageの終わり方を先に見て、起動できなかったのか復号できなかったのかを示す。
-    if (ageExit) { const exit = await ageExit; if (exit === 'spawn-error') throw ageMissing(); if (exit !== 0) throw ageFailed(); }
+    if (error instanceof AgeCommandError) throw error;
+    if (age && ageExit) {
+      // ageがまだ書いている途中なら、こちらの失敗（書き込み先の容量不足・上限超えなど）で止めたもの。
+      if (!ageOutputClosed && age.exitCode === null && age.signalCode === null) { ageStopped = true; age.kill(); }
+      // 復号が途中で止まると、解凍側は「途中で切れた」と見える。ageが自分で失敗したときは、起動できなかったのか復号できなかったのかを示す。
+      const exit = await ageExit;
+      if (exit === 'spawn-error') throw ageMissing();
+      if (exit !== 0 && !ageStopped) throw ageFailed();
+    }
+    if (error instanceof BackupArchiveError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     // 圧縮の破損・途中で切れたファイルはzlibのエラーになる。展開先への書き込みの失敗などはそのまま伝える。
     if (typeof code === 'string' && (code.startsWith('Z_') || code === 'ERR_BUFFER_TOO_LARGE')) throw new BackupArchiveError('アーカイブの圧縮を解けません（壊れているか、途中で切れています）');
@@ -320,6 +331,11 @@ export async function verifyBackup(config: HubConfig, options: BackupVerifyOptio
     if (!settings.ageIdentity) throw new Error('暗号化したバックアップ（.tar.gz.age）を確かめるには、設定のbackup.ageIdentityにageの秘密鍵のファイルを指定してください');
     let key; try { key = await lstat(settings.ageIdentity); } catch { throw new Error('設定のbackup.ageIdentityの秘密鍵のファイルを読めません'); }
     if (!key.isFile()) throw new Error('設定のbackup.ageIdentityが通常のファイルではありません');
+    // 先頭を読んで、読めるか・パスフレーズで守った鍵（無人では入力できず止まる）でないかを、展開の前に確かめる。
+    let head: string;
+    try { const handle = await open(settings.ageIdentity, 'r'); try { const buf = Buffer.alloc(64); const { bytesRead } = await handle.read(buf, 0, 64, 0); head = buf.subarray(0, bytesRead).toString('utf8'); } finally { await handle.close(); } }
+    catch { throw new Error('設定のbackup.ageIdentityの秘密鍵のファイルを読めません'); }
+    if (head.startsWith('age-encryption.org/')) throw new Error('設定のbackup.ageIdentityはパスフレーズで守った鍵です。確認には、パスフレーズなしの秘密鍵のファイルを指定してください');
     decrypt = { command: settings.ageCommand, identity: settings.ageIdentity };
   }
   const parent = await realpath(resolve(options.workDir ?? tmpdir()));

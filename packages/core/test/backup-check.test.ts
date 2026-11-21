@@ -329,7 +329,9 @@ async function encryptedArchiveOf(config: HubConfig, backups: string, recipient:
 test.skipIf(!hasAge)('暗号化したバックアップを秘密鍵で復号して確かめ、HOMEに暗号化したバックアップとして示す', async () => {
   const { config, vault, backups } = await fixture();
   const { identity, recipient } = await ageKeys();
-  archiveOf(config, backups, stamp(3));
+  // 名前は1回だけ決める（時刻をまたいで作り直すと、別の名前になることがある）。
+  const plainName = stamp(3);
+  archiveOf(config, backups, plainName);
   const name = stamp(1).replace(/\.tar\.gz$/, '.tar.gz.age'), archive = await encryptedArchiveOf(config, backups, recipient, name);
   // 暗号化したものと、しないものが混ざっていても、いちばん新しいものを選ぶ。
   expect(await latestArchive(backups)).toBe(archive);
@@ -345,7 +347,7 @@ test.skipIf(!hasAge)('暗号化したバックアップを秘密鍵で復号し�
   await rebuildDashboard(encrypted);
   expect((await vault.read('HOME.md'))!).toMatch(/\n最後に確かめた復元点: \d{4}-\d{2}-\d{2} \d{2}:\d{2}の暗号化したバックアップ（0日前 \/ 今日復元できることを確認）\n/);
   // 暗号化していないアーカイブの記録には、encryptedを書かない。
-  const plainCheck = await verifyBackup(encrypted, { archive: join(backups, stamp(3)), workDir: work });
+  const plainCheck = await verifyBackup(encrypted, { archive: join(backups, plainName), workDir: work });
   expect(plainCheck.check.status).toBe('ok');
   expect(plainCheck.check).not.toHaveProperty('encrypted');
 });
@@ -369,6 +371,17 @@ test.skipIf(!hasAge)('鍵が違う・壊れた・途中で切れた暗号化ア�
   expect(await readdir(work)).toEqual([]);
 });
 
+test.skipIf(!hasAge)('復号の途中でこちらが止めたとき（展開の上限など）は、復号の失敗ではなく、止めた理由を示す', async () => {
+  const { config, backups } = await fixture();
+  const { identity, recipient } = await ageKeys();
+  const archive = await encryptedArchiveOf(config, backups, recipient, 'vault-20261110-033000.tar.gz.age');
+  const decrypt = { command: 'age', identity };
+  await expect(extractArchive(archive, await tempDir(), { maxFiles: 1, maxBytes: 1024 ** 3 }, decrypt)).rejects.toThrow('エントリー数が上限');
+  await expect(extractArchive(archive, await tempDir(), { maxFiles: 1000, maxBytes: 8 }, decrypt)).rejects.toThrow('展開後の大きさが上限');
+  // 止めずに最後まで読めば、復号して展開できる。
+  expect((await extractArchive(archive, await tempDir(), undefined, decrypt)).files).toBeGreaterThan(0);
+});
+
 test('暗号化したバックアップは、秘密鍵やageがなければ「復元できない」とは記録せずに止める', async () => {
   const { config, vault, backups } = await fixture();
   // 中身は問わない（鍵がない・コマンドがないことを、復号の前に見つける）。
@@ -377,6 +390,10 @@ test('暗号化したバックアップは、秘密鍵やageがなければ「�
   const work = await tempDir();
   await expect(verifyBackup(config, { workDir: work })).rejects.toThrow('backup.ageIdentity');
   await expect(verifyBackup({ ...config, backup: { ...config.backup!, ageIdentity: join(work, 'none.txt') } }, { workDir: work })).rejects.toThrow('秘密鍵のファイルを読めません');
+  // パスフレーズで守った鍵は、無人の確認では入力できずに止まるため、展開の前に断る。
+  const locked = join(work, 'locked.txt'); await writeFile(locked, 'age-encryption.org/v1\n-> scrypt 架空\n');
+  await expect(verifyBackup({ ...config, backup: { ...config.backup!, ageIdentity: locked } }, { archive, workDir: work })).rejects.toThrow('パスフレーズ');
+  await rm(locked);
   const key = join(work, 'key.txt'); await writeFile(key, '# 架空の鍵\n');
   const missing: HubConfig = { ...config, backup: { ...config.backup!, ageIdentity: key, ageCommand: join(work, 'no-such-age') } };
   await expect(verifyBackup(missing, { archive, workDir: work })).rejects.toThrow(AgeCommandError);
