@@ -14,7 +14,8 @@ export function effectiveFromChains(chains: CorrectionChain[], receipts: Receipt
   const byId = new Map(receipts.map(r => [r.input_id,r]));
   return chains.map(chain => {
     const receipt = [chain.root,...chain.revisions].map(i => byId.get(i.id)).filter((r):r is Receipt => r?.status === 'organized').at(-1);
-    return { chain,receipt,pendingCorrection:chain.revisions.length > 0 && receipt?.input_id !== chain.latest.id };
+    // 行動（action）は整理せず最新の文面をそのまま使うため、訂正は届いた時点で反映済みとする。
+    return { chain,receipt,pendingCorrection:chain.root.kind !== 'action' && chain.revisions.length > 0 && receipt?.input_id !== chain.latest.id };
   });
 }
 // Writerへ渡された同じスナップショットから有効解釈を選ぶ。

@@ -47,7 +47,8 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   /** 期間開始の時点で有効だった解釈。開始までに届いた根拠のうち、最後に整理されたものを使う。 */
   // NOW・経緯と同じく、原文の印と照合した結果を使う（古い・手で変えた処理記録のモデルの申告をそのまま信じない）。
   const resultThen = (u: Unit) => evidenceOf(u).filter(i => before(i.received_at)).flatMap(i => { const r = organizedById.get(i.id)?.result; return r ? [groundedResult(u.unit.chain, i.id, r)] : []; }).at(-1);
-  const state = (u: Unit) => { const latest = receipts.find(r => r.input_id === u.unit.chain.latest.id); return latest?.status === 'organized' ? 'organized' : latest?.status === 'failed' ? 'failed' : 'waiting'; };
+  // 本人が直接追加した行動はモデルで整理しないため、整理済み・整理待ちとは分けて数える。
+  const state = (u: Unit) => { if (u.input.kind === 'action') return 'action'; const latest = receipts.find(r => r.input_id === u.unit.chain.latest.id); return latest?.status === 'organized' ? 'organized' : latest?.status === 'failed' ? 'failed' : 'waiting'; };
   const count = (status: string) => recent.filter(u => state(u) === status).length;
   const ref = (input: Input) => `[${input.id}](${input.path})`;
   const label = (iso: string) => `${dateLabel(iso, config.timezone)}`;
@@ -68,7 +69,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     ...(insights ? [insights, ''] : []),
     ...(feedback ? [feedback, ''] : []),
     '## 概要',
-    `- この期間に届いた入力: ${recent.length}件（整理済み ${count('organized')} / 整理待ち ${count('waiting')} / 整理失敗 ${count('failed')}）`,
+    `- この期間に届いた入力: ${recent.length}件（整理済み ${count('organized')} / 整理待ち ${count('waiting')} / 整理失敗 ${count('failed')}${count('action') ? ` / 本人が追加した行動 ${count('action')}` : ''}）`,
     `- プロジェクト未帰属（整理済みのうち）: ${unassigned}件`,
     `- 確認待ちの候補: ${pending.length}件（うち期間より前から残っているもの ${lingering.length}件）`,
     '- 失敗・競合の詳細は[HOME](HOME.md)を参照してください。', '',
@@ -92,7 +93,8 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const byOccurred = (a: Unit, b: Unit) => Date.parse(a.input.occurred_at) - Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id);
     const summaries = mine.filter(u => u.input.kind === 'work-summary').sort(byOccurred);
     const latestNow = summaries.at(-1), latestThen = summaries.filter(u => resultThen(u)).at(-1), thenResult = latestThen ? resultThen(latestThen) : undefined;
-    const out = [`### ${head}`, `- 新しい入力: ${fresh.length}件（作業要約 ${fresh.filter(u => u.input.kind === 'work-summary').length} / メモ ${fresh.filter(u => u.input.kind === 'memo').length}${fresh.some(corrected) ? ` / うち期間内の訂正 ${fresh.filter(corrected).length}` : ''}）`];
+    const added = fresh.filter(u => u.input.kind === 'action' && inWindow(u.input.received_at));
+    const out = [`### ${head}`, `- 新しい入力: ${fresh.length}件（作業要約 ${fresh.filter(u => u.input.kind === 'work-summary').length} / メモ ${fresh.filter(u => u.input.kind === 'memo').length}${added.length ? ` / 行動 ${added.length}` : ''}${fresh.some(corrected) ? ` / うち期間内の訂正 ${fresh.filter(corrected).length}` : ''}）`];
     for (const [title, key] of [['現在地', 'current'], ['次の一手', 'next']] as const) {
       const then = thenResult ? confirmed(thenResult.extracted[key]) : [], current = latestNow ? confirmed(groundedResult(latestNow.unit.chain, latestNow.unit.receipt!.input_id, latestNow.unit.receipt!.result!).extracted[key]) : [];
       const change = diff(then, current);
@@ -100,6 +102,12 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
       out.push(`- ${title}の変化（${latestNow ? ref(latestNow.input) : '根拠なし'}）:`);
       for (const text of change.added.slice(0, 10)) out.push(`  - 追加: ${clip(text)}`);
       for (const text of change.removed.slice(0, 10)) out.push(`  - 外れた: ${clip(text)}`);
+    }
+    // 期間内に本人が次の一手へ追加した行動と、そのうち今も完了の報告が有効なもの。
+    if (added.length) {
+      const text = (u: Unit) => u.unit.chain.latest.text, done = (u: Unit) => resolvedNow.get(itemKey(project.id, 'next', u.input.id, text(u)))?.action === 'resolve';
+      out.push(`- 期間内に本人が追加した行動: ${added.length}件（うち完了 ${added.filter(done).length}件）`);
+      for (const u of [...added].sort((a, b) => Date.parse(b.input.received_at) - Date.parse(a.input.received_at)).slice(0, 5)) out.push(`  - ${done(u) ? '完了' : '未完了'}: ${clip(text(u))} ${ref(u.input)}`);
     }
     if (closed.length) {
       out.push(`- 期間内に完了・解決と報告した項目: ${closed.length}件`);
@@ -113,7 +121,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     if (fresh.length) out.push('- 主な入力:');
     const lastReceived = (u: Unit) => Math.max(...evidenceOf(u).filter(i => inWindow(i.received_at)).map(i => Date.parse(i.received_at)));
     for (const u of [...fresh].sort((a, b) => lastReceived(b) - lastReceived(a)).slice(0, 5)) {
-      const summary = u.unit.receipt?.result?.summary;
+      const summary = u.input.kind === 'action' ? `本人が追加した行動: ${u.unit.chain.latest.text}` : u.unit.receipt?.result?.summary;
       out.push(`  - ${ref(u.input)} ${inputWhen(u.input, label)} ${summary ? clip(summary) : `（${state(u) === 'failed' ? '整理失敗' : '整理待ち'}）`}${corrected(u) ? ' / 期間内に訂正' : ''}${u.unit.pendingCorrection ? ' / 訂正未反映' : ''}${u.input.project !== project.id ? ' / 関連候補（AI推定）' : ''}`);
     }
     const carried = mine.filter(u => before(u.input.received_at)).sort(byOccurred).flatMap(u => {

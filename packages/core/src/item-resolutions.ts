@@ -44,6 +44,8 @@ const nowItemSchema = z.object({
   schedule: z.object({ id: z.string().regex(/^SCH-[0-9A-HJKMNP-TV-Z]{26}$/), due: z.string().nullable(), review_after: z.string().nullable(), repeat: z.object({ unit: z.enum(['day', 'week', 'month']), every: z.number().int().min(1).max(12), day: z.number().int().min(1).max(31).optional() }).strict().optional() }).strict().nullable().optional(),
   // 本人がプロジェクトを指定したメモから、AIが「片付いたかも」と示したもの。未確認で、完了・解決ではない。片付いていない項目にだけ付く。
   hints: z.array(z.object({ input_id: inputIdSchema, quote: z.string().min(1).max(200), at: z.string().datetime({ offset: true }) }).strict()).max(20).optional(),
+  // 本人が直接追加した行動（入力の種類action）。fromはAIが読み取った行を行動にしたときの元の行（根拠の入力ID・直す前の本文・項目キー）。旧版の一覧にはない。
+  action: z.object({ from: z.object({ input_id: inputIdSchema, text: z.string().min(1).max(2000), key: digest.optional() }).strict().optional() }).strict().optional(),
 }).strict();
 export type NowItem = z.infer<typeof nowItemSchema>;
 export const nowItemsSchema = z.object({ schema_version: z.literal(1), project: projectIdSchema, generated_at: z.string().datetime({ offset: true }), items: z.array(nowItemSchema) }).strict();
@@ -227,6 +229,8 @@ export async function setItemResolution(config: HubConfig, request: ItemResoluti
     const active = activeResolutions(records, r.projectId).get(r.itemKey);
     if (r.action !== 'reopen' && active) throw new ItemTargetError({ code: 'item-closed', state: active.action === 'exclude' ? 'excluded' : 'resolved' }, active.action === 'exclude' ? 'この項目は既に誤りとして外しています。変えるときは未解決に戻してから操作してください' : 'この項目は既に解決済みです');
     if (r.action === 'reopen' && !active) throw new ItemTargetError({ code: 'item-open' }, 'この項目は解決済みではありません');
+    // 本人が追加した行動はAIの読み取りではないため、読み違い・別のプロジェクトの話としては外さない（その例をモデルへ渡さないため）。
+    if (r.action === 'exclude' && item.action && r.reason !== 'outdated') throw new Error('本人が追加した行動は、「もう古い」としてだけ外せます（読み違い・別のプロジェクトの話はAIの読み取りに使います）');
     const record: ItemResolution = {
       schema_version: 1, id: `RES-${ulid()}`, project_id: r.projectId, item_key: r.itemKey, section: item.section, text: item.text, input_id: item.input_id,
       action: r.action, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),

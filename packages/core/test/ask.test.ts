@@ -152,3 +152,12 @@ test('アプリの問いを受付で答え待ちにし、cycleで答え、上限
   await runCycle(off, new MockLlm());
   expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).ask).toEqual({ enabled: false, max_question_chars: 500 });
 });
+
+test('本人が直接追加した行動は記録ではないので、問いの根拠にしない', async () => {
+  const { config } = await fixture();
+  await capture(config, { source: 'cli', kind: 'action', project: 'hub', text: 'バックアップの暗号化方式を決める', occurredAt: '2026-11-04T00:00:00Z' });
+  const llm = new Recorder([JSON.stringify({ not_found: true, sentences: [] })]);
+  const answer = await answerQuestion(config, llm, 'バックアップの暗号化方式');
+  expect(answer.candidates.every(c => c.kind === 'memo' || c.kind === 'work-summary')).toBe(true);
+  expect(payload(llm.prompts[0]!).sources.map(s => s.text).join('\n')).not.toContain('暗号化方式を決める');
+});

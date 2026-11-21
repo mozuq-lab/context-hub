@@ -117,9 +117,10 @@ export function askExcerpt(text: string, question: string, limit = ASK_SOURCE_CH
   return `${from > 0 ? '…' : ''}${chars.slice(from, from + limit).join('')}${from + limit < chars.length ? '…' : ''}`;
 }
 
-/** 根拠の候補になる記録の一覧。訂正があれば最新の訂正の本文を使い、帰属はHISTORYと同じ基準で決める。 */
+/** 根拠の候補になる記録の一覧。訂正があれば最新の訂正の本文を使い、帰属はHISTORYと同じ基準で決める。
+ * 本人が直接追加した行動（action）は記録ではなく予定なので、根拠にはしない。 */
 export function askSourcesFrom(units: EffectiveInput[], config: HubConfig): Omit<AskSource, 'ref'>[] {
-  return units.filter(u => u.chain.root.kind !== 'correction').map(u => {
+  return units.filter(u => u.chain.root.kind === 'memo' || u.chain.root.kind === 'work-summary').map(u => {
     const root = u.chain.root, latest = u.chain.latest;
     return {
       inputId: latest.id, rootId: root.id, kind: root.kind as 'memo' | 'work-summary', occurredAt: root.occurred_at, text: latest.text,

@@ -13,6 +13,7 @@ import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-sch
 import { evidenceBound, inputWhen } from './happened.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import { appliedReread, readExclusionOverlays } from './item-rereads.js';
+import { ACTION_LABEL, actionSource, sourceRef } from './actions.js';
 import type { HubConfig, Input, Project, Receipt } from './types.js';
 
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -117,8 +118,15 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     return receipt?.result && associatedProjects(input,receipt,config).includes(projectId) ? [{input,result:groundedResult(chain,receipt.input_id,receipt.result),notice:correctionNotice(unit)}] : [];
   }).sort((left, right) => Date.parse(left.input.occurred_at) - Date.parse(right.input.occurred_at) || left.input.id.localeCompare(right.input.id));
   const summaries = evidence.filter(({ input }) => input.kind === 'work-summary'); const latest = summaries.at(-1);
-  const notices = new Map(evidence.map(e => [e.input.id, e.notice])), unitsById = new Map(units.map(u => [u.chain.root.id, u])), occurredAt = new Map(inputs.map(i => [i.id, i.occurred_at]));
-  const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${inputWhen(input, iso => `${dateLabel(iso, config.timezone)} ${config.timezone}`)} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${notices.get(input.id) ? ' '+notices.get(input.id)!.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
+  // 本人が直接追加した行動。モデルで整理しないため処理記録はなく、最新の文面（訂正があれば訂正）を本人の言葉のまま載せる。
+  // 統合元のプロジェクトへ追加した行動も、統合先のNOWに載せる。新しい作業要約が届いても外さない。
+  const actions = units.filter(u => u.chain.root.kind === 'action' && u.chain.root.project !== undefined && (u.chain.root.project === projectId || sources.includes(u.chain.root.project)))
+    .sort((left, right) => Date.parse(left.chain.root.occurred_at) - Date.parse(right.chain.root.occurred_at) || left.chain.root.id.localeCompare(right.chain.root.id));
+  // 行動にしたAIの読み取り（提案・作業要約の次の一手）は、元の欄に二重に並べない。どのプロジェクトで行動にしても同じ行は本人が引き取ったものとして扱う。
+  const converted = new Set<string>(), convertedKeys = new Set<string>();
+  for (const unit of units) { const from = actionSource(unit.chain.root); if (from) { converted.add(sourceRef(from.input_id, from.text)); if (from.key) convertedKeys.add(from.key); } }
+  const notices = new Map([...evidence.map(e => [e.input.id, e.notice] as const), ...actions.map(u => [u.chain.root.id, correctionNotice(u)] as const)]), unitsById = new Map(units.map(u => [u.chain.root.id, u])), occurredAt = new Map(inputs.map(i => [i.id, i.occurred_at]));
+  const ref = (input: Input): string => `[${input.id}](../../${input.path}) [${inputWhen(input, iso => `${dateLabel(iso, config.timezone)} ${config.timezone}`)} 出典:${plain(input.source)}${input.tool ? `/${plain(input.tool)}` : ''} ${input.kind === 'action' ? '本人が追加した行動' : input.origin === 'ai-self-report' ? 'AI自己申告/ai-self-report・未検証' : '利用者メモ・未検証'}${input.project === projectId ? '' : '・帰属候補'}]${notices.get(input.id) ? ' '+notices.get(input.id)!.replaceAll('](00_inbox/','](../../00_inbox/') : ''}`;
   const row = (text: string, input: Input, label = ''): string => `- ${label}${plain(text)} ${ref(input)}`;
   // 本人が完了・解決と報告した項目は該当欄から外し、「解決済み・完了」へ移す。項目一覧はアプリ・CLIからの報告の照合に使う。
   // AIの読み違いなどの「誤り」として外した項目も欄から外すが、完了・解決とは分けて理由と一緒に示す。
@@ -137,15 +145,24 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     return resolution ? [] : [`${row(text, input, label)}${mark}${key}`];
   };
   const current = latest?.result.extracted.current.filter((item) => item.status === 'confirmed').map((item) => row(item.text, latest.input)) ?? [];
-  const next = latest?.result.extracted.next.filter((item) => item.status === 'confirmed').flatMap((item) => entry('next', item.text, latest.input)) ?? [];
+  // 本人が追加した行動を先に、作業要約の次の一手を後に並べる。
+  const own = actions.flatMap(unit => {
+    const root = unit.chain.root, text = unit.chain.latest.text, rows = entry('next', text, root, ACTION_LABEL), item = items.get(itemKey(projectId, 'next', root.id, text));
+    const from = actionSource(root);
+    if (item) item.action = from ? { from } : {};
+    return rows;
+  });
+  const taken = (input: Input, text: string, section?: ItemSection) => converted.has(sourceRef(input.id, text)) || (section !== undefined && convertedKeys.has(itemKey(projectId, section, input.id, text)));
+  const next = [...own, ...(latest?.result.extracted.next.filter((item) => item.status === 'confirmed' && !taken(latest.input, item.text, 'next')).flatMap((item) => entry('next', item.text, latest.input)) ?? [])];
   const proposals: string[] = []; const open: string[] = [];
+  const propose = (text: string, input: Input, label: string) => { if (!taken(input, text)) proposals.push(row(text, input, label)); };
   for (const item of evidence) {
     const { input, result } = item;
-    if (result.category === 'task' && input.kind === 'memo' && (!latest || Date.parse(input.occurred_at) > Date.parse(latest.input.occurred_at))) proposals.push(row(result.summary, input, '分類候補task・要確認: '));
+    if (result.category === 'task' && input.kind === 'memo' && (!latest || Date.parse(input.occurred_at) > Date.parse(latest.input.occurred_at))) propose(result.summary, input, '分類候補task・要確認: ');
     if (result.category === 'question') open.push(...entry('open', result.summary, input));
-    for (const suggestion of result.next_action_suggestions) proposals.push(row(suggestion, input, 'AI提案: '));
+    for (const suggestion of result.next_action_suggestions) propose(suggestion, input, 'AI提案: ');
     for (const value of [...result.extracted.current, ...result.extracted.next]) {
-      if (value.status === 'proposal') proposals.push(row(value.text, input, '提案: '));
+      if (value.status === 'proposal') propose(value.text, input, '提案: ');
       if (value.status === 'unverified') open.push(...entry('open', value.text, input, '未確認: '));
     }
     for (const value of result.extracted.open) open.push(...entry('open', value.text, input, value.status === 'proposal' ? '提案・判断待ち: ' : '未解決: '));
@@ -163,7 +180,8 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   for (const r of resolved.values()) {
     if (r.action !== 'exclude' || !r.reason || items.has(r.item_key)) continue;
     const unit = unitsById.get(r.input_id), input = unit?.chain.root;
-    if (!unit || !input) continue;
+    // 行動は文面を直すと別の項目になり、直した後の行動として欄に戻る（外した記録は直す前の文面のもの）。
+    if (!unit || !input || input.kind === 'action') continue;
     const detached = input.project !== projectId && overlays.wrongProjects.get(input.id)?.has(projectId) === true;
     if (!detached && r.section === 'next' && latest && latest.input.id !== input.id) continue;
     const reread = appliedReread(overlays, unit)?.resolution_ids.includes(r.id);
@@ -206,7 +224,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const fallback = '- 不明（根拠となる入力がありません）';
   // 欄が空になった理由。誤りとして外した項目だけで空になったときは、完了・解決と書かない。
   const closedNote = (section: ItemSection, reported: string) => [...items.values()].some(i => i.section === section && i.resolution && i.resolution.action !== 'exclude') ? reported : '誤りとして外した項目のみ';
-  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || (latest && [...items.values()].some(i => i.section === 'next') ? `- 残っている次の一手はありません（${closedNote('next', '完了報告済み')}）` : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? `- 残っている未解決はありません（${closedNote('open', '解決報告済み')}）` : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}${excluded.length ? `\n# 誤りとして外した項目（本人報告）\nAIの読み違いなどとして、本人が外した項目です。完了・解決ではありません。理由と一言は、次からの整理でAIへ渡します。戻すときはアプリか\`ctx item reopen\`を使ってください。\n${excluded.join('\n')}\n` : ''}`;
+  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || ((latest || actions.length) && [...items.values()].some(i => i.section === 'next') ? `- 残っている次の一手はありません（${closedNote('next', '完了報告済み')}）` : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? `- 残っている未解決はありません（${closedNote('open', '解決報告済み')}）` : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}${excluded.length ? `\n# 誤りとして外した項目（本人報告）\nAIの読み違いなどとして、本人が外した項目です。完了・解決ではありません。理由と一言は、次からの整理でAIへ渡します。戻すときはアプリか\`ctx item reopen\`を使ってください。\n${excluded.join('\n')}\n` : ''}`;
   // 項目一覧はNOWの手動編集と無関係に、常に最新の整理結果から書き直す。
   await vault.write(nowItemsPath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_at: generatedAt, items: [...items.values()] }, null, 2) + '\n');
   // NOWは書く直前に読み、手編集の有無を判定する（読んでから書くまでの間に同期で届いた手編集を上書きしにくくする）。
@@ -220,7 +238,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     } catch { conflict = true; }
     if (options.overwriteAuto) conflict = false;
   }
-  const meta = { ...oldMeta, schema_version: 1, project: projectId, generated_by: { model: 'deterministic-writer', prompt_version: 1 }, generated_at: generatedAt, last_evidence_at: evidence.at(-1)?.input.occurred_at ?? null, input_ids: evidence.map(({ input }) => input.id), verified: false, generated_hash: `sha256:${hash(auto)}` };
+  const meta = { ...oldMeta, schema_version: 1, project: projectId, generated_by: { model: 'deterministic-writer', prompt_version: 1 }, generated_at: generatedAt, last_evidence_at: [...evidence.map(e => e.input.occurred_at), ...actions.map(u => u.chain.root.occurred_at)].sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null, input_ids: [...evidence.map(({ input }) => input.id), ...actions.map(u => u.chain.root.id)], verified: false, generated_hash: `sha256:${hash(auto)}` };
   const content = markdown(meta, `${before}${autoStart}${auto}${autoEnd}${after}`);
   if (conflict) return { path: relative, conflict: await stashConflictLocked(vault, `NOW.${projectId}`, content) };
   await vault.write(relative, content);

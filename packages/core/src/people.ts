@@ -264,7 +264,8 @@ export async function collectPeople(config: HubConfig, vault: Vault, people: Per
   const records = new Map<string, PersonRecord[]>(people.map(p => [p.id, []])), terms = people.map(p => ({ id: p.id, terms: personTerms(p) }));
   for (const unit of units ?? await readEffectiveInputs(config)) {
     const { chain, receipt } = unit, root = chain.root;
-    if (root.kind === 'correction') continue;
+    // 本人が追加した行動は記録ではなく予定なので、未完了の項目（NOWの次の一手）としてだけ数える。
+    if (root.kind !== 'memo' && root.kind !== 'work-summary') continue;
     const text = redactText(chain.latest.text, settings).text;
     let hits: { id: string; at: { start: number; end: number } }[] | undefined;
     for (const p of terms) { const at = findMention(text, p.terms); if (at) (hits ??= []).push({ id: p.id, at }); }

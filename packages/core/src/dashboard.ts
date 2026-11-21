@@ -153,7 +153,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:!!ack&&!changed,at:ack?Date.parse(ack.received_at):0});
   }
   statuses.push(...recentRoutine(intakeRows,'Mac mini受領済み'));
-  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id);return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:latest?.status==='organized',at:Date.parse(unit.chain.root.received_at)};});
+  // 本人が直接追加した行動はモデルで整理しないため、整理待ちに数えない。
+  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id),action=unit.chain.root.kind==='action';return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${action?'本人が追加した行動（整理しません）':latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:action||latest?.status==='organized',at:Date.parse(unit.chain.root.received_at)};});
   statuses.push(...recentRoutine(inputRows,'整理済み'));
   // 件数は1行にまとめて先に示す。行の一覧は対応が要るものと直近の分だけにし、全件はアプリの受付状況に任せる。
   const waitingIntake=intakeRows.filter(r=>!r.routine).length,failedInputs=effective.filter(u=>receiptsById.get(u.chain.latest.id)?.status==='failed').length,waitingInputs=inputRows.filter(r=>!r.routine).length-failedInputs;

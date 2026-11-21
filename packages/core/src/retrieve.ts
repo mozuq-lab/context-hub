@@ -26,7 +26,10 @@ function inputLine(input: Input, maxText = 200, hide: (text: string) => string =
   const text = hide(input.text);
   return `- [${input.id}](${input.path}) | ${inputWhen(input, displayTime)} | ${input.source}${input.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}\n  ${text.slice(0,maxText).replace(/\r?\n/g,' ')}${text.length > maxText ? '…' : ''}`;
 }
-async function receiptStatus(vault: Vault, input: Input): Promise<string> {
+/** 本人が直接追加した行動の状態。モデルで整理しないため、処理記録を持たない。 */
+const actionStatus = '本人が追加した行動（整理しません）';
+async function receiptStatus(vault: Vault, input: Input, root?: Input): Promise<string> {
+  if ((root ?? input).kind === 'action') return actionStatus;
   const raw = await vault.read(`90_system/receipts/${input.id}.json`);
   if (!raw) return '未整理';
   try { const receipt = receiptSchema.parse(JSON.parse(raw)); if (receipt.input_id !== input.id) return '処理記録不正'; return receipt.status === 'organized' ? '整理済み' : '失敗'; } catch { return '処理記録不正'; }
@@ -39,6 +42,8 @@ export async function recent(config: HubConfig, n = 10): Promise<string> {
 export async function pending(config: HubConfig): Promise<string> {
   const vault = new Vault(config), lines: string[] = [];
   for (const chain of await readCorrectionChains(config)) {
+    // 本人が直接追加した行動は整理しないため、未整理として挙げない。
+    if (chain.root.kind === 'action') continue;
     const input=chain.latest;
     const status = await receiptStatus(vault,input);
     if (status !== '整理済み') lines.push(`${inputLine(input)}\n  状態: ${status}`);
@@ -46,7 +51,7 @@ export async function pending(config: HubConfig): Promise<string> {
   return lines.join('\n\n') || '見つかりません（未整理・失敗なし）';
 }
 /** referenceは種類ではなく絞り込みの条件で、整理でAIが参考資料に分類したメモ・作業要約（訂正を含む）に当たる。 */
-export const findKinds = ['memo','work-summary','correction','idea','knowledge','now','reference'] as const;
+export const findKinds = ['memo','work-summary','action','correction','idea','knowledge','now','reference'] as const;
 export type FindKind = typeof findKinds[number];
 export interface FindOptions {
   /** このContextHubプロジェクトに帰属・関連する記録だけにする。AI推定の関連候補は結果で区別する。 */
@@ -201,7 +206,8 @@ export async function context(config: HubConfig, project: string, maxChars = con
   const hideSecrets = (text: string) => redactText(text, secretSettings(config)).text;
   for (const unit of (await readEffectiveInputs(config)).reverse()) {
     const input=unit.chain.root, candidate=unit.receipt?associatedProjects(input,unit.receipt,config).includes(project):false;
-    if (input.project!==project && !candidate) continue;
+    // 本人が直接追加した行動は、上の現在地（NOW）の「次の一手」に載せている。
+    if (input.kind==='action' || (input.project!==project && !candidate)) continue;
     const status = await receiptStatus(vault,unit.chain.latest);
     const line = `${inputLine(input,300,hideSecrets)}${unit.receipt?.result?'\n  有効解釈: '+unit.receipt.result.summary:''}${unit.chain.revisions.length?'\n  '+correctionNotice(unit):''}${input.project !== project ? '\n  関連候補（AI推定、帰属未確定）' : ''}`;
     if (status === '整理済み') related.push(line); else unprocessed.push(`${line}\n  ${status}`);
@@ -226,7 +232,7 @@ export function fenced(text: string): string {
   return `${fence}text\n${text.trim()}\n${fence}`;
 }
 const oneLine = (value: string) => value.replace(/[\u0000-\u001f\u007f]+/g, ' ');
-const kindLabels: Record<Doc['kind'],string> = { memo:'メモ', 'work-summary':'作業要約', correction:'訂正', idea:'アイデア', knowledge:'知識', now:'NOW' };
+const kindLabels: Record<Doc['kind'],string> = { memo:'メモ', 'work-summary':'作業要約', action:'本人が追加した行動', correction:'訂正', idea:'アイデア', knowledge:'知識', now:'NOW' };
 /**
  * 本人が選んだ記録だけを、出典・訂正の注意・帰属の区別と方針を付けて1つの資料にする。
  * 記録は指定順に並べ、上限に収まらない記録は本文の途中で切らずに丸ごと省き、末尾にIDを示す。
@@ -261,7 +267,7 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
     if (unit) {
       const { root, latest } = unit.chain, owned = root.project, estimated = [...(assigned.get(root.id)?.estimated ?? [])].sort();
       if (owned) policyProjects.add(owned);
-      const status = await receiptStatus(vault, latest);
+      const status = await receiptStatus(vault, latest, root);
       const lines = [
         `## [${root.id}](${root.path}) | ${inputWhen(root, displayTime)} | ${oneLine(root.source)}${root.origin === 'ai-self-report' ? ' / AI自己報告（独立検証なし）' : ''}`,
         `種類: ${kindLabels[root.kind]} / 状態: ${status}`,

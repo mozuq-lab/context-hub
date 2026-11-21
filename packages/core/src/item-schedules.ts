@@ -84,12 +84,16 @@ export function activeSchedules(records: ItemSchedule[], projectId?: string): Ma
  * 作業要約が届くたびに次の一手の根拠（入力ID）が変わり、同じ本文でも別の項目になるため。
  * 引き継ぎ先のない記録だけを付け直しの対象として返す。解決済み・完了の項目の記録は返さない。
  */
-export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: { key: string; section: string; text: string; resolution: unknown }[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
+export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: { key: string; section: string; text: string; resolution: unknown; input_id?: string; action?: { from?: { input_id: string; text: string; key?: string } } }[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
   const active = activeSchedules(records, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, ItemSchedule>();
   // 項目自身のキーで記録があれば（日付を外した記録を含む）、それが本人の最新の判断なので引き継ぎより優先する。
   const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
   const loose = [...active.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
-  const same = (r: ItemSchedule, i: { section: string; text: string }) => r.section === i.section && r.text === i.text;
+  // 本人が追加した行動は、文面を直しても同じ行動（同じ入力）なので、直す前の文面に付けた日付を引き継ぐ。
+  // AIの行を引き取った行動は、引き取った元の行（キー・本文）に付けた日付も同じ行動の日付として扱う。
+  type Item = typeof items[number];
+  const lineage = (r: ItemSchedule, i: Item) => i.action !== undefined && (r.input_id === i.input_id || (i.action.from !== undefined && (r.item_key === i.action.from.key || r.text === i.action.from.text)));
+  const same = (r: ItemSchedule, i: Item) => r.section === i.section && (r.text === i.text || lineage(r, i));
   // 引き継ぎの候補は、NOWから外れた同じ欄・同じ本文の記録のうち、日付を外した記録も含めて最新のもの。
   // 最新が日付を外した記録なら、それより前の古い日付を引き継がない（K1で付けK2で外した後、K3へ移った場合など）。
   const latestPerKey = new Map<string, ItemSchedule>();
@@ -98,11 +102,18 @@ export function effectiveSchedules(records: ItemSchedule[], projectId: string, i
   const isCleared = (r: ItemSchedule) => r.due === null && r.review_after === null;
   for (const item of items) {
     if (item.resolution) continue;
+    // 行動は、同じ行動の記録（直す前の文面・引き取った元の行を含む）のうち最新のものが効く。文面を前の形へ戻しても、古いキーの古い日付に戻らない。
+    if (item.action !== undefined) {
+      const mine = [...latestPerKey.values()].filter(r => r.section === item.section && lineage(r, item) && (r.item_key === item.key || (!keys.has(r.item_key) && !resolvedKeys.has(r.item_key)))).at(-1);
+      if (mine && !isCleared(mine)) byKey.set(item.key, mine);
+      continue;
+    }
     const latest = own.has(item.key) ? undefined : detached.filter(r => same(r, item)).at(-1);
     const direct = active.get(item.key), carried = latest && !isCleared(latest) ? latest : undefined;
     if (direct ?? carried) byKey.set(item.key, (direct ?? carried)!);
   }
-  const orphaned = loose.filter(r => !items.some(i => !i.resolution && same(r, i)));
+  // 行動の日付は、文面を直した後の行動を完了・外したときも、その行動のものとして付け直しを求めない（同じ入力の記録）。
+  const orphaned = loose.filter(r => !items.some(i => same(r, i) && (!i.resolution || lineage(r, i))));
   return { byKey, orphaned };
 }
 

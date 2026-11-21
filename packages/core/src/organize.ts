@@ -183,11 +183,12 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
       const journals = new Set<string>();
       for (const chain of chains) {
         // 完了receiptを正とし、同期・復旧用に保持したjournalで完了状態を巻き戻さない。
-        if (!matchesId(chain) || byId.get(chain.latest.id)?.status === 'organized') continue;
+        if (!matchesId(chain) || chain.root.kind === 'action' || byId.get(chain.latest.id)?.status === 'organized') continue;
         if (await readJournal(vault, chain.latest.id)) journals.add(chain.latest.id);
       }
       const selected = chains.filter((chain) => {
-        if (!matchesId(chain)) return false;
+        // 本人が直接追加した行動はモデルで整理しない（NOWへは保存時に載せる）。
+        if (!matchesId(chain) || chain.root.kind === 'action') return false;
         const receipt = byId.get(chain.latest.id);
         return journals.has(chain.latest.id) || !receipt || (options.retryFailed === true && receipt.status === 'failed' && receipt.attempts < config.organize.maxAttempts);
       }).sort((left, right) => Date.parse(left.root.occurred_at) - Date.parse(right.root.occurred_at) || left.latest.id.localeCompare(right.latest.id)).slice(0, budget - recovered);

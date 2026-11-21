@@ -4,12 +4,13 @@ import { join, resolve } from 'node:path';
 import { logOperation } from './logger.js';
 import { z } from 'zod';
 import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
-import { readProjects, projectIdSchema } from './projects.js';
+import { readProjects, projectIdSchema, assertNotMerged, resolveProject } from './projects.js';
+import { actionSource, actionTextSchema, assertActionMeta } from './actions.js';
 import { DEFAULT_MAX_BACKDATE_DAYS, HappenedOnError, calendarDateSchema, effectiveHappenedOn, happenedOnProblem, localNoon } from './happened.js';
 import type { CaptureRequest, CaptureResult, HubConfig, Input } from './types.js';
 export const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
 const timestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
-export const inputSchema = z.object({ schema_version: z.literal(1), id: inputIdSchema, kind: z.enum(['memo', 'work-summary', 'correction']), corrects_input_id: inputIdSchema.optional(),
+export const inputSchema = z.object({ schema_version: z.literal(1), id: inputIdSchema, kind: z.enum(['memo', 'work-summary', 'action', 'correction']), corrects_input_id: inputIdSchema.optional(),
   source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(1000), occurred_at: timestamp, received_at: timestamp,
   project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100), z.string().max(2000)).optional(),
   origin: z.enum(['user-note', 'ai-self-report']), text: z.string().min(1), path: z.string(),
@@ -73,6 +74,16 @@ export function eventMarker(source: string, eventId: string): string { return `9
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
 export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
   if (!request.text?.trim() || request.text.length > config.capture.maxInputChars) throw new Error('本文が空か文字数上限を超えています');
+  // 本人が直接追加する行動は、1行の本人の言葉と、載せるプロジェクトの指定が要る（プロジェクトを選ばない行動は未対応）。
+  if (request.kind === 'action') {
+    const text = actionTextSchema.safeParse(request.text);
+    if (!text.success) throw new Error(text.error.issues[0]?.message ?? '行動の文面が不正です');
+    if (!request.project) throw new Error('行動にはプロジェクトの指定が必要です');
+    if (request.tool !== undefined) throw new Error('行動には作業ツールを指定できません');
+    assertActionMeta(request.meta);
+    // 行動は出来事の記録ではないため、出来事の日付は付けない。
+    if (request.happenedOn !== undefined) throw new Error('行動には出来事の日付を指定できません');
+  }
   if (request.happenedOn !== undefined) calendarDateSchema.parse(request.happenedOn);
   const happenedOn = effectiveHappenedOn(request.happenedOn, request.occurredAt, config.timezone);
   const meta = inputSchema.omit({ text: true, path: true }).parse({ schema_version: 1, id: `IN-${ulid()}`,
@@ -111,6 +122,8 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
       if (cause) throw new HappenedOnError({ code: 'happened-on-invalid', cause, max_days: maxDays });
     }
     if (request.project && !(await readProjects(config)).some(p => p.id === request.project)) throw new Error('指定プロジェクトがありません。先にproject addを実行してください');
+    // 統合済みのプロジェクトのNOWは統合先にあるため、行動は統合先へ追加してもらう（完了報告・期日の依頼と同じ）。
+    if (meta.kind === 'action') assertNotMerged(await readProjects(config), request.project!);
     const date = new Intl.DateTimeFormat('sv-SE', { timeZone: config.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(meta.occurred_at));
     const path = `00_inbox/${date}_${meta.id}.md`;
     if (!await vault.create(path, markdown(meta, request.text))) throw new Error('入力IDが競合しました。再送してください');
@@ -121,7 +134,21 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
 export async function capture(config: HubConfig, request: CaptureRequest): Promise<CaptureResult> {
   const vault = new Vault(config);
   const started = Date.now();
-  const result = await vault.withLock(() => captureLocked(config, vault, request));
+  const result = await vault.withLock(async () => {
+    const saved = await captureLocked(config, vault, request);
+    // 行動はモデルの整理を待たずにNOWへ載せる。保存の後、NOWの再生成前に停止しても、同じイベントの再送で再生成だけを行う。
+    if (request.kind === 'action') {
+      // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
+      const { rebuildNowLocked, rebuildNowsForInputLocked, readReceipts } = await import('./views.js');
+      // 再送のときにプロジェクトが統合済みになっていれば、行動が載る統合先のNOWを作り直す。
+      const projects = await readProjects(config), target = resolveProject(projects, request.project!), inputs = await readInputs(config), receipts = await readReceipts(config);
+      // AIの読み取りを行動にしたときは、元の行が載っているほかのプロジェクトのNOWからも外す。
+      const from = actionSource({ kind: 'action', meta: request.meta });
+      if (from) await rebuildNowsForInputLocked(vault, config, projects.map(p => p.id), from.input_id, target, inputs, receipts);
+      else await rebuildNowLocked(vault, config, target, inputs, receipts);
+    }
+    return saved;
+  });
   if (!await logOperation(config, { op: 'capture', input_id: result.inputId, ms: Date.now() - started, counts: { deduped: Number(result.deduped) } })) process.stderr.write('警告: 運用ログを書き込めませんでした。原文は保存済みです。\n');
   return result;
 }

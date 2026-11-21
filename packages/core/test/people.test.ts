@@ -199,3 +199,15 @@ test('アプリからの登録・変更・外す依頼を受け付け、受け�
   expect((await inspectPeople(vault)).people).toEqual([]);
   expect((await doctor(config)).issues.join(' ')).not.toMatch(/受付記録が不正|人の定義/);
 });
+
+test('本人が追加した行動は記録に数えず、名前が出てくれば未完了の次の一手として載せる', async () => {
+  const { config, vault } = await fixture();
+  const added = await capture(config, { source: 'cli', kind: 'action', project: 'hub', ...at('2026-11-17T01:00:00Z'), text: '田中さんに見積もりを送る' });
+  const text = await buildPerson(config, 'tanaka');
+  expect(text).toContain('記録 3件 / 未完了の項目 2件');
+  expect(text).toMatch(/\[集約ツール\]\(\.\.\/\.\.\/10_projects\/hub\/NOW\.md\) 次の一手: 田中さんに見積もりを送る/);
+  expect(text).not.toContain('undefined');
+  expect(text.slice(text.indexOf('## 関わった'))).not.toContain(added.inputId);
+  await rebuildPeople(config);
+  expect(parseMarkdown((await vault.read(personPagePath('tanaka')))!).meta).toMatchObject({ records: 3, open_items: 2 });
+});

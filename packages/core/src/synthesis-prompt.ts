@@ -86,7 +86,8 @@ export function synthesisCandidates(config: HubConfig, units: EffectiveInput[], 
   const candidates: SynthesisCandidate[] = [];
   for (const unit of units) {
     const { chain, receipt } = unit, root = chain.root;
-    if (root.kind === 'correction' || unit.pendingCorrection) continue;
+    // 本人が直接追加した行動は、本人が決めたことでありメモではないため、週次の統合には渡さない。
+    if (root.kind === 'correction' || root.kind === 'action' || unit.pendingCorrection) continue;
     const summary = receipt?.result?.summary;
     // 訂正のあるメモは、原文ではなく訂正を重ねた整理の要約で渡す。
     if (chain.revisions.length && !summary) continue;
