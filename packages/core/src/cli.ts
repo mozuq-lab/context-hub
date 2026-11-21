@@ -25,6 +25,7 @@ import { Vault, unlockVault, LOCK_SCOPES, hash, releaseLocksOnSignal } from './s
 import { addProject, readProjects } from './projects.js';
 import { find, findKinds, recent, pending, resume, context, bundle, bundleMaxIds, type FindKind } from './retrieve.js';
 import { doctor } from './doctor.js';
+import { setPerson,inspectPeople,buildPerson,rebuildPeople } from './people.js';
 import { userFacingError } from './error-message.js';
 import { writePrivacyPatternsLocked } from './secrets.js';
 import { verifyBackup,readBackupChecks,backupStatus } from './backup-check.js';
@@ -124,6 +125,24 @@ git.command('collect').description('下書きを作ってHOMEを更新').action(
 git.command('drafts').description('下書きの一覧').option('--all','入力済み・見送り済みも表示').action(async opts=>output((await readGitDrafts(await config())).filter(d=>opts.all||d.status==='pending').map(d=>({id:d.id,hash:d.hash,status:d.status,project:d.project_id,repo:d.repo,commits:d.commits.length,text:d.text,inputId:d.inputId??null}))));
 git.command('use <id>').description('下書きの本文をそのまま入力にする').requiredOption('--hash <sha256>','git draftsで確認したハッシュ').addOption(new Option('--kind <kind>','入力の種類').choices(['memo','work-summary']).default('memo')).requiredOption('--confirm','本文を確認した本人による保存').action(async(id,opts)=>{const c=await config();const result=await useGitDraft(c,{draftId:id,expectedHash:opts.hash,kind:opts.kind,source:'cli'});await rebuildDashboard(c);output(result);});
 git.command('dismiss <id>').description('下書きを見送る').requiredOption('--hash <sha256>','git draftsで確認したハッシュ').requiredOption('--confirm','本文を確認した本人による見送り').action(async(id,opts)=>{const c=await config();const result=await dismissGitDraft(c,{draftId:id,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:${id}:dismiss`});await rebuildDashboard(c);output(result);});
+const person=program.command('person').description('人ごとの見返し: 本人が登録した人の名前・呼び名が出てくる記録と未完了の項目を40_people/に集める（AIは使わない）');
+const peopleChanged=async(c:HubConfig)=>{await rebuildPeople(c);await rebuildDashboard(c);};
+person.command('add <id>').description('人を登録する（IDは英小文字・数字・ハイフン）').requiredOption('--name <text>','名前').option('--aliases <csv>','呼び名、カンマ区切り')
+  .action(async(id,opts)=>{const c=await config();const result=await setPerson(c,{personId:id,action:'add',name:opts.name,aliases:opts.aliases?.split(',')??[],source:'cli'});await peopleChanged(c);output(result);});
+person.command('list').description('登録した人と確認用ハッシュを一覧').action(async()=>{const c=await config(),{people,issues,hashes}=await inspectPeople(new Vault(c));output({people:people.map(p=>({...p,hash:hashes.get(p.id)})),issues});});
+person.command('show <id>').description('人ごとの見返しの本文を表示（書き込まない）').action(async id=>output(await buildPerson(await config(),id)));
+person.command('edit <id>').description('本人の確認で名前・呼び名を書き換える')
+  .option('--name <text>','新しい名前').option('--add-alias <text>','追加する呼び名（複数指定可）',collect,[]).option('--remove-alias <text>','削除する呼び名（複数指定可）',collect,[])
+  .requiredOption('--hash <sha256>','person listで確認したperson.mdのハッシュ').requiredOption('--confirm','定義を確認した本人による変更')
+  .action(async(id,opts)=>{const c=await config(),current=(await inspectPeople(new Vault(c))).people.find(p=>p.id===id);if(!current)throw new Error('人が見つかりません');
+   const key=(s:string)=>s.normalize('NFKC').toLocaleLowerCase().trim(),removing=new Set((opts.removeAlias as string[]).map(key)),missing=(opts.removeAlias as string[]).filter(r=>!current.aliases.some(a=>key(a)===key(r)));
+   if(missing.length)throw new Error(`削除する呼び名が定義にありません: ${missing.join('、')}`);
+   // 同じ確認内容の再実行は、記録後・定義書込前の停止からの回復として扱う。
+   const name=opts.name??current.name,aliases=[...current.aliases.filter(a=>!removing.has(key(a))),...opts.addAlias];
+   const result=await setPerson(c,{personId:id,action:'edit',name,aliases,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:${id}:${opts.hash}:edit:${JSON.stringify([name,aliases])}`});await peopleChanged(c);output(result);});
+person.command('remove <id>').description('人の登録を外す（記録は消さず、手で変えていないPERSON.mdを消す）')
+  .requiredOption('--hash <sha256>','person listで確認したperson.mdのハッシュ').requiredOption('--confirm','定義を確認した本人による変更')
+  .action(async(id,opts)=>{const c=await config();const result=await setPerson(c,{personId:id,action:'remove',expectedHash:opts.hash,source:'cli',sourceEventId:`cli:${id}:${opts.hash}:remove`});await peopleChanged(c);output(result);});
 const idea=program.command('idea').description('似ているアイデアを確認し、本人の判断で束ねる・別の話にする（AIは使わない）');
 const ideaIndex=async()=>{const c=await config(),vault=new Vault(c);return vault.withLock(()=>rebuildIdeaIndexLocked(c,vault));};
 idea.command('similar').description('未確認の似ているアイデアの組と、束ねるときに指定するハッシュ').action(async()=>{const index=await ideaIndex();output({total:index.total_candidates,candidates:index.candidates.map(x=>({ideas:x.ideas,score:x.score,hashes:x.hashes,summaries:x.ideas.map(id=>index.summaries[id]??'')}))});});

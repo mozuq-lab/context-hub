@@ -11,6 +11,7 @@ import { resolvableTargetSchema } from './conflicts.js';
 import { ideaIdSchema, ideaLinkActionSchema } from './idea-links.js';
 import { PROJECT_COVERS_MAX } from './project-proposals.js';
 import { insightItemKeySchema, insightReactionValueSchema, insightRunIdSchema } from './insight-feedback.js';
+import { PERSON_ALIASES_MAX, PERSON_NAME_CHARS, personActions, personIdSchema } from './people.js';
 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
@@ -44,7 +45,10 @@ const ideaLink=z.object({...base,operation:z.literal('idea-link'),idea_ids:z.tup
 const projectMerge=z.object({...base,operation:z.enum(['project-merge','project-unmerge']),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),into_id:projectIdSchema,into_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 今週の気づきの項目への反応。noneは前の反応を外す。問いへの答えは、反応ではなくmeta付きのcaptureで送る。
 const insightReaction=z.object({...base,operation:z.literal('insight-reaction'),run_id:insightRunIdSchema,item_key:insightItemKeySchema,reaction:insightReactionValueSchema,confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction]);
+// 人の登録（add）・名前と呼び名の変更（edit）・外す（remove）。変更と外すは、本人が確認したperson.mdのハッシュに結び付ける。
+const personDefinition=z.object({...base,operation:z.literal('person-definition'),person_id:personIdSchema,action:z.enum(personActions),person_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),name:z.string().max(PERSON_NAME_CHARS).optional(),aliases:z.array(z.string().max(PERSON_NAME_CHARS)).max(PERSON_ALIASES_MAX).optional(),confirmed:z.literal(true),text:z.string()}).strict()
+ .refine(v=>v.action==='add'?v.person_hash===undefined&&v.name!==undefined:v.person_hash!==undefined&&(v.action==='edit'?v.name!==undefined:v.name===undefined&&v.aliases===undefined),'人の定義の依頼の項目が操作と合いません');
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, personDefinition]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

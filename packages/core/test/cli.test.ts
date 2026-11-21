@@ -108,3 +108,17 @@ test('CLIでバックアップを確かめると結果を記録し、復元で�
  const failed=await cli(config,['backup','verify']);expect(failed.code).toBe(1);expect(JSON.parse(failed.out).check.status).toBe('failed');
  expect(JSON.parse((await cli(config,['backup','status'])).out).restore_point.archive).toBe(name);
 },30000);
+test('CLIで人を登録・変更・外し、変更と外すには確認したハッシュを求める',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ await cli(config,['add','--occurred-at','2026-11-10T00:00:00Z'],'田中さんと話した');await cli(config,['organize']);
+ const added=await cli(config,['person','add','tanaka','--name','田中さん','--aliases','田中,Tanaka']);expect(added.code).toBe(0);expect(JSON.parse(added.out)).toMatchObject({personId:'tanaka',action:'add'});
+ expect(await readFile(join(root,'vault/40_people/tanaka/PERSON.md'),'utf8')).toContain('田中さんと話した');
+ expect((await cli(config,['person','show','tanaka'])).out).toContain('記録 1件');
+ const listed=JSON.parse((await cli(config,['person','list'])).out);expect(listed.people[0]).toMatchObject({id:'tanaka',aliases:['田中','Tanaka']});
+ expect((await cli(config,['person','edit','tanaka','--remove-alias','Tanaka','--confirm'])).code).not.toBe(0);
+ expect((await cli(config,['person','edit','tanaka','--remove-alias','Tanaka','--hash',listed.people[0].hash,'--confirm'])).code).toBe(0);
+ const hash2=JSON.parse((await cli(config,['person','list'])).out).people[0].hash;
+ expect((await cli(config,['person','remove','tanaka','--hash',hash2,'--confirm'])).code).toBe(0);
+ expect(JSON.parse((await cli(config,['person','list'])).out).people).toEqual([]);
+ expect(await readdir(join(root,'vault/40_people/tanaka')).catch(()=>[])).toEqual([]);
+},20000);

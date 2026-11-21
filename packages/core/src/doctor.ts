@@ -22,6 +22,7 @@ import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
 import { historyStopped } from './history.js';
 import { referencesStopped } from './references.js';
+import { inspectPeople, readPersonChanges, stoppedPeoplePages } from './people.js';
 import type { HubConfig, Input } from './types.js';
 import { readIdeaLinks } from './idea-links.js';
 import { describeFindings, findSecrets, secretSettings } from './secrets.js';
@@ -50,6 +51,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { issues.push(...mergeIssues(await readProjects(config))); } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const project of await readProjects(config)) if (await historyStopped(vault, project.id)) issues.push(`経緯の更新が止まっています（手で変更されています）: 10_projects/${project.id}/HISTORY.md`); } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const project of await readProjects(config)) if (await referencesStopped(vault, project.id)) issues.push(`資料の更新が止まっています（手で変更されています）: 10_projects/${project.id}/REFERENCES.md`); } catch { /* 定義の不正は上で報告する。 */ }
+  try { const people = await inspectPeople(vault); for (const issue of people.issues) issues.push(`人の定義が不正です: ${issue.path}（${issue.message}）`); for (const path of await stoppedPeoplePages(vault)) issues.push(`人ごとの見返しの更新が止まっています（手で変更されています）: ${path}`); } catch { issues.push('人の定義を走査できません'); }
+  try { await readPersonChanges(vault); } catch { issues.push('人の定義の変更記録が不正です'); }
   try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
   try { await readItemResolutions(vault); } catch (error) { issues.push(error instanceof Error && error.message.startsWith('解決記録') ? error.message : '完了・解決・誤りとして外した記録を走査できません'); }
   try { for (const path of (await readSynthesisRuns(vault)).problems) issues.push(`週次の統合の記録が不正です: ${path}`); } catch { issues.push('週次の統合の記録を走査できません'); }

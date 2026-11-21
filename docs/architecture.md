@@ -20,10 +20,14 @@ Input/                         端末が追加する不変の受付ファイル
 10_projects/<id>/REFERENCES.md  参考資料に分類されたメモとURLの生成ビュー（資料があるプロジェクトだけ）
 20_ideas/                      AI整理済みアイデア
 30_knowledge/                  共通へ採用した正式知識・方針
+40_people/<id>/person.md        本人が登録した人の定義（名前・呼び名）
+40_people/<id>/PERSON.md        その人が出てくる記録と未完了の項目の生成ビュー
+40_people/PEOPLE.md            登録した人の一覧の生成ビュー（人を登録したときだけ）
 10_projects/<id>/knowledge/     対象projectへ採用した正式知識・方針
 POLICY.md                      共通の有効方針（派生集約）
 10_projects/<id>/POLICY.md      対象projectの有効方針（派生集約）
 90_system/                     受領・処理・訂正解釈・候補・承認・作成・状態変更・定義変更・統合・解決報告（誤りとして外す報告を含む）・読み直しの結果・期日・「片付いたかも」の見送り・下書き・競合とその片付けの記録
+90_system/people/              人の登録・変更・外した記録
 90_system/idea-links/          似ているアイデアを束ねる・別の話とする本人の判断
 90_system/idea-index.json      似ているアイデアの候補と束（派生。アプリが読む）
 90_system/unassigned-actions.json プロジェクト未定のメモのタスク候補とAIの提案（派生。アプリが読む）
