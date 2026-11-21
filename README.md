@@ -65,7 +65,7 @@ flowchart LR
 | 端末間の入力・返送 | 常時稼働するMac mini、Syncthing互換の同期環境 |
 | モバイル入力 | ObsidianとQuickAdd、共有フォルダーへのアクセス |
 | Mac・Androidアプリでの閲覧・入力（任意） | [ContextHub Flutter](https://github.com/mozuq-lab/context-hub-flutter-client)、同期済みVault。ビルド済みアプリは配布していないため、FlutterとXcode/Android SDKで各自ビルド |
-| CLIバックアップ例 | macOSのsh、tar、BSD stat |
+| CLIバックアップ例 | macOSのsh、tar、BSD stat。暗号化する場合は[age](docs/operations.md#バックアップを暗号化する任意) |
 
 ファイル同期・QuickAdd・再起動・復旧にはMac mini/Mac/Androidでの確認実績があります。OS、同期アプリ、Obsidian/QuickAdd、OpenClawの版や権限が異なる環境では、サンプルから確認してください。ほかのOSでの本番運用を保証するものではありません。
 

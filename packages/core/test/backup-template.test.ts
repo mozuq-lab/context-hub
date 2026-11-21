@@ -1,9 +1,9 @@
 import { expect, test } from 'vitest';
-import { access, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const backupScript = fileURLToPath(new URL('../../../scripts/vault-backup.sh', import.meta.url));
 
@@ -110,5 +110,90 @@ test.skipIf(process.platform === 'win32')('バックアップの完了行は、�
     const archive = (await readdir(backups)).find(name => /^vault-.*\.tar\.gz$/.test(name))!;
     const size = (await readFile(join(backups, archive))).length;
     expect(result.stdout).toMatch(new RegExp(` ok .*${archive} ${size} bytes kept=1\\n$`));
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+const hasAge = spawnSync('age', ['--version']).status === 0 && spawnSync('age-keygen', ['--help']).error === undefined;
+// CIではageを入れたうえでCTX_REQUIRE_AGE=1を指定し、暗号化の試験が黙って飛ばされないようにする。
+if (!hasAge && process.env.CTX_REQUIRE_AGE === '1') throw new Error('ageとage-keygenが見つかりません');
+/** 架空のVault・保存先・鍵の組を作り、バックアップのスクリプトへ渡す環境を返す。 */
+async function encryptedSetup(folder: string) {
+  const vault = join(folder, 'vault'), backups = join(folder, 'backups'), keys = join(folder, 'keys'), work = join(folder, 'work');
+  await mkdir(join(vault, '00_inbox'), { recursive: true }); await mkdir(keys); await mkdir(work);
+  await writeFile(join(vault, '00_inbox', 'sample.md'), '架空の原文\n');
+  const identity = join(keys, 'backup-key.txt'), recipients = join(keys, 'backup-recipients.txt');
+  expect(spawnSync('age-keygen', ['-o', identity]).status).toBe(0);
+  await writeFile(recipients, spawnSync('age-keygen', ['-y', identity], { encoding: 'utf8' }).stdout);
+  const env = { ...process.env, HOME: folder, CTX_VAULT: vault, CTX_BACKUP_DIR: backups, CTX_BACKUP_KEEP_DAYS: '30', CTX_BACKUP_AGE_RECIPIENTS: recipients, CTX_BACKUP_WORK_DIR: work };
+  return { vault, backups, identity, recipients, work, env };
+}
+
+test.skipIf(process.platform === 'win32' || !hasAge)('受取人の公開鍵を指定すると、暗号化したアーカイブだけを保存先へ置く', async () => {
+  const folder = await mkdtemp(join(tmpdir(), 'ctx-backup-age-'));
+  try {
+    const { vault, backups, identity, work, env } = await encryptedSetup(folder);
+    // 暗号化に切り替える前の平文のアーカイブも、同じ保持日数で数える。
+    await mkdir(backups); await writeFile(join(backups, 'vault-20261101-033000.tar.gz'), 'x');
+    const result = spawnSync('/bin/sh', [backupScript], { env, encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    const names = (await readdir(backups)).sort();
+    expect(names).toHaveLength(2);
+    const archive = names.find(name => /^vault-\d{8}-\d{6}\.tar\.gz\.age$/.test(name))!;
+    expect(archive).toBeDefined();
+    const bytes = await readFile(join(backups, archive));
+    expect(bytes.subarray(0, 21).toString('latin1')).toBe('age-encryption.org/v1');
+    expect(bytes.includes(Buffer.from('架空の原文'))).toBe(false);
+    expect(result.stdout).toMatch(new RegExp(` ok .*${archive.replaceAll('.', '\\.')} ${bytes.length} bytes kept=2\\n$`));
+    // 平文の一時ファイルは残さない。
+    expect(await readdir(work)).toEqual([]);
+    const plain = spawnSync('age', ['-d', '-i', identity, join(backups, archive)]);
+    expect(plain.status).toBe(0);
+    const restored = spawnSync('tar', ['-xOzf', '-', './00_inbox/sample.md'], { input: plain.stdout, encoding: 'utf8' });
+    expect(restored.stdout).toBe('架空の原文\n');
+    expect((await readdir(vault)).sort()).toEqual(['00_inbox']);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === 'win32' || !hasAge)('暗号化の途中で止められても平文を残さず、前回の残りの平文も片付ける', async () => {
+  const folder = await mkdtemp(join(tmpdir(), 'ctx-backup-age-stop-'));
+  try {
+    const { backups, work, env } = await encryptedSetup(folder);
+    // 電源断などで残った2日以上前の平文と、他の名前のフォルダー。
+    const stale = join(work, 'ctx-backup-abcdef'), other = join(work, 'keep-me');
+    await mkdir(stale); await writeFile(join(stale, 'vault.tar.gz'), 'x'); await mkdir(other);
+    const old = new Date(Date.now() - 3 * 24 * 3600 * 1000); await utimes(stale, old, old);
+    // 暗号化に時間がかかる間に止められる（ageの代わりに待つだけのコマンド）。
+    const slow = join(folder, 'slow-age.sh'); await writeFile(slow, '#!/bin/sh\nsleep 1\nexit 1\n'); await chmod(slow, 0o755);
+    const child = spawn('/bin/sh', [backupScript], { env: { ...env, CTX_BACKUP_AGE: slow }, stdio: 'ignore' });
+    const exited = new Promise<number | null>(done => child.once('close', code => done(code)));
+    for (let i = 0; i < 100 && !(await readdir(work)).some(n => /^ctx-backup-.{6}$/.test(n) && n !== 'ctx-backup-abcdef'); i++) await new Promise(r => setTimeout(r, 20));
+    child.kill('SIGTERM');
+    expect(await exited).not.toBe(0);
+    expect(await readdir(work)).toEqual(['keep-me']);
+    expect((await readdir(backups).catch(() => [])).filter(n => n.includes('.tmp'))).toEqual([]);
+  } finally { await rm(folder, { recursive: true, force: true }); }
+});
+
+test.skipIf(process.platform === 'win32' || !hasAge)('暗号化の設定の取り違えは、何も作らずに止める', async () => {
+  const folder = await mkdtemp(join(tmpdir(), 'ctx-backup-age-bad-'));
+  try {
+    const { vault, backups, identity, env } = await encryptedSetup(folder);
+    const run = (extra: Record<string, string>) => spawnSync('/bin/sh', [backupScript], { env: { ...env, ...extra }, encoding: 'utf8' });
+    // 秘密鍵を受取人として渡した。
+    let result = run({ CTX_BACKUP_AGE_RECIPIENTS: identity });
+    expect(result.status).toBe(2); expect(result.stderr).toContain('秘密鍵');
+    // 受取人のファイルがない・公開鍵が書かれていない。
+    expect(run({ CTX_BACKUP_AGE_RECIPIENTS: join(folder, 'none.txt') }).status).toBe(2);
+    const empty = join(folder, 'empty.txt'); await writeFile(empty, '# 公開鍵なし\n');
+    expect(run({ CTX_BACKUP_AGE_RECIPIENTS: empty }).status).toBe(2);
+    // ageが見つからない。
+    result = run({ CTX_BACKUP_AGE: join(folder, 'no-such-age') });
+    expect(result.status).toBe(2); expect(result.stderr).toContain('CTX_BACKUP_AGE');
+    // 平文を置く一時フォルダーがVaultや保存先の中にある。
+    expect(run({ CTX_BACKUP_WORK_DIR: vault }).status).toBe(2);
+    await mkdir(join(backups, 'tmp'), { recursive: true });
+    expect(run({ CTX_BACKUP_WORK_DIR: join(backups, 'tmp') }).status).toBe(2);
+    expect(await readdir(backups)).toEqual(['tmp']);
+    expect((await readdir(vault)).sort()).toEqual(['00_inbox']);
   } finally { await rm(folder, { recursive: true, force: true }); }
 });

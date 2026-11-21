@@ -100,6 +100,6 @@ done
 
 構成例は60分ごと、`cycle --limit 2 --thinking low --quiet-empty`、300秒、通知なしです。既存IDを記録して二重登録せず、最初の自然な自動実行を履歴とHOMEで確認します。モデル不要の受付は設定のmaxItemsPerRun、AI処理枠はlimitで別に制限されます。[週次の統合](weekly-synthesis.md)を有効にする場合は、整理に掛かる時間と`synthesis.timeoutSec`（既定150秒）の合計が、ジョブの制限時間に収まるようにします。
 
-launchdの例は`examples/launchd/`にあります。`__HOME__`、`__REPO_PATH__`、`__SYNCTHING_BIN__`、`__SYNCTHING_PROFILE_PATH__`を実際の絶対パスへ置換し、既存プロファイルや端末IDを確認してから使用します。バックアップ用の`__VAULT_PATH__`と`__BACKUP_DIR__`は、手動バックアップで確認した同じVault・保存先にします。EnvironmentVariablesの保持日数も確認します。バックアップを定期的に確かめる`com.context-hub.backup-verify.plist`は、`__NODE_BIN__`（Node.js 24の絶対パス）と`__CONFIG_PATH__`（設定ファイルの絶対パス）も置換し、設定の`backup.dir`を同じ保存先にします。未展開のテンプレートをそのまま登録しないでください。
+launchdの例は`examples/launchd/`にあります。`__HOME__`、`__REPO_PATH__`、`__SYNCTHING_BIN__`、`__SYNCTHING_PROFILE_PATH__`を実際の絶対パスへ置換し、既存プロファイルや端末IDを確認してから使用します。バックアップ用の`__VAULT_PATH__`と`__BACKUP_DIR__`は、手動バックアップで確認した同じVault・保存先にします。EnvironmentVariablesの保持日数も確認します。バックアップを暗号化する場合は、`CTX_BACKUP_AGE_RECIPIENTS`と`CTX_BACKUP_AGE`を追加します（[バックアップを暗号化する](operations.md#バックアップを暗号化する任意)）。バックアップを定期的に確かめる`com.context-hub.backup-verify.plist`は、`__NODE_BIN__`（Node.js 24の絶対パス）と`__CONFIG_PATH__`（設定ファイルの絶対パス）も置換し、設定の`backup.dir`を同じ保存先にします。未展開のテンプレートをそのまま登録しないでください。
 
 XMLの特殊文字を含むパスは適切にエスケープし、展開したplistを`plutil -lint`で検査してから登録します。
