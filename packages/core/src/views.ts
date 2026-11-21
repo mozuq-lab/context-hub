@@ -171,7 +171,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     excluded.push(`- ${r.section === 'next' ? '次の一手: ' : '未解決: '}${plain(r.text)} ${ref(input)} — 理由: ${exclusionReasonLabels[r.reason]}${r.note ? `（${plain(r.note)}）` : ''} / 本人報告 ${dateLabel(r.created_at, config.timezone)} ${r.id}${detached ? ' / このメモはこのプロジェクトから外しています' : reread ? ' / メモを読み直しました' : ' / いまの整理結果にはない項目です'}`);
   }
   const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
-  for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after }; }
+  for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) }; }
   const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key); return s ? ` — ${scheduleLabel(s)}` : ''; }));
   next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、

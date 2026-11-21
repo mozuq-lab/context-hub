@@ -11,7 +11,8 @@ import { listProjectCandidates,readProjectCoverage,recoverProjectApprovalsLocked
 import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths } from './intake.js';
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
-import { readItemSchedules } from './item-schedules.js';
+import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
+import { readAskRecords } from './ask.js';
 import { readPolicyReviews } from './policy-reviews.js';
 import { readItemResolutions } from './item-resolutions.js';
 import { readRereads } from './item-rereads.js';
@@ -55,6 +56,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { const people = await inspectPeople(vault); for (const issue of people.issues) issues.push(`人の定義が不正です: ${issue.path}（${issue.message}）`); for (const path of await stoppedPeoplePages(vault)) issues.push(`人ごとの見返しの更新が止まっています（手で変更されています）: ${path}`); } catch { issues.push('人の定義を走査できません'); }
   try { await readPersonChanges(vault); } catch { issues.push('人の定義の変更記録が不正です'); }
   try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
+  try { for (const path of (await readItemOccurrences(vault)).problems) issues.push(`定例の回の記録が不正です: ${path}`); } catch { issues.push('定例の回の記録を走査できません'); }
+  try { for (const path of (await readAskRecords(vault)).problems) issues.push(`記録に聞くの問いと答えの記録が不正です: ${path}`); } catch { issues.push('記録に聞くの問いと答えの記録を走査できません'); }
   try { for (const path of (await readPolicyReviews(vault)).problems) issues.push(`方針の見直しの記録が不正です: ${path}`); } catch { issues.push('方針の見直しの記録を走査できません'); }
   try { await readItemResolutions(vault); } catch (error) { issues.push(error instanceof Error && error.message.startsWith('解決記録') ? error.message : '完了・解決・誤りとして外した記録を走査できません'); }
   try { for (const path of (await readSynthesisRuns(vault)).problems) issues.push(`週次の統合の記録が不正です: ${path}`); } catch { issues.push('週次の統合の記録を走査できません'); }

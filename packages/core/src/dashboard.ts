@@ -3,7 +3,8 @@ import {rebuildPoliciesLocked,readPolicies} from './policies.js';
 import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions } from './item-resolutions.js';
-import { effectiveSchedules,readItemSchedules,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
+import { effectiveSchedules,readItemOccurrences,readItemSchedules,repeatLabel,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
+import { readAskRecords } from './ask.js';
 import { Vault,hash,parseMarkdown } from './storage.js';
 import { lifecycleOf,projectStatusLabels } from './project-status.js';
 import { decodeIntake } from './intake-format.js';
@@ -114,7 +115,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      calendarItems.push({projectId:project.id,projectTitle:project.title,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedule.created_at});
      const {bucket,hidden}=scheduleBucket(schedule,today);
      if(hidden){resting++;front.add(i.key);}
-     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
+     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
     for(const s of loose)orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
@@ -189,6 +190,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
   for(const issue of people.issues)errors.push(`- [人の定義を確かめてください](${issue.path}): ${plain(issue.message)}`);
   for(const path of await stoppedPeoplePages(vault))errors.push(`- [人ごとの見返しの更新が止まっています](${path}) — 手で変更されています。記録から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
+  for(const path of (await readItemOccurrences(vault)).problems)errors.push(`- [定例の回の記録が不正です](${path})`);
+  for(const path of (await readAskRecords(vault)).problems)errors.push(`- [記録に聞くの問いと答えの記録が不正です](${path})`);
   // 期日のカレンダー用ファイル。書けなくてもHOMEは作り、「失敗と競合」に示す。
   // NOW項目を読めないプロジェクトがある間は、予定が一時的に消えないよう前回のファイルを残す。
   if(!config.calendar?.enabled||!nextUnread.length)try{await writeCalendarLocked(config,vault,calendarItems);}catch{errors.push('- 期日のカレンダー用ファイル（90_system/calendar/contexthub.ics）を書き出せませんでした（`ctx doctor`で確認してください）');}

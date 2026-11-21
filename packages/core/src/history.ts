@@ -6,6 +6,7 @@ import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact, re
 import { groundedResult, readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { lifecycleOf, projectStatusLabels, readProjectStatusChanges, type ProjectStatusChange } from './project-status.js';
 import { exclusionReasonLabels, readItemResolutions, readNowItems, type ItemResolution } from './item-resolutions.js';
+import { readItemOccurrences, repeatLabel, type ItemOccurrence } from './item-schedules.js';
 import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
 import { readProjectMerges, type ProjectMerge } from './project-merges.js';
@@ -29,7 +30,7 @@ export const historyPath = (projectId: string) => `10_projects/${projectId}/HIST
 
 interface Event { at: string; order: number; line: string }
 interface HistorySources {
-  config: HubConfig; projects: Project[]; units: EffectiveInput[]; receipts: Receipt[]; resolutions: ItemResolution[]; statuses: ProjectStatusChange[];
+  config: HubConfig; projects: Project[]; units: EffectiveInput[]; receipts: Receipt[]; resolutions: ItemResolution[]; occurrences: ItemOccurrence[]; statuses: ProjectStatusChange[];
   /** 読めなかった記録の種類。経緯からは省き、本文にその旨を書く（cycleとHOMEを止めない）。 */ problems: string[];
   creations: Awaited<ReturnType<typeof readProjectCreations>>; definitions: Awaited<ReturnType<typeof readProjectDefinitionChanges>>; merges: ProjectMerge[]; knowledge: { projectId: string; id: string; kind: string; claim: string; approvedAt: string; retiredAt?: string; reviewedAt: string[] }[];
 }
@@ -56,7 +57,8 @@ async function readSources(config: HubConfig, vault: Vault): Promise<HistorySour
   const tolerant = async <T>(label: string, read: () => Promise<T[]>): Promise<T[]> => { try { return await read(); } catch { problems.push(label); return []; } };
   return {
     config, projects: await readProjects(config), units: await readEffectiveInputs(config), receipts: await readReceipts(config),
-    resolutions: await tolerant('完了・解決の報告', () => readItemResolutions(vault)), statuses: await tolerant('状態の切り替え', () => readProjectStatusChanges(vault)),
+    resolutions: await tolerant('完了・解決の報告', () => readItemResolutions(vault)),
+    occurrences: await tolerant('定例の回', async () => { const read = await readItemOccurrences(vault); if (read.problems.length) throw new Error(); return read.records; }), statuses: await tolerant('状態の切り替え', () => readProjectStatusChanges(vault)),
     creations: await tolerant('プロジェクトの作成', () => readProjectCreations(vault)), definitions: await tolerant('定義の変更', () => readProjectDefinitionChanges(vault)), merges: await tolerant('プロジェクトの統合', () => readProjectMerges(vault)), knowledge, problems,
   };
 }
@@ -100,6 +102,9 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
   }
   for (const r of sources.resolutions.filter(r => r.project_id === id))
     events.push({ at: r.created_at, order: 2, line: `- ${day(r.created_at)} ${r.action === 'resolve' ? (r.section === 'next' ? '完了' : '解決') : r.action === 'exclude' ? `誤りとして外した（${r.reason ? exclusionReasonLabels[r.reason] : '理由なし'}）` : '未解決に戻した'}: ${clip(r.text)}（本人報告 ${r.id}）` });
+  // 定例の回。項目は欄に残るので、完了・解決とは分けて「今回を完了」「今回を見送り」として載せる。
+  for (const o of sources.occurrences.filter(o => o.project_id === id))
+    events.push({ at: o.created_at, order: 2, line: `- ${day(o.created_at)} 定例（${repeatLabel(o.repeat)}）の${o.due}の回を${o.action === 'done' ? '完了' : '見送り'}: ${clip(o.text)}（次は ${o.next_due}・本人報告 ${o.id}）` });
   for (const s of sources.statuses.filter(s => s.project_id === id)) {
     const from = (projectStatusLabels as Record<string, string>)[s.from] ?? (s.from ? s.from : '進行中');
     events.push({ at: s.changed_at, order: 3, line: `- ${day(s.changed_at)} 状態: ${plain(from)} → ${projectStatusLabels[s.to]}（${s.id}）` });
