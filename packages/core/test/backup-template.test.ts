@@ -163,14 +163,19 @@ test.skipIf(process.platform === 'win32' || !hasAge)('暗号化の途中で止�
     await mkdir(stale); await writeFile(join(stale, 'vault.tar.gz'), 'x'); await mkdir(other);
     const old = new Date(Date.now() - 3 * 24 * 3600 * 1000); await utimes(stale, old, old);
     // 暗号化に時間がかかる間に止められる（ageの代わりに待つだけのコマンド）。
-    const slow = join(folder, 'slow-age.sh'); await writeFile(slow, '#!/bin/sh\nsleep 1\nexit 1\n'); await chmod(slow, 0o755);
-    const child = spawn('/bin/sh', [backupScript], { env: { ...env, CTX_BACKUP_AGE: slow }, stdio: 'ignore' });
+    const slow = join(folder, 'slow-age.sh'), started = join(folder, 'age-started');
+    await writeFile(slow, '#!/bin/sh\n: > "$CTX_TEST_AGE_STARTED"\nsleep 1\nexit 1\n'); await chmod(slow, 0o755);
+    const child = spawn('/bin/sh', [backupScript], { env: { ...env, CTX_BACKUP_AGE: slow, CTX_TEST_AGE_STARTED: started }, stdio: 'ignore' });
     const exited = new Promise<number | null>(done => child.once('close', code => done(code)));
-    for (let i = 0; i < 100 && !(await readdir(work)).some(n => /^ctx-backup-.{6}$/.test(n) && n !== 'ctx-backup-abcdef'); i++) await new Promise(r => setTimeout(r, 20));
-    child.kill('SIGTERM');
-    expect(await exited).not.toBe(0);
-    expect(await readdir(work)).toEqual(['keep-me']);
-    expect((await readdir(backups).catch(() => [])).filter(n => n.includes('.tmp'))).toEqual([]);
+    try {
+      // フォルダー作成直後は後片付けの登録前なので、暗号化コマンドへ入ったことを待ってから止める。
+      for (let i = 0; i < 100 && !(await access(started).then(() => true, () => false)); i++) await new Promise(r => setTimeout(r, 20));
+      await access(started);
+      expect(child.kill('SIGTERM')).toBe(true);
+      expect(await exited).not.toBe(0);
+      expect(await readdir(work)).toEqual(['keep-me']);
+      expect((await readdir(backups).catch(() => [])).filter(n => n.includes('.tmp'))).toEqual([]);
+    } finally { child.kill('SIGTERM'); await exited; }
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
