@@ -24,7 +24,7 @@ export function defaultConfig(vaultPath: string, statePath = join(homedir(), 'Li
     git: { enabled: false, repos: [], maxCommits: 30, lookbackDays: 14 },
     synthesis: defaultSynthesis(),
     privacy: { redactSecrets: true, patterns: [] },
-    backup: { dir: null, verifyMaxAgeDays: 7 },
+    backup: { dir: null, verifyMaxAgeDays: 7, ageIdentity: null, ageCommand: 'age' },
   };
 }
 const positive = z.number().int().min(1).max(1_000_000);
@@ -46,19 +46,27 @@ const configSchema = z.object({
     maxFocusMemos: positive.max(100), maxContextMemos: z.number().int().min(0).max(500), maxCalls: positive.max(4) }).strict().default(defaultSynthesis()),
   // 既定で有効。追加の規則は読み込み時に正規表現として組み立てられることを確かめる。
   privacy: z.object({ redactSecrets: z.boolean(), patterns: z.array(z.object({ label: z.string().min(1).max(40).regex(/^[^\]\r\n]+$/), pattern: z.string().min(1).max(500).refine(v => { try { new RegExp(v, 'gu'); return true; } catch { return false; } }, '正規表現が不正です').superRefine((v, ctx) => { const problem = dartPatternProblem(v); if (problem) ctx.addIssue({ code: 'custom', message: problem }); }) }).strict()).max(50) }).strict().default({ redactSecrets: true, patterns: [] }),
-  // 既定では未設定。バックアップ先を書くと、ctx backup verify が最新のアーカイブを確かめ、HOMEが復元点の古さを知らせる。
   // 既定では無効。有効にすると、HOMEの生成のたびに期日をカレンダー用のファイルへ書き出す（内容が変わったときだけ）。
   calendar: z.object({ enabled: z.boolean(), reviewDates: z.boolean(), titles: z.enum(['item', 'project']) }).strict().default({ enabled: false, reviewDates: false, titles: 'item' }),
-  backup: z.object({ dir: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です').nullable(), verifyMaxAgeDays: positive.max(3650) }).strict().default({ dir: null, verifyMaxAgeDays: 7 }),
+  // 既定では未設定。バックアップ先を書くと、ctx backup verify が最新のアーカイブを確かめ、HOMEが復元点の古さを知らせる。
+  // ageIdentityは暗号化したバックアップ（.tar.gz.age）を確かめるときだけ使うageの秘密鍵のファイル。Vaultと同期フォルダーの外に置く。
+  backup: z.object({ dir: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です').nullable(), verifyMaxAgeDays: positive.max(3650),
+    ageIdentity: z.string().refine(v => isAbsolute(v) || v === '~' || v.startsWith('~/'), '絶対パスが必要です').nullable().default(null), ageCommand: z.string().min(1).max(500).regex(/^[^\r\n\0]+$/).default('age') }).strict().default({ dir: null, verifyMaxAgeDays: 7, ageIdentity: null, ageCommand: 'age' }),
 }).strict();
 export function validateConfig(value: unknown): HubConfig {
   const c = configSchema.parse(value);
   c.vaultPath = expandPath(c.vaultPath); c.statePath = expandPath(c.statePath); c.logging.dir = expandPath(c.logging.dir);
   c.git = { ...c.git, repos: c.git.repos.map(r => ({ ...r, path: expandPath(r.path) })) };
   if (c.backup.dir !== null) c.backup = { ...c.backup, dir: expandPath(c.backup.dir) };
-  for (const outside of [c.statePath, c.logging.dir, ...(c.backup.dir !== null ? [c.backup.dir] : [])]) {
+  if (c.backup.ageIdentity !== null) c.backup = { ...c.backup, ageIdentity: expandPath(c.backup.ageIdentity) };
+  for (const outside of [c.statePath, c.logging.dir, ...(c.backup.dir !== null ? [c.backup.dir] : []), ...(c.backup.ageIdentity !== null ? [c.backup.ageIdentity] : [])]) {
     const rel = relative(c.vaultPath, outside);
-    if (!rel || (!rel.startsWith('..' + '/') && rel !== '..' && !isAbsolute(rel))) throw new Error('ローカル状態・ログ・バックアップ先はVaultの外へ設定してください');
+    if (!rel || (!rel.startsWith('..' + '/') && rel !== '..' && !isAbsolute(rel))) throw new Error('ローカル状態・ログ・バックアップ先・バックアップの秘密鍵はVaultの外へ設定してください');
+  }
+  // バックアップ先は別の場所へ複製することがあるため、暗号化を解く秘密鍵を一緒に置かない。
+  if (c.backup.dir !== null && c.backup.ageIdentity !== null) {
+    const rel = relative(c.backup.dir, c.backup.ageIdentity);
+    if (!rel || (!rel.startsWith('..' + '/') && rel !== '..' && !isAbsolute(rel))) throw new Error('バックアップの秘密鍵はバックアップ先の外へ設定してください');
   }
   return c;
 }
@@ -97,5 +105,5 @@ export async function loadConfig(path?: string, overrides: ConfigOverrides = {})
     calendar: { enabled: false, reviewDates: false, titles: 'item', ...raw.calendar, ...overrides.calendar },
   };
   // 値は秘密を含みうるので出さず、誤りのあるキーの場所だけを示す。
-  try { return validateConfig(c); } catch (error) { throw new Error(error instanceof ZodError ? `設定のキー・型・値を確認してください: ${issuePaths(error).join('、')}${patternReasons(error)}` : error instanceof Error && error.message.startsWith('ローカル状態') ? error.message : '設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }
+  try { return validateConfig(c); } catch (error) { throw new Error(error instanceof ZodError ? `設定のキー・型・値を確認してください: ${issuePaths(error).join('、')}${patternReasons(error)}` : error instanceof Error && (error.message.startsWith('ローカル状態') || error.message.startsWith('バックアップの秘密鍵')) ? error.message : '設定のキー・型・値、またはVaultと状態ディレクトリの分離を確認してください'); }
 }
