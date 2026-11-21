@@ -12,7 +12,7 @@ import { readProjects,inspectProjects,projectIssueFields,mergeTargets,mergeIssue
 import {buildReviewIndex,writeReviewIndexLocked,type ReviewCandidate} from './candidate-review.js';
 import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
 import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel,lastEvidenceAt } from './views.js';
-import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage,writeIntakeFeaturesLocked } from './intake.js';
+import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage,writeIntakeFeaturesLocked,isIntakeRefusal,refusalNoticeVisible,REFUSAL_NOTICE_DAYS } from './intake.js';
 import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
 import { referencesStopped,referencesPath,unassignedReferenceSection } from './references.js';
@@ -147,18 +147,21 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 受領と整理状況は、対応が要るもの（受付待ち・内容変更・整理待ち・整理失敗）を全件、受領済み・整理済みは新しい順にSTATUS_ROWS件まで並べ、残りは件数で示す。
   const statuses:string[]=[],acksByPath=new Map(acks.map(a=>[a.path,a])),receiptsById=new Map(receipts.map(r=>[r.input_id,r]));
   const intakeRows:{row:string;routine:boolean;at:number}[]=[];
+  // 理由付きで断った依頼（今の内容への答え）は受付待ちではない。受領済みと同じく直近の分だけ並べる。
+  const refusals=new Map<string,{file_hash:string;updated_at:string}>();
+  for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json'))try{const e=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(isIntakeRefusal(e))refusals.set(e.path,e);}catch{/* 不正な記録は「失敗と競合」に示す。 */}
   for(const path of await intakePaths(vault)){
-   const ack=acksByPath.get(path);let changed=false;
-   if(ack)try{const bytes=await vault.readBytes(path,config.capture.maxInputChars*4+8192);changed=!bytes||hash(decodeIntake(bytes))!==ack.request_hash;}catch{changed=true;}
-   intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:!!ack&&!changed,at:ack?Date.parse(ack.received_at):0});
+   const ack=acksByPath.get(path),refusal=ack?undefined:refusals.get(path);let changed=false,refused=false;
+   if(ack||refusal)try{const bytes=await vault.readBytes(path,config.capture.maxInputChars*4+8192),current=bytes?hash(decodeIntake(bytes)):undefined;changed=!!ack&&current!==ack.request_hash;refused=!!refusal&&current===refusal.file_hash;}catch{changed=!!ack;}
+   intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':refused?'断った依頼（理由はアプリの依頼の結果で確認できます）':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:(!!ack&&!changed)||refused,at:ack?Date.parse(ack.received_at):refused?Date.parse(refusal!.updated_at):0});
   }
-  statuses.push(...recentRoutine(intakeRows,'Mac mini受領済み'));
+  statuses.push(...recentRoutine(intakeRows,'Mac mini受領済み・断った依頼'));
   // 本人が直接追加した行動はモデルで整理しないため、整理待ちに数えない。
   const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id),action=unit.chain.root.kind==='action';return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${action?'本人が追加した行動（整理しません）':latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:action||latest?.status==='organized',at:Date.parse(unit.chain.root.received_at)};});
   statuses.push(...recentRoutine(inputRows,'整理済み'));
   // 件数は1行にまとめて先に示す。行の一覧は対応が要るものと直近の分だけにし、全件はアプリの受付状況に任せる。
   const waitingIntake=intakeRows.filter(r=>!r.routine).length,failedInputs=effective.filter(u=>receiptsById.get(u.chain.latest.id)?.status==='failed').length,waitingInputs=inputRows.filter(r=>!r.routine).length-failedInputs;
-  const statusSummary=intakeRows.length||inputRows.length?`受付ファイル ${intakeRows.length}件（受付待ち・内容変更 ${waitingIntake}件） / 入力 ${inputRows.length}件（整理待ち ${waitingInputs}件・整理失敗 ${failedInputs}件）。受領済み・整理済みは新しい${STATUS_ROWS}件ずつを並べます。全件はアプリの「受付状況」で確認できます。\n`:'';
+  const statusSummary=intakeRows.length||inputRows.length?`受付ファイル ${intakeRows.length}件（受付待ち・内容変更 ${waitingIntake}件） / 入力 ${inputRows.length}件（整理待ち ${waitingInputs}件・整理失敗 ${failedInputs}件）。受領済み・断った依頼・整理済みは新しい${STATUS_ROWS}件ずつを並べます。全件はアプリの「受付状況」で確認できます。\n`:'';
   // どのプロジェクトにも結び付いていないメモから出たタスクの分類とAIの提案。アプリが読む一覧も同時に書く（内容が変わったときだけ）。
   const unassignedActions=unassignedActionsSection(config,await rebuildUnassignedActionsLocked(config,vault,effective,clock));
   // 週次の統合の結果（今週の気づき）。設定で有効にしたときだけ出す。記録を読めなくてもHOMEは作り、「失敗と競合」に示す。
@@ -174,7 +177,10 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   try{ideaText=ideaSection(await rebuildIdeaIndexLocked(config,vault,clock));}catch(error){ideaProblem=error instanceof Error?error.message:String(error);}
   const errors:string[]=[];
   if(ideaProblem)errors.push(`- ${plain(ideaProblem)}（似ているアイデアの一覧を更新できません。\`ctx doctor\`で確認してください）`);
-  for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){try{const e=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(e.status==='error'&&acks.some(a=>a.path===e.path))continue;errors.push(`- [${plain(e.path)}](${e.path}): ${e.status==='conflict'?'競合':'受付失敗'} / ${plain(intakeErrorMessage(e))} / 記録: [詳細](${path})`);}catch{errors.push(`- 受付エラー記録不正: ${plain(path)}`);}}
+  for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){try{const e=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(e.status==='error'&&acks.some(a=>a.path===e.path))continue;
+   // 理由付きの拒否は依頼への答え。異常ではないので、拒否から数日だけ示して消す（記録は依頼の結果として残る）。
+   if(isIntakeRefusal(e)&&!refusalNoticeVisible(e,clock.getTime()))continue;
+   errors.push(`- [${plain(e.path)}](${e.path}): ${e.status==='conflict'?'競合':isIntakeRefusal(e)?`断った依頼（${REFUSAL_NOTICE_DAYS}日間表示）`:'受付失敗'} / ${plain(intakeErrorMessage(e))} / 記録: [詳細](${path})`);}catch{errors.push(`- 受付エラー記録不正: ${plain(path)}`);}}
   // 退避は対象ごとにまとめる。NOWは手で変えた時点から更新が止まっているので、そのことと戻し方を示す。
   for(const g of await listConflicts(config)){
    const count=g.files.length>1?`、退避${g.files.length}件`:'';

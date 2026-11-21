@@ -68,7 +68,7 @@ export async function policyReviewItems(config: HubConfig, vault: Vault, options
     const confirmedAt = reviews.records.filter(r => r.knowledge_id === entry.id && r.knowledge_hash === hash).at(-1)?.reviewed_at;
     const since = confirmedAt !== undefined && Date.parse(confirmedAt) > Date.parse(approvedAt) ? confirmedAt : approvedAt;
     const elapsed = Math.max(0, Math.floor((now.getTime() - Date.parse(since)) / DAY));
-    const newInputs = projectId !== null && options.inputs ? options.inputs.filter(i => i.project === projectId && i.kind !== 'correction' && Date.parse(i.received_at) > Date.parse(since)).length : undefined;
+    const newInputs = projectId !== null && options.inputs ? options.inputs.filter(i => i.project === projectId && i.kind !== 'correction' && i.kind !== 'action' && Date.parse(i.received_at) > Date.parse(since)).length : undefined;
     items.push({ knowledgeId: entry.id, kind: entry.kind, claim: entry.claim, path: entry.path, hash, projectId, approvedAt, ...(confirmedAt ? { confirmedAt } : {}), since, due: elapsed >= days, days: elapsed, ...(newInputs !== undefined ? { newInputs } : {}) });
   }
   // 長く確かめていない順。

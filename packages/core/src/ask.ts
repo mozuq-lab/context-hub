@@ -34,7 +34,8 @@ const DAY = 86_400_000;
 export const askIdSchema = z.string().regex(/^ASK-[0-9A-HJKMNP-TV-Z]{26}$/);
 export const askQuestionSchema = z.string().refine(v => v.trim().length > 0 && v.length <= ASK_QUESTION_CHARS, `問いは1〜${ASK_QUESTION_CHARS}文字にしてください`);
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
-export const ASK_ERROR_KINDS = ['invalid-output', 'timeout', 'prompt-too-large', 'llm-error', 'interrupted'] as const;
+/** 答えられなかった理由。project-missing: 答える前に選んだプロジェクトがなくなった（モデルは呼ばない）。 */
+export const ASK_ERROR_KINDS = ['invalid-output', 'timeout', 'prompt-too-large', 'llm-error', 'interrupted', 'project-missing'] as const;
 export type AskErrorKind = typeof ASK_ERROR_KINDS[number];
 /**
  * pending: 答え待ち / answered: 答えあり / not-found: 記録に見当たらない / unsupported: 根拠を確かめられる文がなかった /
@@ -101,20 +102,27 @@ export function selectAskSources(question: string, sources: Omit<AskSource, 'ref
     .sort((a, b) => b.score - a.score || Date.parse(b.s.occurredAt) - Date.parse(a.s.occurredAt) || a.s.inputId.localeCompare(b.s.inputId))
     .slice(0, options.limit).map((x, i) => ({ ...x.s, ref: `S${i + 1}` }));
 }
+/** 抜粋で省いたことを示す印。本文の前後を切ったときだけ付ける。 */
+export const ASK_EXCERPT_MARK = '…';
 /** 長い本文は、問いの語が最も多く集まる部分を中心に切り出す。 */
 export function askExcerpt(text: string, question: string, limit = ASK_SOURCE_CHARS): string {
+  return markedExcerpt(askExcerptPart(text, question, limit));
+}
+const markedExcerpt = (part: { body: string; cutStart: boolean; cutEnd: boolean }) => `${part.cutStart ? ASK_EXCERPT_MARK : ''}${part.body}${part.cutEnd ? ASK_EXCERPT_MARK : ''}`;
+/** 抜粋の本文（省いた印を除く）と、前後を切ったかどうか。引用の検証は印を含まない本文で行う。 */
+export function askExcerptPart(text: string, question: string, limit = ASK_SOURCE_CHARS): { body: string; cutStart: boolean; cutEnd: boolean } {
   const chars = [...text];
-  if (chars.length <= limit) return text;
+  if (chars.length <= limit) return { body: text, cutStart: false, cutEnd: false };
   const query = [...askTerms(question)].filter(t => !askStopTerms.has(t)), lower = [...normalize(text)];
   // NFKCで長さが変わる文字があるときは、先頭から切る（位置がずれるため）。
-  if (lower.length !== chars.length || !query.length) return chars.slice(0, limit).join('') + '…';
+  if (lower.length !== chars.length || !query.length) return { body: chars.slice(0, limit).join(''), cutStart: false, cutEnd: true };
   let best = 0, bestScore = -1;
   for (let start = 0; start < chars.length; start += Math.max(1, Math.floor(limit / 4))) {
     const window = lower.slice(start, start + limit).join(''), score = query.filter(t => window.includes(t)).length;
     if (score > bestScore) { best = start; bestScore = score; }
   }
   const from = Math.min(best, chars.length - limit);
-  return `${from > 0 ? '…' : ''}${chars.slice(from, from + limit).join('')}${from + limit < chars.length ? '…' : ''}`;
+  return { body: chars.slice(from, from + limit).join(''), cutStart: from > 0, cutEnd: from + limit < chars.length };
 }
 
 /** 根拠の候補になる記録の一覧。訂正があれば最新の訂正の本文を使い、帰属はHISTORYと同じ基準で決める。
@@ -151,9 +159,10 @@ const modelSentenceSchema = z.object({ text: z.string(), evidence: z.array(z.obj
 const collapse = (text: string) => text.replace(/\s+/g, ' ').trim();
 /**
  * モデルの応答を検証する。渡した記録のrefと、その本文（モデルへ渡した伏せ字の後の抜粋）にそのまま含まれる引用だけを根拠にする。
+ * 抜粋の前後に付けた省いた印（…）は本文ではないので、印を含まない本文（excerptBody）で確かめる。
  * 根拠が1件も残らない文は落とす。空白の違い（改行のつなぎ方）は同じとみなす。
  */
-export function validateAskOutput(raw: string, sources: (AskSource & { excerpt: string })[]): { notFound: boolean; sentences: AskRecord['sentences']; dropped: number } {
+export function validateAskOutput(raw: string, sources: (AskSource & { excerpt: string; excerptBody?: string })[]): { notFound: boolean; sentences: AskRecord['sentences']; dropped: number } {
   let parsed: z.infer<typeof modelSchema>;
   try {
     const body = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -168,7 +177,7 @@ export function validateAskOutput(raw: string, sources: (AskSource & { excerpt: 
     for (const e of sentence.data.evidence) {
       const source = byRef.get(e.ref.trim()), quote = collapse(e.quote);
       if (!source || !quote || [...quote].length > ASK_QUOTE_CHARS || (quote.match(/[\p{L}\p{N}]/gu)?.length ?? 0) < QUOTE_MIN_LETTERS) continue;
-      if (!collapse(source.excerpt).includes(quote) || evidence.some(x => x.input_id === source.inputId && x.quote === quote)) continue;
+      if (!collapse(source.excerptBody ?? source.excerpt).includes(quote) || evidence.some(x => x.input_id === source.inputId && x.quote === quote)) continue;
       evidence.push({ input_id: source.inputId, quote });
       if (evidence.length === ASK_MAX_EVIDENCE) break;
     }
@@ -195,13 +204,13 @@ export async function answerQuestion(config: HubConfig, llm: LlmClient, question
   let project = options.project;
   if (project !== undefined) {
     const projects = await readProjects(config);
-    if (!projects.some(p => p.id === project)) throw new Error('プロジェクトが見つかりません');
+    if (!projects.some(p => p.id === project)) throw new AskError({ code: 'ask-project-missing' }, 'プロジェクトが見つかりません');
     // 統合済みのプロジェクトは、統合先に帰属・関連する記録から答える。
     project = resolveProject(projects, project);
   }
   const settings = secretSettings(config), hide = (text: string) => settings.enabled ? redactText(text, settings).text : text;
   const chosen = selectAskSources(question, askSourcesFrom(await readEffectiveInputs(config), config), { project, limit: config.ask.maxSources })
-    .map(s => ({ ...s, excerpt: askExcerpt(hide(s.text), question) }));
+    .map(s => { const part = askExcerptPart(hide(s.text), question); return { ...s, excerpt: markedExcerpt(part), excerptBody: part.body }; });
   const candidates = chosen.map(s => ({ input_id: s.inputId, root_id: s.rootId, occurred_at: s.occurredAt, kind: s.kind }));
   if (!chosen.length) return { status: 'no-sources', sentences: [], candidates, dropped: 0, model: null, error: null };
   const deadline = performance.now() + config.ask.timeoutSec * 1000;
@@ -304,6 +313,7 @@ export interface AnswerPendingResult { answered: number; failed: number; waiting
  */
 export async function answerPending(config: HubConfig, llm: LlmClient, options: { now?: Date } = {}): Promise<AnswerPendingResult> {
   const vault = new Vault(config), result: AnswerPendingResult = { answered: 0, failed: 0, waiting: 0, limited: false, removed: 0 };
+  // 無効にする前に受け付けた問いは答え待ちのまま残し、有効に戻すと答える（アプリは無効の間そのことを示す）。
   if (!config.ask.enabled) return result;
   const now = () => options.now ?? new Date(), save = (r: AskRecord) => JSON.stringify(r, null, 2) + '\n';
   const write = async (record: AskRecord) => {
@@ -320,7 +330,14 @@ export async function answerPending(config: HubConfig, llm: LlmClient, options: 
     const pending = records.filter(r => r.status === 'pending');
     const recent = records.filter(r => r.last_attempt_at && now().getTime() - Date.parse(r.last_attempt_at) < DAY).reduce((n, r) => n + Math.max(1, r.attempts), 0);
     let budget = Math.max(0, config.ask.dailyLimit - recent), taken = 0;
+    // プロジェクトを選んだ問いがあるときだけ定義を読む。定義を読めない回は確かめず、プロジェクトなしの問いには答える。
+    let projectIds: Set<string> | undefined;
+    if (pending.some(r => r.project !== null)) try { projectIds = new Set((await readProjects(config)).map(p => p.id)); } catch { projectIds = undefined; }
     for (const record of pending) {
+      // 受け付けた後に選んだプロジェクトがなくなった問いは、モデルを呼ばずに閉じる。
+      if (record.project !== null && projectIds && !projectIds.has(record.project)) {
+        await write({ ...record, status: 'failed', answered_at: now().toISOString(), error: 'project-missing' }); result.failed++; continue;
+      }
       if (record.attempts >= ASK_MAX_ATTEMPTS) {
         await write({ ...record, status: 'failed', answered_at: now().toISOString(), error: 'interrupted' }); result.failed++; continue;
       }
@@ -330,7 +347,7 @@ export async function answerPending(config: HubConfig, llm: LlmClient, options: 
       await write(opened);
       let answer: AskAnswer;
       try { answer = await answerQuestion(config, llm, record.question, record.project ? { project: record.project } : {}); }
-      catch { answer = { status: 'failed', sentences: [], candidates: [], dropped: 0, model: null, error: 'llm-error' }; }
+      catch (failure) { answer = { status: 'failed', sentences: [], candidates: [], dropped: 0, model: null, error: failure instanceof AskError && failure.reason.code === 'ask-project-missing' ? 'project-missing' : 'llm-error' }; }
       const closed = askRecordSchema.safeParse({ ...opened, status: answer.status, answered_at: now().toISOString(), sentences: answer.sentences, candidates: answer.candidates, dropped: Math.min(100, answer.dropped), model: answer.model, error: answer.error });
       await write(closed.success ? closed.data : { ...opened, status: 'failed', answered_at: now().toISOString(), error: 'invalid-output' });
       if (answer.status === 'failed') result.failed++; else result.answered++;

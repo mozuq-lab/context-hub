@@ -165,8 +165,10 @@ export async function readPersonChanges(vault: Vault): Promise<PersonChange[]> {
   const result: PersonChange[] = [];
   for (const path of await vault.files(changeDir)) {
     if (!/^90_system\/people\/PPL-[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(path)) continue;
-    const change = personChangeSchema.parse(JSON.parse((await vault.read(path))!));
-    if (path !== `${changeDir}/${change.id}.json`) throw new Error('人の定義の変更記録とパスが一致しません');
+    // 変更記録は同じ受付IDの重複を防ぐ根拠なので、1件でも読めなければ人の定義の変更を止める。直す場所が分かるようパスを示す。
+    let change: PersonChange;
+    try { change = personChangeSchema.parse(JSON.parse((await vault.read(path))!)); } catch { throw new Error(`人の定義の変更記録が不正です: ${path}`); }
+    if (path !== `${changeDir}/${change.id}.json`) throw new Error(`人の定義の変更記録とパスが一致しません: ${path}`);
     result.push(change);
   }
   return result.sort((a, b) => a.id.localeCompare(b.id));
@@ -392,7 +394,12 @@ export async function rebuildPeopleLocked(config: HubConfig, vault: Vault, units
 }
 export async function rebuildPeople(config: HubConfig): Promise<PeopleWrite[]> {
   const vault = new Vault(config);
-  return vault.withLock(() => rebuildPeopleLocked(config, vault));
+  // すべての入力の読み取りはWriterロックの外で行い、ロックを持つ時間を短くする（受付を待たせない）。
+  // 読んだ後に届いた入力は次の作り直し（cycle）で反映される。人を登録していなければ入力を読まない。
+  const { people, issues } = await inspectPeople(vault);
+  // 人がいなければ読まず、ロック内で人が増えていたときはロック内で読む。
+  const units = people.length || issues.length ? await readEffectiveInputs(config) : undefined;
+  return vault.withLock(() => rebuildPeopleLocked(config, vault, units));
 }
 /** 手で書き換えて更新を止めている人の画面・一覧。doctorとHOMEで示す。 */
 export async function stoppedPeoplePages(vault: Vault): Promise<string[]> {

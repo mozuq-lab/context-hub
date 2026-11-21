@@ -139,6 +139,11 @@ test('登録の依頼を記録した後に外していれば、同じ依頼の�
   await vault.remove(personDefinitionPath('sato'));
   await expect(setPerson(config, { ...request, personId: 'sato', name: '佐藤さん', sourceEventId: 'REQ-2' })).resolves.toMatchObject({ deduped: true });
   expect(await vault.read(personDefinitionPath('sato'))).toBeDefined();
+  // 変更記録が1件でも読めなければ重複を確かめられないため止める。直す場所が分かるよう、依頼の失敗とdoctorに記録のパスを示す。
+  const [broken] = await vault.files('90_system/people');
+  await vault.write(broken!, '{');
+  await expect(setPerson(config, { ...request, personId: 'ito', name: '伊藤さん', sourceEventId: 'REQ-3' })).rejects.toThrow(broken!);
+  expect((await doctor(config)).issues).toContain(`人の定義の変更記録が不正です: ${broken}`);
 });
 
 test('手で書き換えた画面は上書きせず、HOMEとdoctorで示す。読めない定義も示す', async () => {

@@ -8,7 +8,7 @@ import { readProjects,inspectProjects,describeProjectIssue,mergeIssues } from '.
 import { readProjectMerges } from './project-merges.js';
 import { readEffectiveInputs } from './effective-inputs.js';
 import { listProjectCandidates,readProjectCoverage,recoverProjectApprovalsLocked } from './project-proposals.js';
-import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths } from './intake.js';
+import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths,isIntakeRefusal,refusalNoticeVisible } from './intake.js';
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
 import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
@@ -33,7 +33,7 @@ import { describeFindings, findSecrets, secretSettings } from './secrets.js';
  * backupはバックアップから復元できるかの確認状況で、これもVaultの整合性ではないためissuesに入れない（確認したことがあるか、バックアップ先を設定したときだけ返す）。
  */
 export async function doctor(config: HubConfig): Promise<{issues:string[];notices?:string[];inputs:number;secrets:{input_id:string;path:string;found:string}[];backup?:{restore_point:string|null;restore_point_age_days:number|null;warnings:string[]}}> {
-  const vault=new Vault(config), issues:string[]=[], inputs:Input[]=[];
+  const vault=new Vault(config), issues:string[]=[], refusals:string[]=[], inputs:Input[]=[];
   for (const dir of VAULT_DIRS) {
     try { if (!(await lstat(await vault.path(dir))).isDirectory()) issues.push(`構造不正: ${dir}`); }
     catch { issues.push(`構造欠損・危険なパス: ${dir}`); }
@@ -54,7 +54,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { for (const project of await readProjects(config)) if (await historyStopped(vault, project.id)) issues.push(`経緯の更新が止まっています（手で変更されています）: 10_projects/${project.id}/HISTORY.md`); } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const project of await readProjects(config)) if (await referencesStopped(vault, project.id)) issues.push(`資料の更新が止まっています（手で変更されています）: 10_projects/${project.id}/REFERENCES.md`); } catch { /* 定義の不正は上で報告する。 */ }
   try { const people = await inspectPeople(vault); for (const issue of people.issues) issues.push(`人の定義が不正です: ${issue.path}（${issue.message}）`); for (const path of await stoppedPeoplePages(vault)) issues.push(`人ごとの見返しの更新が止まっています（手で変更されています）: ${path}`); } catch { issues.push('人の定義を走査できません'); }
-  try { await readPersonChanges(vault); } catch { issues.push('人の定義の変更記録が不正です'); }
+  try { await readPersonChanges(vault); } catch (error) { issues.push(error instanceof Error && error.message.startsWith('人の定義の変更記録') ? error.message : '人の定義の変更記録を走査できません'); }
   try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
   try { for (const path of (await readItemOccurrences(vault)).problems) issues.push(`定例の回の記録が不正です: ${path}`); } catch { issues.push('定例の回の記録を走査できません'); }
   try { for (const path of (await readAskRecords(vault)).problems) issues.push(`記録に聞くの問いと答えの記録が不正です: ${path}`); } catch { issues.push('記録に聞くの問いと答えの記録を走査できません'); }
@@ -76,7 +76,10 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
       if('inputId'in result&&!inputs.some(i=>i.id===result.inputId&&i.path===result.path))issues.push(`受付記録の原文欠損: ${ack.request_id}`);
     }
     for(const path of await vault.files('90_system/intake/pending'))if(path.endsWith('.json')){const{snapshot}=parseIntakePending(path,(await vault.read(path))!,config.capture.maxInputChars);const ack=acks.find(a=>a.request_id===snapshot.request_id);if(ack&&ack.request_hash!==snapshot.request_hash)issues.push(`受付回復と受領記録の不一致: ${path}`);else if(!ack)issues.push(`受付の停止回復待ち: ${snapshot.request_id}`);}
-    for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){const record=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(record.status==='conflict'||!acks.some(a=>a.path===record.path))issues.push(`受付${record.status==='conflict'?'競合':'失敗'}: ${record.path} / ${intakeErrorMessage(record)}`);}
+    for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){const record=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(record.status!=='conflict'&&acks.some(a=>a.path===record.path))continue;
+      // 理由付きの拒否は依頼への答えで、Vaultの異常ではない。異常（終了コード1）にせず、直近だけ注意に示す。
+      if(isIntakeRefusal(record)){if(refusalNoticeVisible(record,Date.now()))refusals.push(`断った依頼: ${record.path} / ${intakeErrorMessage(record)}`);continue;}
+      issues.push(`受付${record.status==='conflict'?'競合':'失敗'}: ${record.path} / ${intakeErrorMessage(record)}`);}
     for(const path of await intakePaths(vault))if(path.includes('.sync-conflict-'))issues.push(`受付の同期競合コピー: ${path}`);
   }catch{issues.push('受付ファイル・受領・停止回復記録が不正です');}
   try {
@@ -121,7 +124,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
   try{const paths=await knowledgePaths(vault);for(const path of paths){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id,paths);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
   // 見つからない作業フォルダーの対応付けは、外付けを外しただけでも起こり、方針の読取も止めないため、異常（issues）ではなく注意に示す。
-  const notices=await policyRootProblems(config);
+  const notices=[...await policyRootProblems(config),...refusals];
   try{await readPolicies(config);}catch{issues.push(definitionsBroken?afterDefinitions('方針の同期・集約を確認できません'):'方針manifest・正本・停止記録の同期または集約が未完了です');}
   try{await readIdeaLinks(vault);}catch(error){issues.push(error instanceof Error?error.message:'アイデアの束ねの記録が不正です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}
