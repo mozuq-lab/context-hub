@@ -250,7 +250,7 @@ test('引き取った行の日付と繰り返しは行動の文面を直して�
   expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
 });
 
-test('日付を付けた行をプロジェクトを決めない行動にすると、付け直す先がないため「日付を付け直す項目」に出さない', async () => {
+test('日付を付けた行をプロジェクトを決めない行動にすると、日付は行動へ引き継ぎ、「日付を付け直す項目」に出さない', async () => {
   const { config, vault } = await fixture();
   const work = await capture(config, summary(['名前を決める', '色を決める']));
   await organize(config, new MockLlm());
@@ -261,6 +261,7 @@ test('日付を付けた行をプロジェクトを決めない行動にする�
   expect((await readNowItems(vault, 'hub'))!.items.map(i => i.key)).not.toContain(aiKey);
   await rebuildDashboard(config);
   expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
+  expect((await readNowItems(vault, '_unassigned'))!.items.find(i => i.action)!.schedule).toMatchObject({ due: '2026-12-01' });
   // 同じプロジェクトのほかの行の日付はそのまま。
   expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === other)!.schedule).toMatchObject({ due: '2026-12-02' });
 });

@@ -1,10 +1,8 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault } from './storage.js';
-import { readInputs } from './capture.js';
-import { assertNotMerged, projectIdSchema, readProjects } from './projects.js';
-import { ItemTargetError, activeResolutions, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection } from './item-resolutions.js';
-import { effectiveItemRecords } from './item-schedules.js';
+import { ItemTargetError, activeResolutions, itemScopeSchema, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection } from './item-resolutions.js';
+import { assertRecordTarget, effectiveItemRecords, itemRecordScope } from './item-schedules.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -25,7 +23,7 @@ export const effortIdSchema = z.string().regex(/^EFF-[0-9A-HJKMNP-TV-Z]{26}$/);
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
 /** 1件の記録は項目の手間の目安の全体。effortがnullは目安を外した記録。 */
 export const itemEffortRecordSchema = z.object({
-  schema_version: z.literal(1), id: effortIdSchema, project_id: projectIdSchema, item_key: digest, section: z.enum(itemSections),
+  schema_version: z.literal(1), id: effortIdSchema, project_id: itemScopeSchema, item_key: digest, section: z.enum(itemSections),
   text: z.string().max(4000), input_id: inputIdSchema, effort: itemEffortSchema.nullable(),
   source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(200).optional(), created_at: z.string().datetime({ offset: true }),
 }).strict();
@@ -64,7 +62,7 @@ export function effectiveEfforts(records: ItemEffortRecord[], projectId: string,
 export interface ItemEffortRequest { projectId: string; itemKey: string; effort: ItemEffort | null; source: string; sourceEventId?: string }
 export interface ItemEffortResult { projectId: string; itemKey: string; effortId: string; deduped: boolean }
 const requestSchema = z.object({
-  projectId: projectIdSchema, itemKey: digest, effort: itemEffortSchema.nullable(),
+  projectId: itemScopeSchema, itemKey: digest, effort: itemEffortSchema.nullable(),
   source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
 }).strict();
 
@@ -74,12 +72,8 @@ const requestSchema = z.object({
  */
 export async function setItemEffort(config: HubConfig, request: ItemEffortRequest): Promise<ItemEffortResult> {
   const r = requestSchema.parse(request), vault = new Vault(config);
-  // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
-  const { rebuildNowLocked, readReceipts } = await import('./views.js');
   return vault.withLock(async () => {
-    const projects = await readProjects(config);
-    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
-    const rebuild = async () => { await rebuildNowLocked(vault, config, r.projectId, await readInputs(config), await readReceipts(config)); };
+    const { unassigned, rebuild, assertOpen } = await itemRecordScope(config, vault, r.projectId);
     if (r.sourceEventId) {
       // 再送の照合は記録のままで行う（受け付けた後にプロジェクトが統合されても、同じ依頼として扱う）。
       // 引き継いだ目安を外した記録は、引き継ぎ元のキーで残る。
@@ -91,10 +85,11 @@ export async function setItemEffort(config: HubConfig, request: ItemEffortReques
       }
     }
     // 統合済みのプロジェクトの項目は統合先のNOWにある（キーも統合先のものになる）。
-    assertNotMerged(projects, r.projectId);
+    assertOpen();
     const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
     const item = list.find(i => i.key === r.itemKey);
     if (!item) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
+    assertRecordTarget(unassigned, item);
     // 片付いた項目の目安は付けも外しもしない（戻したときは、片付ける前の目安のまま戻る）。
     const closed = resolved.get(r.itemKey);
     if (closed) throw new ItemTargetError({ code: 'item-closed', state: closed.action === 'exclude' ? 'excluded' : 'resolved' }, 'この項目は既に解決済みか、誤りとして外しています');
