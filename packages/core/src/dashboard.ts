@@ -4,6 +4,7 @@ import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { effortLabel,type ItemEffort } from './item-efforts.js';
+import { readItemWaits,waitingDays } from './item-waits.js';
 import { effectiveSchedules,readItemOccurrences,readItemSchedules,repeatLabel,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
 import { readAskRecords } from './ask.js';
 import { Vault,hash,parseMarkdown } from './storage.js';
@@ -35,6 +36,8 @@ const clip=(s:string,n=120)=>clipText(s,n);
 const DAY=86_400_000;
 /** HOMEの「次の一手」に載せる、プロジェクトごとの上限。全件は各NOWとアプリで確認する。 */
 const NEXT_PER_PROJECT=3;
+/** HOMEの「連絡待ち」に並べる上限（頼んだ日の古い順）。全件はアプリで確認する。 */
+const WAITING_ROWS=20;
 /** HOMEの「受領と整理状況」に並べる、通常の状態（受領済み・整理済み）の行の上限。全件はアプリの受付状況で確認する。 */
 const STATUS_ROWS=5;
 /** 通常の状態（受領済み・整理済み）の行は新しい順にSTATUS_ROWS件までにし、残りを件数の1行にまとめる。並びは元の順を保つ。 */
@@ -89,6 +92,10 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 本人が付けた期日・見直す日。期日が7日以内の項目はプロジェクトをまたいで前に出し、見直す日が先の項目はたたむ。
   const today=todayIn(config.timezone,clock),schedules=await readItemSchedules(vault),resolutionRecords=schedules.records.length?await readItemResolutions(vault):[];
   const dated:{bucket:'overdue'|'today'|'week';due:string;id:string;row:string}[]=[],orphaned:string[]=[];let resting=0;
+  // 本人が連絡待ちの印を付けた項目。「次の一手」の一覧・期日の欄・休ませている件数から外し、「連絡待ち」の欄にまとめる。
+  // 見直す日が来た連絡待ちは、「次の一手」の先頭に連絡待ちの確認として出す。相手の名前はHOMEとアプリにだけ示す（NOWには載せない）。
+  const waiting:{since:string;id:string;place:string;text:string;who?:string;dates:string;check:boolean}[]=[];
+  const waitLabel=(w:{since:string;who?:string},check:boolean,dates:string)=>`${w.who?`相手: ${plain(w.who)}・`:''}${w.since}から${waitingDays(w.since,today)}日${dates?`・${dates}`:''}${check?'・見直す日が来ました':''}`;
   // 行動に引き取った行の項目キー。その行の日付は行動へ引き継ぐ（置き場が違っても）ため、元の置き場で付け直しを求めない。
   const takenKeys=new Set<string>();
   for(const unit of effective){const key=actionSource(unit.chain.root)?.key;if(key)takenKeys.add(key);}
@@ -116,8 +123,12 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     if(!list){nextUnread.push(project.title);continue;}
     const front=new Set<string>(),{byKey:scheduled,orphaned:loose}=effectiveSchedules(schedules.records,project.id,list.items,activeResolutions(resolutionRecords,project.id));
     for(const i of list.items){
-     const schedule=i.resolution===null?scheduled.get(i.key):undefined;if(!schedule)continue;
+     const schedule=i.resolution===null?scheduled.get(i.key):undefined;
+     if(i.resolution===null&&i.waiting){front.add(i.key);waiting.push({since:i.waiting.since,id:project.id,place:`[${plain(project.title)}](${now})`,text:`${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}`,...(i.waiting.who?{who:i.waiting.who}:{}),dates:schedule?scheduleLabel(schedule):'',check:schedule?.review_after!=null&&schedule.review_after<=today});}
+     if(!schedule)continue;
      calendarItems.push({projectId:project.id,projectTitle:project.title,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedule.created_at});
+     // 連絡待ちは期日の欄にも、見直す日まで休ませている件数にも入れない（「連絡待ち」の欄で日付と一緒に示す）。
+     if(i.waiting)continue;
      const {bucket,hidden}=scheduleBucket(schedule,today);
      if(hidden){resting++;front.add(i.key);}
      else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
@@ -134,9 +145,12 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const unassignedBuilt=await rebuildUnassignedActionsLocked(config,vault,effective,clock),unassignedFront=new Set<string>();
   // プロジェクト未定の行動に本人が付けた期日も、プロジェクトの項目と一緒に期日順で前に出し、見直す日が先の行動はたたむ。
   for(const i of unassignedBuilt.items.items){
-   if(!i.action||i.resolution!==null||!i.schedule)continue;
+   if(!i.action||i.resolution!==null)continue;
+   if(i.waiting)waiting.push({since:i.waiting.since,id:UNASSIGNED_SCOPE,place:UNASSIGNED_TITLE,text:`次の一手: ${clip(i.label+i.text)}`,...(i.waiting.who?{who:i.waiting.who}:{}),dates:i.schedule?scheduleLabel({due:i.schedule.due,review_after:i.schedule.review_after,repeat:i.schedule.repeat??null}):'',check:i.schedule?.review_after!=null&&i.schedule.review_after<=today});
+   if(!i.schedule)continue;
    const schedule={due:i.schedule.due,review_after:i.schedule.review_after},repeat=i.schedule.repeat;
    calendarItems.push({projectId:UNASSIGNED_SCOPE,projectTitle:UNASSIGNED_TITLE,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedules.records.find(r=>r.id===i.schedule!.id)?.created_at??clock.toISOString()});
+   if(i.waiting)continue;
    const {bucket,hidden}=scheduleBucket(schedule,today);
    if(hidden)resting++;
    else if(bucket==='overdue'||bucket==='today'||bucket==='week'){unassignedFront.add(i.key);dated.push({bucket,due:schedule.due!,id:UNASSIGNED_SCOPE,row:`- 期日 ${schedule.due}${repeat?`（${repeatLabel(repeat)}）`:''} — ${UNASSIGNED_TITLE} 次の一手: ${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
@@ -149,9 +163,12 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 日付を使っていない間は、これまでと同じ見出し・本文にする。
   const order={overdue:0,today:1,week:2} as const,datedRows=dated.sort((a,b)=>order[a.bucket]-order[b.bucket]||a.due.localeCompare(b.due)||a.id.localeCompare(b.id));
   const usesDates=dated.length>0||resting>0||orphaned.length>0;
-  const datedPart=!usesDates?'':`期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
+  // 頼んだ日の古い順（同じ日は置き場の順）。
+  const waitingRows=waiting.sort((a,b)=>a.since.localeCompare(b.since)||a.id.localeCompare(b.id)),checks=waitingRows.filter(w=>w.check);
+  const checkPart=checks.length?`### 連絡待ちの確認（${checks.length}件）\n見直す日が来た連絡待ちです。返事が来ていれば印を外すか完了にし、まだなら催促して見直す日を付け直してください。\n${checks.map(w=>`- ${w.place} 連絡待ちの確認: ${w.text}（${waitLabel(w,false,w.dates)}）`).join('\n')}\n`:'';
+  const datedPart=!usesDates?(checkPart?`${checkPart}\n### プロジェクトごと\n`:''):`${checkPart?checkPart+'\n':''}期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
   const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOW・プロジェクト未定の一覧とアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
-  const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
+  const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size&&!checks.length?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates||checks.length?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
   const projectSections=`## プロジェクト一覧\n${rows.join('\n')||(listed.length?'進行中で最近動いたプロジェクトはありません。':'プロジェクトはまだありません。')}${staleRows.length?`\n\n## 停滞しているプロジェクト（${staleRows.length}件）\n最終根拠から${config.retrieve.staleDays}日を超えて新しい入力がない進行中のプロジェクトです。再開するか、休止・完了にするかを判断してください。\n${staleRows.join('\n')}`:''}${inactiveRows.length?`\n\n## 休止・完了（${inactiveRows.length}件）\n${inactiveRows.join('\n')}`:''}${mergedRows.length?`\n\n## 統合済み（${mergedRows.length}件）\n本人が別のプロジェクトへまとめたプロジェクトです。統合元の入力・完了報告・日付は統合先のものとして読み替えており、原文と記録は動かしていません。取り消すにはアプリのプロジェクト画面か\`ctx project unmerge\`を使います。\n${mergedRows.join('\n')}`:''}`;
   // 本人が設定したリポジトリのコミットから作った下書きのうち、未確認のもの。
   const draftRecords=await readGitDraftRecords(config),drafts=draftRecords.drafts.filter(d=>d.status==='pending'),gitProblems=await readGitCollectProblems(vault);
@@ -180,13 +197,15 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const waitingIntake=intakeRows.filter(r=>!r.routine).length,failedInputs=effective.filter(u=>receiptsById.get(u.chain.latest.id)?.status==='failed').length,waitingInputs=inputRows.filter(r=>!r.routine).length-failedInputs;
   const statusSummary=intakeRows.length||inputRows.length?`受付ファイル ${intakeRows.length}件（受付待ち・内容変更 ${waitingIntake}件） / 入力 ${inputRows.length}件（整理待ち ${waitingInputs}件・整理失敗 ${failedInputs}件）。受領済み・断った依頼・整理済みは新しい${STATUS_ROWS}件ずつを並べます。全件はアプリの「受付状況」で確認できます。\n`:'';
   // 期日の欄に載せた（またはたたんだ）行動は、プロジェクト未定の欄では件数だけを示す。
-  const unassignedActions=unassignedActionsSection(config,unassignedBuilt,new Map(effective.map(u=>[u.chain.root.id,u.chain.root.path])),nextSection?unassignedFront:new Set());
+  const unassignedActions=unassignedActionsSection(config,unassignedBuilt,new Map(effective.map(u=>[u.chain.root.id,u.chain.root.path])),nextSection?unassignedFront:new Set(),true);
+  // 連絡待ちの欄。印を付けた項目がなければ出さない。
+  const waitingSection=waitingRows.length?`## 連絡待ち（${waitingRows.length}件）\n人に頼んだこと・返事を待っていることとして、本人が印を付けた項目です。「次の一手」の一覧には入れていません。頼んだ日の古い順に${waitingRows.length>WAITING_ROWS?`${WAITING_ROWS}件を`:''}並べます。返事が来たら、アプリで印を外して元の欄へ戻すか、完了にしてください。CLIでは\`ctx item wait\`を使います。\n${waitingRows.slice(0,WAITING_ROWS).map(w=>`- ${w.place} ${w.text}（${waitLabel(w,w.check,w.dates)}）`).join('\n')}${waitingRows.length>WAITING_ROWS?`\n- ほか${waitingRows.length-WAITING_ROWS}件（アプリの「次の一手」の「連絡待ち」で確認）`:''}`:'';
   // 週次の統合の結果（今週の気づき）。設定で有効にしたときだけ出す。記録を読めなくてもHOMEは作り、「失敗と競合」に示す。
   let insightsText='',insightsLines:string[]=[];
   try{const built=await rebuildInsightsLocked(config,vault,effective,clock);insightsText=insightsSection(config,built.insights,clock);insightsLines=insightsNotices(config,built,clock);}
   catch{if(config.synthesis.enabled)insightsLines=['- 週次の統合の記録を読めません（`ctx doctor`で確認してください）'];}
   // 今週の気づきと、行動につながる欄（次の一手）を、プロジェクトの一覧より前に置く。
-  const lead=[insightsText,nextSection,unassignedActions].filter(Boolean).map(x=>x+'\n\n').join('');
+  const lead=[insightsText,nextSection,unassignedActions,waitingSection].filter(Boolean).map(x=>x+'\n\n').join('');
   // 秘密情報らしい文字列を含むメモ。原文は変えずモデルへ渡す前に伏せているが、同期先の端末には原文のまま残る。
   const secretRows=secretInputRows(config,effective.flatMap(u=>[u.chain.root,...u.chain.revisions]));
   // 似ているアイデアの索引。束ねの記録が壊れていてもHOMEは作り、壊れた記録を示す。
@@ -212,6 +231,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const project of projects)if(await historyStopped(vault,project.id))errors.push(`- [経緯の更新が止まっています](${historyPath(project.id)}): ${plain(project.title)} — HISTORY.mdが手で変更されています。経緯は根拠から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const project of projects)if(await referencesStopped(vault,project.id))errors.push(`- [資料の更新が止まっています](${referencesPath(project.id)}): ${plain(project.title)} — REFERENCES.mdが手で変更されています。資料は整理結果から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
+  for(const path of (await readItemWaits(vault)).problems)errors.push(`- [連絡待ちの記録が不正です](${path})`);
   for(const issue of people.issues)errors.push(`- [人の定義を確かめてください](${issue.path}): ${plain(issue.message)}`);
   for(const path of await stoppedPeoplePages(vault))errors.push(`- [人ごとの見返しの更新が止まっています](${path}) — 手で変更されています。記録から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of (await readItemOccurrences(vault)).problems)errors.push(`- [定例の回の記録が不正です](${path})`);

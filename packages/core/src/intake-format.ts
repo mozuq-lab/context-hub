@@ -7,6 +7,7 @@ import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySc
 import { occurrenceActionSchema, repeatRuleSchema, scheduleDateSchema } from './item-schedules.js';
 import { calendarDateSchema } from './happened.js';
 import { itemEffortSchema } from './item-efforts.js';
+import { itemWaitingSchema } from './item-waits.js';
 import { parseMarkdown } from './storage.js';
 import { ASK_QUESTION_CHARS } from './ask.js';
 import { parsePreferencesPayload } from './client-preferences.js';
@@ -44,6 +45,8 @@ const itemSchedule=z.object({...base,operation:z.literal('item-schedule'),projec
 const itemOccurrence=z.object({...base,operation:z.literal('item-occurrence'),project_id:itemScopeSchema,item_key:itemKeySchema,action:occurrenceActionSchema,due:scheduleDateSchema,confirmed:z.literal(true),text:z.string()}).strict();
 // 手間の目安。effortは変更後の目安で、nullは外す依頼。
 const itemEffort=z.object({...base,operation:z.literal('item-effort'),project_id:itemScopeSchema,item_key:itemKeySchema,effort:itemEffortSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
+// 連絡待ちの印。waitingは変更後の全体（相手は任意、頼んだ日は必須）で、nullは印を外す依頼。
+const itemWait=z.object({...base,operation:z.literal('item-wait'),project_id:itemScopeSchema,item_key:itemKeySchema,waiting:itemWaitingSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const itemHintDismiss=z.object({...base,operation:z.literal('item-hint-dismiss'),project_id:projectIdSchema,item_key:itemKeySchema,input_id:inputIdSchema,confirmed:z.literal(true),text:z.string()}).strict();
 const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss'),draft_id:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),draft_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 名前・別名・キーワードは変更後の全体を送る。上限と重複の整理は本体が検証する。
@@ -66,7 +69,7 @@ const askSchema=z.object({...base,operation:z.literal('ask'),project:projectIdSc
 const preferencesSchema=z.object({...base,operation:z.literal('client-preferences'),confirmed:z.literal(true),text:z.string()}).strict();
 // 採用した方針を本人が「まだ有効」と確かめた。ハッシュは確かめた時点の知識のファイルのもの。
 const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemWait, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

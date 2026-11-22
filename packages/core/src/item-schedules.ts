@@ -73,11 +73,11 @@ export async function readItemSchedules(vault: Vault, options: { raw?: boolean }
   records.sort((a, b) => a.id.localeCompare(b.id));
   return { records: options.raw ? records : await settleItemRecords(vault, records), problems };
 }
-/** 項目に結び付けた本人の記録（日付・手間の目安など）に共通する欄。idは種類ごとの接頭辞とULIDで、同じ種類では作った順に並ぶ。 */
+/** 項目に結び付けた本人の記録（日付・手間の目安・連絡待ちなど）に共通する欄。idは種類ごとの接頭辞とULIDで、同じ種類では作った順に並ぶ。 */
 export interface ItemRecordLike { id: string; project_id: string; item_key: string; section: string; text: string; input_id: string; source_event_id?: string }
 /** 「自分の行動にする」で元の行の記録を行動へ写した記録の受付ID（行動の入力IDと、写した元の記録のID）。take-over-records.tsが書く。 */
 export const takeOverEvent = (inputId: string, recordId: string) => `take-over:${inputId}:${recordId}`;
-const takeOverPattern = /^take-over:IN-[0-9A-HJKMNP-TV-Z]{26}:((?:SCH|EFF)-[0-9A-HJKMNP-TV-Z]{26})$/;
+const takeOverPattern = /^take-over:IN-[0-9A-HJKMNP-TV-Z]{26}:((?:SCH|EFF|WAIT)-[0-9A-HJKMNP-TV-Z]{26})$/;
 /** 行動へ写された（引き取られた）元の記録のID。元の置き場では、外した記録と同じに扱う。 */
 export function takenOverRecordIds(records: Pick<ItemRecordLike, 'source_event_id'>[]): Set<string> {
   const ids = new Set<string>();
