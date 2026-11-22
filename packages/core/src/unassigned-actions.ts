@@ -6,7 +6,7 @@ import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js'
 import { UNASSIGNED_SCOPE, activeResolutions, itemKey, nowItemsPath, nowItemsSchema, readItemResolutions, type ItemResolution, type NowItem, type NowItems } from './item-resolutions.js';
 import { redactText, secretSettings } from './secrets.js';
 import { shortMemoText } from './short-memo.js';
-import { ACTION_LABEL, actionSource, sourceRef } from './actions.js';
+import { ACTION_LABEL, actionSource, movedActionIds, sourceRef } from './actions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel, type ItemSchedule } from './item-schedules.js';
 import { effectiveEfforts, effortLabel, readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
 import { effectiveWaits, readItemWaits, waitingLabel, type ItemWaitRecord } from './item-waits.js';
@@ -22,7 +22,8 @@ import type { HubConfig } from './types.js';
  * メモがプロジェクトに結び付くと一覧から外れ、そのプロジェクトのNOWに載る。
  * 本人がプロジェクトを指定せずに追加した行動（入力の種類action）も、「本人が追加: 」を付けて項目一覧の先頭に載せる。メモの件数の上限には数えず、
  * 片付けるまで残す。行動には、プロジェクトの項目と同じく期日・見直す日・定例の繰り返しと手間の目安、連絡待ちの印を付けられる（項目一覧のschedule・effort・waiting）。
- * AIの行には付けない（先に行動にしてもらう）。行動はモデルで読まないため、後からプロジェクトに結び付くことはない。メモの一覧（unassigned-actions.json）には載せない
+ * AIの行には付けない（先に行動にしてもらう）。行動はモデルで読まないため、AIが後からプロジェクトに結び付けることはない。本人がプロジェクトへ移すと
+ * （移す先に同じ文面の行動を追加し、元の行動を元の行として指す）、付けていた記録を写して一覧から外す。メモの一覧（unassigned-actions.json）には載せない
  * （旧版のアプリが読む形を変えないため。HOMEには載せる）。
  * 行動にしたAIの読み取り（タスク候補・AIの提案）は、本人が引き取ったものとして一覧から外す（プロジェクトのNOWと同じ扱い）。
  */
@@ -92,7 +93,9 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
   const converted = new Set<string>(), convertedKeys = new Set<string>();
   for (const unit of units) { const from = actionSource(unit.chain.root); if (from) { converted.add(sourceRef(from.input_id, from.text)); if (from.key) convertedKeys.add(from.key); } }
   // プロジェクトを指定せずに本人が追加した行動。最新の文面（訂正があれば訂正）を本人の言葉のまま、追加した順に載せる。
-  const own = units.filter(u => u.chain.root.kind === 'action' && u.chain.root.project === undefined)
+  // プロジェクトへ移した行動は、移した先の行動が引き継ぐので載せない（片付けた行としても残さない）。
+  const moved = movedActionIds(units.map(u => u.chain.root));
+  const own = units.filter(u => u.chain.root.kind === 'action' && u.chain.root.project === undefined && !moved.has(u.chain.root.id))
     .sort((a, b) => Date.parse(a.chain.root.occurred_at) - Date.parse(b.chain.root.occurred_at) || a.chain.root.id.localeCompare(b.chain.root.id));
   // 片付けた本人の行動は、上限の外で全件残す（プロジェクトの項目一覧と同じ。消えると、アプリが追加の依頼を反映待ちに戻すため）。
   const ownOpen: NowItem[] = [], ownClosed: NowItem[] = [];

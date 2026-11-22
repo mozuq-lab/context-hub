@@ -20,7 +20,7 @@ import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel,lastEvide
 import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage,writeIntakeFeaturesLocked,isIntakeRefusal,refusalNoticeVisible,REFUSAL_NOTICE_DAYS } from './intake.js';
 import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
-import { actionSource } from './actions.js';
+import { actionSource, movedActionIds } from './actions.js';
 import { referencesStopped,referencesPath,unassignedReferenceSection } from './references.js';
 import type { HubConfig, Input } from './types.js';
 import { describeFindings, findSecrets, secretSettings, writePrivacyPatternsLocked } from './secrets.js';
@@ -102,6 +102,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 行動に引き取った行の項目キー。その行の日付は行動へ引き継ぐ（置き場が違っても）ため、元の置き場で付け直しを求めない。
   const takenKeys=new Set<string>();
   for(const unit of effective){const key=actionSource(unit.chain.root)?.key;if(key)takenKeys.add(key);}
+  // 別の置き場へ移した行動の記録（文面を直す前の文面のものを含む）。効いていた記録は移した先へ写してあり、元の行動は一覧から外れるので、付け直しを求めない。
+  const movedInputs=movedActionIds(effective.map(u=>u.chain.root));
   // カレンダーに書き出す、進行中のプロジェクトの日付付きの項目（HOMEの「次の一手」と同じ範囲）。
   const calendarItems:CalendarItem[]=[];
   const somedayRecords=(await readItemSomedays(vault)).records,somedayOrphans:string[]=[];
@@ -140,9 +142,9 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
-    for(const s of loose)if(!takenKeys.has(s.item_key))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
+    for(const s of loose)if(!takenKeys.has(s.item_key)&&!movedInputs.has(s.input_id))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
     // 「いつかやる」へ移した項目がNOWから外れたときも、黙って消さずに示す（AIの行は言い回しが変わることがある）。
-    for(const s of orphanedSomedays(somedayRecords,project.id,list.items,activeResolutions(resolutionRecords,project.id)))if(!takenKeys.has(s.item_key))somedayOrphans.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（移した日 ${s.someday!.since}） / ${project.id} ${s.item_key}`);
+    for(const s of orphanedSomedays(somedayRecords,project.id,list.items,activeResolutions(resolutionRecords,project.id)))if(!takenKeys.has(s.item_key)&&!movedInputs.has(s.input_id))somedayOrphans.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（移した日 ${s.someday!.since}） / ${project.id} ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     // 本人が付けた手間の目安も、日付と並べて行末に示す（NOWの項目一覧に載っている）。
     const later=(i:{key:string;effort?:ItemEffort})=>{const s=scheduled.get(i.key),label=[s?scheduleLabel(s):'',i.effort?effortLabel(i.effort):''].filter(Boolean).join('・');return label?`（${label}）`:'';};

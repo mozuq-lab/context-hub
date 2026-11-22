@@ -1,7 +1,9 @@
 import { ulid } from 'ulid';
 import { Vault } from './storage.js';
-import { readProjects } from './projects.js';
-import { UNASSIGNED_SCOPE, activeResolutions, itemKey, readItemResolutions, readNowItems, type NowItem } from './item-resolutions.js';
+import { readProjects, resolveProject } from './projects.js';
+import { readInputs } from './capture.js';
+import { actionSource } from './actions.js';
+import { ItemTargetError, UNASSIGNED_SCOPE, activeResolutions, itemKey, readItemResolutions, readNowItems, type NowItem } from './item-resolutions.js';
 import { effectiveItemRecords, effectiveSchedules, readItemSchedules, takeOverEvent, type ItemSchedule } from './item-schedules.js';
 import { readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
 import { readItemWaits, waitCleared, waitPath, type ItemWaitRecord } from './item-waits.js';
@@ -43,6 +45,33 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
     const record: ItemSomedayRecord = { ...base, id: `SMD-${ulid()}`, someday: someday.someday, source_event_id: takeOverEvent(action.inputId, someday.id) };
     if (!await vault.create(somedayPath(record.id), JSON.stringify(sorted(record, somedayOrder), null, 2) + '\n')) throw new Error('「いつかやる」の記録が競合しました');
   }
+}
+
+/**
+ * 本人が追加した行動を指す行動の追加（行動を別の置き場へ移す依頼）を、保存の前に確かめる（Writerロック内）。
+ * 元の行動が今の一覧に未解決で載っていて、まだ移していないときだけ受け付け、元の行動の今の項目キーを返す
+ * （端末の一覧が古く、文面を直す前のキーを指していても、今の行から記録を写すため）。
+ * 元の行が行動でない（AIの行を行動にする）依頼と、同じ出典・受付IDの再送はundefined（再送は保存済みの入力を返すだけ）。
+ */
+export async function movedActionSourceLocked(config: HubConfig, vault: Vault, request: { source: string; sourceEventId?: string; meta?: Record<string, string> }): Promise<string | undefined> {
+  const from = actionSource({ kind: 'action', meta: request.meta });
+  if (!from) return undefined;
+  const inputs = await readInputs(config), original = inputs.find(i => i.id === from.input_id && i.kind === 'action');
+  if (!original) return undefined;
+  if (request.sourceEventId !== undefined && inputs.some(i => i.source === request.source && i.source_event_id === request.sourceEventId)) return undefined;
+  // 同じ行動を2回移すと、行動が2つになり、後の行動には記録が写らない。
+  if (inputs.some(i => actionSource(i)?.input_id === original.id)) throw new ItemTargetError({ code: 'item-missing' }, 'この行動は既に別の置き場へ移しています。再読込して、移した先で操作してください');
+  const scope = original.project === undefined ? UNASSIGNED_SCOPE : resolveProject(await readProjects(config), original.project);
+  let items: NowItem[] = [];
+  try { items = (await readNowItems(vault, scope))?.items ?? []; } catch { /* 壊れた一覧では元の行動を確かめられない。 */ }
+  const item = items.find(i => i.action && i.input_id === original.id);
+  if (!item) throw new ItemTargetError({ code: 'item-missing' }, '移す行動が一覧にありません。再読込して確かめてください');
+  // 片付けた行動は移さない（移すと元の完了・却下の記録が一覧から消え、移した先に未解決として出るため）。
+  if (item.resolution) {
+    const state = item.resolution.action === 'exclude' ? 'excluded' as const : 'resolved' as const;
+    throw new ItemTargetError({ code: 'item-closed', state }, `この行動は既に${state === 'excluded' ? '却下' : '完了'}しています。未解決へ戻してから移してください`);
+  }
+  return item.key;
 }
 
 /** 元の行が載っている置き場と、その項目一覧。キーは置き場ごとに異なるので、見つかるのは1か所だけ。 */

@@ -16,7 +16,7 @@ import { effectiveSomedays, readItemSomedays, SOMEDAY_LABEL } from './item-somed
 import { evidenceBound, inputWhen } from './happened.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import { appliedReread, readExclusionOverlays } from './item-rereads.js';
-import { ACTION_LABEL, actionSource, sourceRef } from './actions.js';
+import { ACTION_LABEL, actionSource, movedActionIds, sourceRef } from './actions.js';
 import type { HubConfig, Input, Project, Receipt } from './types.js';
 
 const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -123,7 +123,9 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const summaries = evidence.filter(({ input }) => input.kind === 'work-summary'); const latest = summaries.at(-1);
   // 本人が直接追加した行動。モデルで整理しないため処理記録はなく、最新の文面（訂正があれば訂正）を本人の言葉のまま載せる。
   // 統合元のプロジェクトへ追加した行動も、統合先のNOWに載せる。新しい作業要約が届いても外さない。
-  const actions = units.filter(u => u.chain.root.kind === 'action' && u.chain.root.project !== undefined && (u.chain.root.project === projectId || sources.includes(u.chain.root.project)))
+  // 別のプロジェクト・プロジェクト未定へ移した行動は、移した先の行動が引き継ぐので載せない。
+  const moved = movedActionIds(units.map(u => u.chain.root));
+  const actions = units.filter(u => u.chain.root.kind === 'action' && u.chain.root.project !== undefined && (u.chain.root.project === projectId || sources.includes(u.chain.root.project)) && !moved.has(u.chain.root.id))
     .sort((left, right) => Date.parse(left.chain.root.occurred_at) - Date.parse(right.chain.root.occurred_at) || left.chain.root.id.localeCompare(right.chain.root.id));
   // 行動にしたAIの読み取り（提案・作業要約の次の一手）は、元の欄に二重に並べない。どのプロジェクトで行動にしても同じ行は本人が引き取ったものとして扱う。
   const converted = new Set<string>(), convertedKeys = new Set<string>();

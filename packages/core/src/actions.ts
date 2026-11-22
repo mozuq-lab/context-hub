@@ -40,3 +40,14 @@ export function actionSource(input: Pick<Input, 'kind' | 'meta'>): ActionSource 
 }
 /** 元の行と同じ行か（根拠の入力IDと本文の組）。 */
 export const sourceRef = (inputId: string, text: string) => `${inputId}\n${text}`;
+/**
+ * 別の置き場（プロジェクト・プロジェクト未定）へ移した行動の入力ID。
+ * 行動を移すときは、移す先に同じ文面の行動を新しく追加し、元の行動を元の行（action_from_*）として指す（「自分の行動にする」と同じ形）。
+ * 元の行動は移した先の行動が引き継ぐので、元の置き場の一覧から外す（完了・却下とは数えない）。行動は入力1件が1項目なので、入力IDで判定する
+ * （元の行動の文面を後から直しても、元の置き場へ戻らない）。AIの行を行動にした参照（メモ・作業要約の入力ID）も含むが、行動の入力IDとは重ならない。
+ */
+export function movedActionIds(roots: Pick<Input, 'kind' | 'meta'>[]): Set<string> {
+  const ids = new Set<string>();
+  for (const root of roots) { const from = actionSource(root); if (from) ids.add(from.input_id); }
+  return ids;
+}

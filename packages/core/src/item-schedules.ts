@@ -121,9 +121,10 @@ export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], pro
   const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
   const loose = [...active.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
   // 本人が追加した行動は、文面を直しても同じ行動（同じ入力）なので、直す前の文面に付けた日付を引き継ぐ。
-  // AIの行を引き取った行動は、引き取った元の行（キー・本文）に付けた日付も同じ行動の日付として扱う。
+  // AIの行を引き取った行動は、引き取った元の行（キー、または同じ根拠の入力の同じ本文）に付けた日付も同じ行動の日付として扱う。
+  // 本文だけでは比べない（別の行動へ移した行動の本文は行動自身の本文と同じで、置き場にある同じ本文の無関係な記録まで拾うため）。
   type Item = typeof items[number];
-  const lineage = (r: T, i: Item) => i.action !== undefined && (r.input_id === i.input_id || (i.action.from !== undefined && (r.item_key === i.action.from.key || r.text === i.action.from.text)));
+  const lineage = (r: T, i: Item) => i.action !== undefined && (r.input_id === i.input_id || (i.action.from !== undefined && (r.item_key === i.action.from.key || (r.text === i.action.from.text && r.input_id === i.action.from.input_id))));
   const same = (r: T, i: Item) => r.section === i.section && (r.text === i.text || lineage(r, i));
   // 引き継ぎの候補は、NOWから外れた同じ欄・同じ本文の記録のうち、日付を外した記録も含めて最新のもの。
   // 最新が日付を外した記録なら、それより前の古い日付を引き継がない（K1で付けK2で外した後、K3へ移った場合など）。
