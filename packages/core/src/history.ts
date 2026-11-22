@@ -1,7 +1,7 @@
 import { clipText, listText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault, hash, parseMarkdown } from './storage.js';
-import { readProjects } from './projects.js';
+import { readProjects, outcomeOneLine } from './projects.js';
 import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact, readReceipts } from './views.js';
 import { groundedResult, readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { lifecycleOf, projectStatusLabels, readProjectStatusChanges, type ProjectStatusChange } from './project-status.js';
@@ -22,6 +22,13 @@ import type { HubConfig, Input, Project, Receipt } from './types.js';
  */
 const plain = listText;
 const clip = (s: string, n = 120) => clipText(s, n);
+/** 定義の変更での望む結果の変化（指定のない変更・同じ文なら空文字）。 */
+function outcomeChange(before: string | undefined, after: string | undefined): string {
+  if (after === undefined) return '';
+  const from = outcomeOneLine(before), to = outcomeOneLine(after);
+  if (from === to) return '';
+  return !to ? '望む結果を外した' : `望む結果${from ? 'を変更' : 'を記入'}「${clip(to, 120)}」`;
+}
 /** 月ごとに載せる入力の上限。超えた分は件数だけ示す。 */
 const INPUTS_PER_MONTH = 8;
 /** 現在地の変化として1件の作業要約から載せる項目の上限。 */
@@ -110,9 +117,9 @@ async function buildHistoryText(sources: HistorySources, vault: Vault, project: 
     events.push({ at: s.changed_at, order: 3, line: `- ${day(s.changed_at)} 状態: ${plain(from)} → ${projectStatusLabels[s.to]}（${s.id}）` });
   }
   for (const c of sources.creations.filter(c => c.project_id === id))
-    events.push({ at: c.created_at, order: 0, line: `- ${day(c.created_at)} プロジェクトを作成: ${clip(c.title)}（${c.id}）` });
+    events.push({ at: c.created_at, order: 0, line: `- ${day(c.created_at)} プロジェクトを作成: ${clip(c.title)}${outcomeOneLine(c.outcome) ? `（望む結果: ${clip(outcomeOneLine(c.outcome))}）` : ''}（${c.id}）` });
   for (const d of sources.definitions.filter(d => d.project_id === id)) {
-    const changed = [d.before.title !== d.after.title ? `名前 ${clip(d.before.title, 60)} → ${clip(d.after.title, 60)}` : '', JSON.stringify(d.before.aliases ?? []) !== JSON.stringify(d.after.aliases) ? '別名' : '', JSON.stringify(d.before.keywords ?? []) !== JSON.stringify(d.after.keywords) ? 'キーワード' : ''].filter(Boolean);
+    const changed = [d.before.title !== d.after.title ? `名前 ${clip(d.before.title, 60)} → ${clip(d.after.title, 60)}` : '', JSON.stringify(d.before.aliases ?? []) !== JSON.stringify(d.after.aliases) ? '別名' : '', JSON.stringify(d.before.keywords ?? []) !== JSON.stringify(d.after.keywords) ? 'キーワード' : '', outcomeChange(d.before.outcome, d.after.outcome)].filter(Boolean);
     events.push({ at: d.changed_at, order: 3, line: `- ${day(d.changed_at)} 定義を変更: ${changed.join('・') || '書式のみ'}（${d.id}）` });
   }
   // 統合と取り消し。統合元と統合先の両方の経緯に載せる。

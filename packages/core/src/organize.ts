@@ -56,6 +56,8 @@ async function classify(config: HubConfig, llm: LlmClient, input: Input, project
     catch (error) {
       // 「片付いたかも」・外した項目の例・前のメモは補助なので、足してプロンプトが上限を超えたときは補助なしで整理し直す。
       if (error instanceof PromptTooLargeError && (openItems.length || excluded.items.length || previous)) return classify(config, llm, input, projects, chain, policyText, [], { items: [], wrongProjects: excluded.wrongProjects });
+      // 望む結果も手がかりなので、それでも超えるときは望む結果を渡さずに整理し直す。
+      if (error instanceof PromptTooLargeError && offered.some(p => p.outcome !== undefined)) return classify(config, llm, input, projects.map(({ outcome: _outcome, ...p }) => p), chain, policyText, [], { items: [], wrongProjects: excluded.wrongProjects });
       throw error;
     }
     try {

@@ -2,7 +2,7 @@ import { nowText } from './markdown-text.js';
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { readInputs } from './capture.js';
-import { readProjects, mergedSources, mergeTargets } from './projects.js';
+import { readProjects, mergedSources, mergeTargets, outcomeSection } from './projects.js';
 import { organizeResultSchema } from './llm.js';
 import { correctionNotice, effectiveFromInputs, groundedResult } from './effective-inputs.js';
 import { applyAssociations } from './associations.js';
@@ -240,7 +240,8 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const fallback = '- 不明（根拠となる入力がありません）';
   // 欄が空になった理由。誤りとして外した項目だけで空になったときは、完了・解決と書かない。
   const closedNote = (section: ItemSection, reported: string) => [...items.values()].some(i => i.section === section && i.resolution && i.resolution.action !== 'exclude') ? reported : '誤りとして外した項目のみ';
-  const auto = `\n# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || ((latest || actions.length) && [...items.values()].some(i => i.section === 'next') ? `- 残っている次の一手はありません（${closedNote('next', '完了報告済み')}）` : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? `- 残っている未解決はありません（${closedNote('open', '解決報告済み')}）` : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}${excluded.length ? `\n# 誤りとして外した項目（本人報告）\nAIの読み違いなどとして、本人が外した項目です。完了・解決ではありません。理由と一言は、次からの整理でAIへ渡します。戻すときはアプリか\`ctx item reopen\`を使ってください。\n${excluded.join('\n')}\n` : ''}`;
+  // 本人が書いた望む結果を先頭に置く（定義を変えたときと、手で書き換えた定義をcycleで見つけたときに作り直す）。
+  const auto = `\n${outcomeSection(projects.find(p => p.id === projectId)?.outcome)}# 現在地\n${current.join('\n') || fallback}\n\n# 次の一手\n${next.join('\n') || ((latest || actions.length) && [...items.values()].some(i => i.section === 'next') ? `- 残っている次の一手はありません（${closedNote('next', '完了報告済み')}）` : fallback)}\n\n## 提案\n${[...new Set(proposals)].join('\n') || '- 提案はありません'}\n\n# 未解決\n${[...new Set(open)].join('\n') || ([...items.values()].some(i => i.section === 'open') ? `- 残っている未解決はありません（${closedNote('open', '解決報告済み')}）` : '- 不明（未解決事項の確認が必要です）')}\n${hintRows.length ? `\n# 片付いたかも（AI推定・本人の確認待ち）\nメモの記述から、片付いた可能性がある項目です。AIの推定で、まだ完了・解決にはしていません。アプリで確認するか、\`ctx item list\`でキーを確かめて\`ctx item resolve\`（違う場合は\`ctx item dismiss-hint\`）を使ってください。\n${hintRows.join('\n')}\n` : ''}${done.length ? `\n# 解決済み・完了（本人報告）\n${done.join('\n')}\n` : ''}${excluded.length ? `\n# 誤りとして外した項目（本人報告）\nAIの読み違いなどとして、本人が外した項目です。完了・解決ではありません。理由と一言は、次からの整理でAIへ渡します。戻すときはアプリか\`ctx item reopen\`を使ってください。\n${excluded.join('\n')}\n` : ''}`;
   // 項目一覧はNOWの手動編集と無関係に、常に最新の整理結果から書き直す。
   await vault.write(nowItemsPath(projectId), JSON.stringify({ schema_version: 1, project: projectId, generated_at: generatedAt, items: [...items.values()] }, null, 2) + '\n');
   // NOWは書く直前に読み、手編集の有無を判定する（読んでから書くまでの間に同期で届いた手編集を上書きしにくくする）。
@@ -263,6 +264,18 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   return { path: relative };
 }
 
+/**
+ * NOWの先頭の望む結果の欄が、今の定義と違うか（手で書き換えた定義をcycleで反映するため）。
+ * 自動領域が手で変えられたNOWは対象にしない（作り直すと競合の退避になるため。競合を片付けるときに反映される）。
+ */
+export async function nowOutcomeOutdated(vault: Vault, project: Project): Promise<boolean> {
+  const raw = await vault.read(`10_projects/${project.id}/NOW.md`); if (raw === undefined) return false;
+  try {
+    const parsed = parseMarkdown(raw), region = autoRegion(parsed.text);
+    if (!region || parsed.meta.generated_hash !== `sha256:${hash(region.auto)}`) return false;
+    return !region.auto.startsWith(`\n${outcomeSection(project.outcome)}# 現在地\n`);
+  } catch { return false; }
+}
 /** NOW.mdの最終根拠日時。未生成・解析不能なら未定（HOME・ふりかえり・作業記録の下書きで共通）。 */
 export async function lastEvidenceAt(vault: Vault, projectId: string): Promise<string | undefined> {
   const raw = await vault.read(`10_projects/${projectId}/NOW.md`); if (raw === undefined) return undefined;

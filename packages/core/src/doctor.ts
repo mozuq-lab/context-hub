@@ -4,7 +4,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Vault, VAULT_DIRS, LOCK_SCOPES, parseMarkdown, lockPath, hash } from './storage.js';
 import { parseInput, eventMarker } from './capture.js';
-import { readProjects,inspectProjects,describeProjectIssue,mergeIssues } from './projects.js';
+import { readProjects,inspectProjects,describeProjectIssue,mergeIssues,normalizeOutcome,cleanOutcome,PROJECT_OUTCOME_CHARS } from './projects.js';
 import { readProjectMerges } from './project-merges.js';
 import { readEffectiveInputs } from './effective-inputs.js';
 import { listProjectCandidates,readProjectCoverage,recoverProjectApprovalsLocked } from './project-proposals.js';
@@ -56,6 +56,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
     try { await read(); } catch { issues.push(`${label}の記録が不正です（経緯から省かれます）`); }
   }
   try { issues.push(...mergeIssues(await readProjects(config))); } catch { /* 定義の不正は上で報告する。 */ }
+  // 手で書いた望む結果が上限を超えていても定義は読む（AIへは先頭だけを渡す）。書き直しを促す。
+  try { for (const project of await readProjects(config)) { try { normalizeOutcome(project.outcome ?? ''); } catch (error) { issues.push(`${error instanceof Error ? error.message : '望む結果を確認してください'}${cleanOutcome(project.outcome).length > PROJECT_OUTCOME_CHARS ? `（AIへは先頭の${PROJECT_OUTCOME_CHARS}文字だけを渡します）` : ''}: 10_projects/${project.id}/project.md`); } } } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const project of await readProjects(config)) if (await historyStopped(vault, project.id)) issues.push(`経緯の更新が止まっています（手で変更されています）: 10_projects/${project.id}/HISTORY.md`); } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const project of await readProjects(config)) if (await referencesStopped(vault, project.id)) issues.push(`資料の更新が止まっています（手で変更されています）: 10_projects/${project.id}/REFERENCES.md`); } catch { /* 定義の不正は上で報告する。 */ }
   try { const people = await inspectPeople(vault); for (const issue of people.issues) issues.push(`人の定義が不正です: ${issue.path}（${issue.message}）`); for (const path of await stoppedPeoplePages(vault)) issues.push(`人ごとの見返しの更新が止まっています（手で変更されています）: ${path}`); } catch { issues.push('人の定義を走査できません'); }
