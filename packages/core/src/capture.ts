@@ -96,11 +96,10 @@ async function continuationTarget(vault: Vault, inbox: string[], id: string): Pr
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
 export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
   if (!request.text?.trim() || request.text.length > config.capture.maxInputChars) throw new Error('本文が空か文字数上限を超えています');
-  // 本人が直接追加する行動は、1行の本人の言葉と、載せるプロジェクトの指定が要る（プロジェクトを選ばない行動は未対応）。
+  // 本人が直接追加する行動は、1行の本人の言葉にする。プロジェクトを指定しない行動は「プロジェクト未定」の一覧に載る。
   if (request.kind === 'action') {
     const text = actionTextSchema.safeParse(request.text);
     if (!text.success) throw new Error(text.error.issues[0]?.message ?? '行動の文面が不正です');
-    if (!request.project) throw new Error('行動にはプロジェクトの指定が必要です');
     if (request.tool !== undefined) throw new Error('行動には作業ツールを指定できません');
     assertActionMeta(request.meta);
     // 行動は出来事の記録ではないため、出来事の日付は付けない。
@@ -158,7 +157,7 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     }
     if (project && !(await readProjects(config)).some(p => p.id === project)) throw new Error('指定プロジェクトがありません。先にproject addを実行してください');
     // 統合済みのプロジェクトのNOWは統合先にあるため、行動は統合先へ追加してもらう（完了報告・期日の依頼と同じ）。
-    if (meta.kind === 'action') assertNotMerged(await readProjects(config), request.project!);
+    if (meta.kind === 'action' && request.project) assertNotMerged(await readProjects(config), request.project);
     const date = new Intl.DateTimeFormat('sv-SE', { timeZone: config.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(meta.occurred_at));
     const path = `00_inbox/${date}_${meta.id}.md`;
     if (!await vault.create(path, markdown(meta, request.text))) throw new Error('入力IDが競合しました。再送してください');
@@ -175,12 +174,16 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
     if (request.kind === 'action') {
       // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
       const { rebuildNowLocked, rebuildNowsForInputLocked, readReceipts } = await import('./views.js');
-      // 再送のときにプロジェクトが統合済みになっていれば、行動が載る統合先のNOWを作り直す。
-      const projects = await readProjects(config), target = resolveProject(projects, request.project!), inputs = await readInputs(config), receipts = await readReceipts(config);
-      // AIの読み取りを行動にしたときは、元の行が載っているほかのプロジェクトのNOWからも外す。
+      // 再送のときにプロジェクトが統合済みになっていれば、行動が載る統合先のNOWを作り直す。プロジェクト未定の行動はどのNOWにも載らない。
+      const projects = await readProjects(config), target = request.project ? resolveProject(projects, request.project) : undefined, inputs = await readInputs(config), receipts = await readReceipts(config);
+      // AIの読み取りを行動にしたときは、元の行が載っているほかのプロジェクトのNOWと、プロジェクト未定の一覧からも外す。
       const from = actionSource({ kind: 'action', meta: request.meta });
       if (from) await rebuildNowsForInputLocked(vault, config, projects.map(p => p.id), from.input_id, target, inputs, receipts);
-      else await rebuildNowLocked(vault, config, target, inputs, receipts);
+      else if (target) await rebuildNowLocked(vault, config, target, inputs, receipts);
+      if (!target || from) {
+        const { rebuildUnassignedLocked } = await import('./unassigned-actions.js');
+        await rebuildUnassignedLocked(config, vault);
+      }
     }
     return saved;
   });

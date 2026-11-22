@@ -155,7 +155,6 @@ test('行動の文面を直すと元の文面は残り、NOWは直した文面�
 test('行動の文面・プロジェクト・元の行の参照を検証し、統合済みのプロジェクトには追加しない', async () => {
   const { config } = await fixture();
   const base = { source: 'cli', kind: 'action' as const, occurredAt: '2026-11-01T00:00:00Z' };
-  await expect(capture(config, { ...base, text: '請求書を送る' })).rejects.toThrow('プロジェクトの指定');
   await expect(capture(config, { ...base, project: 'hub', text: 'あ'.repeat(201) })).rejects.toThrow('200文字以内');
   await expect(capture(config, { ...base, project: 'hub', text: '一行目\n二行目' })).rejects.toThrow('1行');
   await expect(capture(config, { ...base, project: 'hub', text: ' 前に空白' })).rejects.toThrow('空白');
@@ -173,7 +172,7 @@ test('行動の文面・プロジェクト・元の行の参照を検証し、�
   await mergeProjects(config, { fromId: 'old', intoId: 'hub', fromHash: await projectHash('old'), intoHash: await projectHash('hub'), source: 'cli' });
   await expect(capture(config, { ...base, project: 'old', text: '送る' })).rejects.toThrow('統合');
   // 受付ファイルの不正な行動は、受け付けずに理由を記録する。
-  await packet(config, { kind: 'action' }, '請求書を送る');
+  await packet(config, { kind: 'action', project: 'hub' }, '請求書を送る\n領収書も');
   expect((await ingest(config)).accepted).toBe(0);
 });
 
@@ -249,4 +248,19 @@ test('引き取った行の日付と繰り返しは行動の文面を直して�
   expect((await item()).schedule).toMatchObject({ due: '2026-12-08', repeat: weekly });
   await rebuildDashboard(config);
   expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
+});
+
+test('日付を付けた行をプロジェクトを決めない行動にすると、付け直す先がないため「日付を付け直す項目」に出さない', async () => {
+  const { config, vault } = await fixture();
+  const work = await capture(config, summary(['名前を決める', '色を決める']));
+  await organize(config, new MockLlm());
+  const aiKey = itemKey('hub', 'next', work.inputId, '名前を決める'), other = itemKey('hub', 'next', work.inputId, '色を決める');
+  await setItemSchedule(config, { projectId: 'hub', itemKey: aiKey, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+  await setItemSchedule(config, { projectId: 'hub', itemKey: other, due: '2026-12-02', reviewAfter: null, source: 'cli' });
+  await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-03T00:00:00Z', text: '名前を決める', meta: { action_from_input: work.inputId, action_from_text: '名前を決める', action_from_key: aiKey } });
+  expect((await readNowItems(vault, 'hub'))!.items.map(i => i.key)).not.toContain(aiKey);
+  await rebuildDashboard(config);
+  expect(await vault.read('HOME.md')).not.toContain('日付を付け直す項目');
+  // 同じプロジェクトのほかの行の日付はそのまま。
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === other)!.schedule).toMatchObject({ due: '2026-12-02' });
 });

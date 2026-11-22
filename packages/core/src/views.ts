@@ -99,8 +99,8 @@ async function effectiveUnits(config: HubConfig, inputs: Input[], receipts: Rece
  * ある入力に関わるNOWをまとめて作り直す。誤りとして外す・それを戻す操作では、帰属の取り消しや読み直しの結果が
  * 効いたり外れたりして、操作したプロジェクト以外のNOWも変わるため。今その入力を載せているNOWと、今の帰属先を対象にする。
  */
-export async function rebuildNowsForInputLocked(vault: Vault, config: HubConfig, projectIds: string[], inputId: string, alsoProject: string, inputs: Input[], receipts: Receipt[]): Promise<void> {
-  const targets = new Set([alsoProject]);
+export async function rebuildNowsForInputLocked(vault: Vault, config: HubConfig, projectIds: string[], inputId: string, alsoProject: string | undefined, inputs: Input[], receipts: Receipt[]): Promise<void> {
+  const targets = new Set(alsoProject === undefined ? [] : [alsoProject]);
   for (const id of projectIds) {
     const raw = await vault.read(`10_projects/${id}/NOW.md`);
     if (raw) try { const { meta } = parseMarkdown(raw); if (Array.isArray(meta.input_ids) && meta.input_ids.includes(inputId)) targets.add(id); } catch { /* 手で壊したNOWは、作り直しのときに競合として退避する。 */ }
