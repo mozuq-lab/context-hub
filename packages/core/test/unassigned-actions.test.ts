@@ -331,6 +331,24 @@ describe('プロジェクトを決めずに追加した行動', () => {
     expect(items.items).toHaveLength(101);
   });
 
+  test('片付けた本人の行動は、片付けたAIの行の上限とは別に項目一覧へ残す', async () => {
+    const { config } = await setup();
+    const saved = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-10-01T00:00:00Z', text: '古い行動' });
+    const units = await readEffectiveInputs(config), memoUnit = units[0]!;
+    const memos = Array.from({ length: 40 }, (_, i) => {
+      const id = `IN-${String(i).padStart(26, '0')}`;
+      const root = { ...memoUnit.chain.root, id, kind: 'memo' as const, project: undefined, text: `メモ${i}`, path: `00_inbox/2026-11-01_${id}.md`, occurred_at: '2026-11-01T00:00:00Z' };
+      return { chain: { root, revisions: [], latest: root, evidenceHash: '' }, receipt: { input_id: id, status: 'organized', result: result({ category: 'task' }) } as never, pendingCorrection: false };
+    });
+    const at = (n: number) => `RES-${String(n).padStart(26, '0')}`;
+    const resolution = (n: number, inputId: string, text: string) => ({ schema_version: 1 as const, id: at(n), project_id: UNASSIGNED_SCOPE, item_key: unassignedItemKey(inputId, text), section: 'next' as const, text, input_id: inputId, action: 'resolve' as const, source: 'cli', created_at: '2026-11-02T00:00:00Z' });
+    // 本人の行動を最初に片付け、その後にAIの行を上限より多く片付ける。
+    const resolutions = [resolution(1, saved.inputId, '古い行動'), ...memos.map((m, i) => resolution(i + 2, m.chain.root.id, m.chain.root.text))];
+    const { items } = (await import('../src/unassigned-actions.js')).buildUnassigned(config, [...units, ...memos], new Date('2026-11-10T00:00:00Z'), resolutions);
+    expect(items.items.filter(i => !i.action)).toHaveLength(UNASSIGNED_CLOSED_MAX);
+    expect(items.items.find(i => i.action)).toMatchObject({ input_id: saved.inputId, resolution: expect.objectContaining({ id: at(1) }) });
+  });
+
   test('プロジェクト未定のAIの行を行動にすると一覧から外し、プロジェクトのNOWの行もプロジェクトを決めない行動にできる', async () => {
     const { config, vault } = await setup();
     await addProject(config, { id: 'hub', title: '集約ツール' });

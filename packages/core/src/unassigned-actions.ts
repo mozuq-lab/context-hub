@@ -26,7 +26,7 @@ export const unassignedActionsPath = '90_system/unassigned-actions.json';
 export const UNASSIGNED_MEMOS_MAX = 30;
 /** 項目一覧に、片付いていない行を載せるメモの上限（新しい順）。アプリの「今日の3つ」に選んだ行を、新しいメモが届いても見失わないよう広めに取る。 */
 export const UNASSIGNED_ITEM_MEMOS_MAX = 100;
-/** 項目一覧に残す、片付けた行の上限（新しい報告順）。アプリから未解決へ戻せるようにする。 */
+/** 項目一覧に残す、片付けたAIの行の上限（新しい報告順）。アプリから未解決へ戻せるようにする。片付けた本人の行動は上限の外で全件残す。 */
 export const UNASSIGNED_CLOSED_MAX = 30;
 /** 項目一覧での行のラベル。AIの要約で示すメモの行と、AIの提案の行に付ける（本人の言葉のメモの行には付けない）。 */
 export const UNASSIGNED_SUMMARY_LABEL = 'AI要約: ', UNASSIGNED_SUGGESTION_LABEL = 'AI提案: ';
@@ -85,13 +85,14 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
   // プロジェクトを指定せずに本人が追加した行動。最新の文面（訂正があれば訂正）を本人の言葉のまま、追加した順に載せる。
   const own = units.filter(u => u.chain.root.kind === 'action' && u.chain.root.project === undefined)
     .sort((a, b) => Date.parse(a.chain.root.occurred_at) - Date.parse(b.chain.root.occurred_at) || a.chain.root.id.localeCompare(b.chain.root.id));
-  const ownOpen: NowItem[] = [];
+  // 片付けた本人の行動は、上限の外で全件残す（プロジェクトの項目一覧と同じ。消えると、アプリが追加の依頼を反映待ちに戻すため）。
+  const ownOpen: NowItem[] = [], ownClosed: NowItem[] = [];
   for (const unit of own) {
     const root = unit.chain.root, text = unit.chain.latest.text, key = unassignedItemKey(root.id, text), from = actionSource(root);
     if (seen.has(key)) continue;
     seen.add(key);
     const item: NowItem = { key, section: 'next', label: ACTION_LABEL, text, input_id: root.id, resolution: resolutionOf(key), action: from ? { from } : {} };
-    (item.resolution ? closedRows : ownOpen).push(item);
+    (item.resolution ? ownClosed : ownOpen).push(item);
   }
   for (const unit of units) {
     const { chain, receipt } = unit, result = receipt?.result;
@@ -127,8 +128,9 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
     openRows.push(open);
   }
   closedRows.sort((a, b) => b.resolution!.id.localeCompare(a.resolution!.id));
+  ownClosed.sort((a, b) => b.resolution!.id.localeCompare(a.resolution!.id));
   const generatedAt = now.toISOString();
-  const items: NowItems = { schema_version: 1, project: UNASSIGNED_SCOPE, generated_at: generatedAt, items: [...ownOpen, ...openRows.slice(0, UNASSIGNED_ITEM_MEMOS_MAX).flat(), ...closedRows.slice(0, UNASSIGNED_CLOSED_MAX)] };
+  const items: NowItems = { schema_version: 1, project: UNASSIGNED_SCOPE, generated_at: generatedAt, items: [...ownOpen, ...openRows.slice(0, UNASSIGNED_ITEM_MEMOS_MAX).flat(), ...ownClosed, ...closedRows.slice(0, UNASSIGNED_CLOSED_MAX)] };
   return { actions: { schema_version: 1, generated_at: generatedAt, total_memos: memos.length, memos: memos.slice(0, UNASSIGNED_MEMOS_MAX) }, items };
 }
 
