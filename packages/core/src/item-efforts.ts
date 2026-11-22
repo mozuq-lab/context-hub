@@ -95,9 +95,17 @@ export async function setItemEffort(config: HubConfig, request: ItemEffortReques
     const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
     const item = list.find(i => i.key === r.itemKey);
     if (!item) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
+    // 片付いた項目の目安は付けも外しもしない（戻したときは、片付ける前の目安のまま戻る）。
     const closed = resolved.get(r.itemKey);
     if (closed) throw new ItemTargetError({ code: 'item-closed', state: closed.action === 'exclude' ? 'excluded' : 'resolved' }, 'この項目は既に解決済みか、誤りとして外しています');
     const { records } = await readItemEfforts(vault), current = effectiveItemRecords(records, r.projectId, list, resolved, effortCleared).byKey.get(r.itemKey);
+    const unchanged = r.effort === null ? !current : current?.effort === r.effort;
+    if (unchanged && r.sourceEventId) {
+      // 端末からの依頼が今の目安と同じ（別の端末や二度押しで同じ依頼が重なった）なら、望んだ状態になっているので受け付けて何も記録しない。
+      // 再試行し続けないよう、今の目安の記録（外した依頼なら、この項目の最後の記録）を返す。
+      const latest = current ?? records.filter(x => x.project_id === r.projectId && x.item_key === r.itemKey).at(-1);
+      if (latest) return { projectId: r.projectId, itemKey: r.itemKey, effortId: latest.id, deduped: true };
+    }
     if (r.effort === null && !current) throw new Error('この項目に外す手間の目安はありません');
     if (current && current.effort === r.effort) throw new Error('この項目には既に同じ手間の目安が付いています');
     // 引き継いだ目安を外すときは、引き継ぎ元の記録を外す（項目のキーで外しても引き継ぎ元が残るため）。

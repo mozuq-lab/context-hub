@@ -77,11 +77,21 @@ export function eventMarker(source: string, eventId: string): string { return `9
 /**
  * 続きとしてつなぐ前のメモ。訂正を指していれば元の入力へたどる。メモ・作業要約でなければ（行動・見つからない）つながない。
  */
-export function continuationTarget(inputs: Input[], id: string): Input | undefined {
-  const byId = new Map(inputs.map(i => [i.id, i]));
-  let target = byId.get(id);
-  for (let guard = 0; target?.kind === 'correction' && guard < 1000; guard++) target = byId.get(target.corrects_input_id!);
-  return target && (target.kind === 'memo' || target.kind === 'work-summary') ? target : undefined;
+/**
+ * 続きがつなぐ前のメモ。訂正を指していれば元の入力までたどり、メモ・作業要約だけを返す。
+ * 全原文は読まず、たどる原文だけを読む。見つからない・読めない原文は、つながないものとして扱う（続きの本文を失わない）。
+ */
+async function continuationTarget(vault: Vault, inbox: string[], id: string): Promise<Input | undefined> {
+  let current: string | undefined = id;
+  for (let guard = 0; current !== undefined && guard < 1000; guard++) {
+    const at = current, path = inbox.find(p => p.endsWith(`_${at}.md`));
+    if (path === undefined) return undefined;
+    let input: Input;
+    try { input = parseInput(path, (await vault.read(path))!); } catch { return undefined; }
+    if (input.kind === 'memo' || input.kind === 'work-summary') return input;
+    current = input.kind === 'correction' ? input.corrects_input_id : undefined;
+  }
+  return undefined;
 }
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
 export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
@@ -138,15 +148,13 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
       if (cause) throw new HappenedOnError({ code: 'happened-on-invalid', cause, max_days: maxDays });
     }
     // 続きは前のメモ（訂正を指していれば、その元の入力）につなぐ。前のメモが見つからない・行動のときは、つながない普通のメモとして保存する（本文を失わない）。
-    // 本人がプロジェクトを選ばなかった続きは、前のメモで本人が指定したプロジェクトを引き継ぐ（統合済みなら統合先）。
-    const continues = request.continues === undefined ? undefined : continuationTarget(await readInputs(config), request.continues);
+    // 本人がプロジェクトを選ばなかった続きは、前のメモで本人が指定したプロジェクトをそのまま引き継ぐ。
+    // 統合済みのプロジェクトでも統合先に置き換えずに記録し、読むときに統合先へ読み替える（統合を戻せば、前のメモと一緒に元のプロジェクトへ戻る）。
+    const continues = request.continues === undefined ? undefined : await continuationTarget(vault, inbox, request.continues);
     let project = request.project;
     if (continues !== undefined) {
       meta.continues_input_id = continues.id;
-      if (project === undefined && continues.project !== undefined) {
-        const projects = await readProjects(config), inherited = resolveProject(projects, continues.project);
-        if (inherited !== undefined && projects.some(p => p.id === inherited)) project = meta.project = inherited;
-      }
+      if (project === undefined && continues.project !== undefined && (await readProjects(config)).some(p => p.id === continues.project)) project = meta.project = continues.project;
     }
     if (project && !(await readProjects(config)).some(p => p.id === project)) throw new Error('指定プロジェクトがありません。先にproject addを実行してください');
     // 統合済みのプロジェクトのNOWは統合先にあるため、行動は統合先へ追加してもらう（完了報告・期日の依頼と同じ）。

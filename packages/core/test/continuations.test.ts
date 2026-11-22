@@ -40,13 +40,13 @@ test('続きは前のメモにつながり、プロジェクトを選ばなけ�
   // 行動には前のメモを付けられない。
   await expect(capture(config, { source: 'cli', kind: 'action', text: '配布を進める', project: 'hub', continues: first.inputId, occurredAt: at(3) })).rejects.toThrow('前のメモ');
 
-  // 前のメモのプロジェクトが統合済みなら、統合先を引き継ぐ。
+  // 前のメモのプロジェクトが統合済みでも、前のメモのプロジェクトのまま記録する（読むときに統合先へ読み替え、統合を戻せば元へ戻る）。
   await addProject(config, { id: 'tool', title: 'まとめツール' });
   const other = await capture(config, { source: 'cli', text: '別名側のメモ', project: 'tool', occurredAt: at(4) });
   const definition = async (id: string) => hash((await vault.read(`10_projects/${id}/project.md`))!);
   await mergeProjects(config, { fromId: 'tool', intoId: 'hub', fromHash: await definition('tool'), intoHash: await definition('hub'), source: 'cli' });
   const next = await capture(config, { source: 'cli', text: '別名側の続き', continues: other.inputId, occurredAt: at(5) });
-  expect((await readInputs(config)).find(i => i.id === next.inputId)).toMatchObject({ continues_input_id: other.inputId, project: 'hub' });
+  expect((await readInputs(config)).find(i => i.id === next.inputId)).toMatchObject({ continues_input_id: other.inputId, project: 'tool' });
 
   // 束ねると、前のメモを示す。
   const text = await bundle(config, [inherited.inputId], 20000);

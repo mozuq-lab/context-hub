@@ -88,14 +88,24 @@ function withoutPrevious(result: OrganizeResult, previous: PreviousMemoRef | und
 }
 /**
  * 続きとして書かれた入力の前のメモ。前のメモの最新の訂正の本文を、上限を超えれば末尾を残して渡す。
+ * 秘密情報の伏せ字は切り詰める前に全文へ掛ける（切った後では、鍵の見出しや接頭辞が落ちて伏せられないため）。
+ * 切る位置は近くに改行があれば行の頭にそろえ、なければ文字の途中（サロゲートペア）を避けて切る。
  * 前のメモが見つからない（同期が遅れている・行動など）ときは前提なしで整理する。
  */
-export function previousMemoFor(chains: CorrectionChain[], chain: CorrectionChain): PreviousMemoRef | undefined {
+export function previousMemoFor(config: HubConfig, chains: CorrectionChain[], chain: CorrectionChain): PreviousMemoRef | undefined {
   const id = chain.root.continues_input_id;
   if (id === undefined || id === chain.root.id) return undefined;
   const parent = chains.find(c => c.root.id === id);
   if (!parent || (parent.root.kind !== 'memo' && parent.root.kind !== 'work-summary')) return undefined;
-  const text = parent.latest.text, clipped = text.length > PREVIOUS_MEMO_CHARS ? `（前半を省略）${text.slice(text.length - PREVIOUS_MEMO_CHARS)}` : text;
+  const text = redactText(parent.latest.text, secretSettings(config)).text;
+  let clipped = text;
+  if (text.length > PREVIOUS_MEMO_CHARS) {
+    let from = text.length - PREVIOUS_MEMO_CHARS;
+    const line = text.indexOf('\n', from - 1);
+    if (line !== -1 && line + 1 - from <= 200 && line + 1 < text.length) from = line + 1;
+    else if (/[\uDC00-\uDFFF]/.test(text[from] ?? '')) from++;
+    clipped = `（前半を省略）${text.slice(from)}`;
+  }
   return { id: parent.root.id, ids: [parent.root, ...parent.revisions].map(i => i.id), kind: parent.root.kind, occurred_at: parent.root.occurred_at, text: clipped };
 }
 const OPEN_ITEMS_MAX = 30, OPEN_ITEM_CHARS = 200;
@@ -234,7 +244,7 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         const policies = await readPolicies(config,resolveProject(projects,chain.root.project));
         // 外した項目の例は補助なので、記録が壊れていても整理は止めない（壊れた記録はNOWの作り直しとdoctorで示す）。
         let overlays: ExclusionOverlays | undefined; try { overlays = await readExclusionOverlays(vault); } catch { overlays = undefined; }
-        return { chain, input, projects, registry, receipt, resumed: false, policyText: formatPolicies(policies), policyRevision: policies.revision, openItems: await openItemsFor(vault, chain, projects, inputs), excluded: exclusionContext(overlays, chain, projects), previous: previousMemoFor(chains, chain) };
+        return { chain, input, projects, registry, receipt, resumed: false, policyText: formatPolicies(policies), policyRevision: policies.revision, openItems: await openItemsFor(vault, chain, projects, inputs), excluded: exclusionContext(overlays, chain, projects), previous: previousMemoFor(config, chains, chain) };
       });
       if (!plan) { outcome.skipped++; continue; }
       const { input, receipt } = plan;
@@ -349,7 +359,7 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
           outcome.processed++; outcome.recovered = (outcome.recovered ?? 0) + 1; continue;
         }
         plans.push(plan);
-        const before = previousMemoFor(state.chains, unit.chain);
+        const before = previousMemoFor(config, state.chains, unit.chain);
         if (before) previous.set(unit.chain.root.id, before);
       }
       return { plans, key: state.key, previous };

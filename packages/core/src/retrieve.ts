@@ -233,15 +233,15 @@ export function fenced(text: string): string {
 }
 const oneLine = (value: string) => value.replace(/[\u0000-\u001f\u007f]+/g, ' ');
 const kindLabels: Record<Doc['kind'],string> = { memo:'メモ', 'work-summary':'作業要約', action:'本人が追加した行動', correction:'訂正', idea:'アイデア', knowledge:'知識', now:'NOW' };
-/**
- * 本人が選んだ記録だけを、出典・訂正の注意・帰属の区別と方針を付けて1つの資料にする。
- * 記録は指定順に並べ、上限に収まらない記録は本文の途中で切らずに丸ごと省き、末尾にIDを示す。
- */
 /** 続きの前のメモへのリンク。前のメモが読めなければIDだけを示す。 */
 function continuationRef(id: string, units: Map<string, EffectiveInput>): string {
   const root = units.get(id)?.chain.root;
   return root ? `[${root.id}](${root.path})` : `${id}（見つかりません）`;
 }
+/**
+ * 本人が選んだ記録だけを、出典・訂正の注意・帰属の区別と方針を付けて1つの資料にする。
+ * 記録は指定順に並べ、上限に収まらない記録は本文の途中で切らずに丸ごと省き、末尾にIDを示す。
+ */
 export async function bundle(config: HubConfig, ids: string[], maxChars = config.retrieve.contextMaxChars): Promise<string> {
   const wanted = [...new Set(ids.map(id => id.trim()).filter(Boolean))];
   if (!wanted.length) throw new Error('記録のIDを1件以上指定してください');

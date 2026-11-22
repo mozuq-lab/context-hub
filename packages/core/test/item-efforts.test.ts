@@ -109,3 +109,22 @@ test('受付ファイルの目安の依頼を反映し、同じ受付IDは重複
   await vault.write('90_system/item-efforts/EFF-01JZ0000000000000000000000.json', '{"broken":true}\n');
   expect((await doctor(config)).issues).toContain('手間の目安の記録が不正です: 90_system/item-efforts/EFF-01JZ0000000000000000000000.json');
 });
+
+test('端末から今と同じ目安を重ねて依頼しても、再試行させずに受け付け、片付いた項目の目安は戻すまで変えない', async () => {
+  const { config, vault, items } = await fixture();
+  const key = items[0]!.key, fields = { operation: 'item-effort', source: 'flutter', project_id: 'hub', item_key: key, effort: 'quick', confirmed: true };
+  await packet(config, fields, ''); await packet(config, fields, '');
+  expect(await ingest(config)).toMatchObject({ accepted: 2, rejected: 0 });
+  const { records } = await readItemEfforts(vault);
+  expect(records).toHaveLength(1);
+  const receipts = (await readIntakeReceipts(config)).filter(r => r.operation === 'item-effort');
+  expect(receipts.map(r => (r.result as { effortId: string }).effortId)).toEqual([records[0]!.id, records[0]!.id]);
+  expect((await ingest(config))).toMatchObject({ accepted: 0, rejected: 0 });
+  // CLIでは同じ目安を付け直すと理由を示して断る。
+  await expect(setItemEffort(config, { projectId: 'hub', itemKey: key, effort: 'quick', source: 'cli' })).rejects.toThrow('同じ手間の目安');
+  // 片付けた項目の目安は変えられず、戻すと片付ける前の目安のまま戻る。
+  await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'resolve', source: 'cli' });
+  await expect(setItemEffort(config, { projectId: 'hub', itemKey: key, effort: null, source: 'cli' })).rejects.toThrow('解決済み');
+  await setItemResolution(config, { projectId: 'hub', itemKey: key, action: 'reopen', source: 'cli' });
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === key)!.effort).toBe('quick');
+});
