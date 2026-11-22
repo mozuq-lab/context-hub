@@ -50,6 +50,8 @@ const nowItemSchema = z.object({
   // 本人が付けた期日・見直す日（item-schedules）。旧版の一覧にはない。
   // repeatは定例の繰り返し（unit・every、毎月はday）。繰り返しのない項目と旧版の一覧にはない。
   schedule: z.object({ id: z.string().regex(/^SCH-[0-9A-HJKMNP-TV-Z]{26}$/), due: z.string().nullable(), review_after: z.string().nullable(), repeat: z.object({ unit: z.enum(['day', 'week', 'month']), every: z.number().int().min(1).max(12), day: z.number().int().min(1).max(31).optional() }).strict().optional() }).strict().nullable().optional(),
+  // 本人が付けた手間の目安（item-efforts）。quick: 15分ほど / hour: 1時間ほど / half-day: 半日以上。目安のない項目と旧版の一覧にはない。
+  effort: z.enum(['quick', 'hour', 'half-day']).optional(),
   // 本人がプロジェクトを指定したメモから、AIが「片付いたかも」と示したもの。未確認で、完了・解決ではない。片付いていない項目にだけ付く。
   hints: z.array(z.object({ input_id: inputIdSchema, quote: z.string().min(1).max(200), at: z.string().datetime({ offset: true }) }).strict()).max(20).optional(),
   // 本人が直接追加した行動（入力の種類action）。fromはAIが読み取った行を行動にしたときの元の行（根拠の入力ID・直す前の本文・項目キー）。旧版の一覧にはない。

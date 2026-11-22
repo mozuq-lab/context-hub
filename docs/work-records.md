@@ -146,6 +146,21 @@ node packages/core/dist/cli.js --config "<設定ファイル>" item schedule <pr
 ```
 
 アプリの対応版では、`operation: item-schedule`の受付ファイルに`repeat`（`{unit: day|week|month, every: 1〜12}`、`null`で外す）を添え、今回の完了・見送りは`operation: item-occurrence`（`action: done|skip`と、確認した回の`due`）で依頼します。`repeat`を省いた依頼（繰り返しを知らない版のアプリ）は、今の繰り返しを保ちます。回の記録は`90_system/item-occurrences/OCC-*.json`に残し、次の回の期日は新しい`SCH-*.json`として付けます。
+### 手間の目安
+
+「会議まで20分ある」「今日は半日まとまって使える」ときに合う項目を選べるよう、次の一手・未解決に本人が**手間の目安**を付けられます。目安は「15分ほど」（`quick`）・「1時間ほど」（`hour`）・「半日以上」（`half-day`）の3段階で、期日と同じくAIは推測せず、本人の指定だけを記録します。
+
+- NOWの行末とHOMEの「次の一手」に「手間 15分ほど」のように示します（期日があれば「期日 2026-12-01・手間 半日以上」）。アプリの「次の一手」では目安で絞り込めます。
+- 作業要約が届いて根拠が変わっても、同じ欄・同じ本文の項目には目安を引き継ぎます（期日と同じ規則）。引き継ぎ先のない目安は、期日と違って付け直しを求めず、そのまま使わなくなります。
+- 完了・解決した項目と、誤りとして外した項目には付けられません。
+
+```sh
+node packages/core/dist/cli.js --config "<設定ファイル>" item effort <project-id> <key> --set quick --confirm
+node packages/core/dist/cli.js --config "<設定ファイル>" item effort <project-id> <key> --set none --confirm   # 外す
+```
+
+アプリの対応版では`operation: item-effort`の受付ファイル（`effort`に変更後の目安、`null`で外す）として依頼します。指定ごとに`90_system/item-efforts/EFF-*.json`を残し、項目ごとに最後の記録を有効とします。項目一覧（`90_system/now-items/`）の各項目にも、そのときの目安を`effort`として書きます。読めない記録はNOW・HOMEの生成を止めず、`doctor`で示します。
+
 ### 期日をカレンダーに出す
 
 設定で有効にすると、HOMEを作るたび（`cycle`・`dashboard`）に、進行中のプロジェクトの次の一手・未解決に本人が付けた期日を、カレンダーに読み込める`90_system/calendar/contexthub.ics`（iCalendar）へ書き出します。既定は無効です。

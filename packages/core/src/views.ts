@@ -10,6 +10,7 @@ import { readCorrectionChains } from './corrections.js';
 import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
 import { activeResolutions, closedMergeWindows, withinMergeWindow, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
+import { effectiveEfforts, effortLabel, readItemEfforts } from './item-efforts.js';
 import { evidenceBound, inputWhen } from './happened.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
 import { appliedReread, readExclusionOverlays } from './item-rereads.js';
@@ -189,8 +190,13 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     excluded.push(`- ${r.section === 'next' ? '次の一手: ' : '未解決: '}${plain(r.text)} ${ref(input)} — 理由: ${exclusionReasonLabels[r.reason]}${r.note ? `（${plain(r.note)}）` : ''} / 本人報告 ${dateLabel(r.created_at, config.timezone)} ${r.id}${detached ? ' / このメモはこのプロジェクトから外しています' : reread ? ' / メモを読み直しました' : ' / いまの整理結果にはない項目です'}`);
   }
   const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
-  for (const item of items.values()) { const s = scheduled.get(item.key); if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) }; }
-  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key); return s ? ` — ${scheduleLabel(s)}` : ''; }));
+  const efforts = effectiveEfforts((await readItemEfforts(vault)).records, projectId, [...items.values()], resolved);
+  for (const item of items.values()) {
+    const s = scheduled.get(item.key), e = efforts.get(item.key);
+    if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) };
+    if (e) item.effort = e;
+  }
+  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key), e = efforts.get(key), label = [s ? scheduleLabel(s) : '', e ? effortLabel(e) : ''].filter(Boolean).join('・'); return label ? ` — ${label}` : ''; }));
   next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
   // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。

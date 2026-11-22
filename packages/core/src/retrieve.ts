@@ -237,6 +237,11 @@ const kindLabels: Record<Doc['kind'],string> = { memo:'メモ', 'work-summary':'
  * 本人が選んだ記録だけを、出典・訂正の注意・帰属の区別と方針を付けて1つの資料にする。
  * 記録は指定順に並べ、上限に収まらない記録は本文の途中で切らずに丸ごと省き、末尾にIDを示す。
  */
+/** 続きの前のメモへのリンク。前のメモが読めなければIDだけを示す。 */
+function continuationRef(id: string, units: Map<string, EffectiveInput>): string {
+  const root = units.get(id)?.chain.root;
+  return root ? `[${root.id}](${root.path})` : `${id}（見つかりません）`;
+}
 export async function bundle(config: HubConfig, ids: string[], maxChars = config.retrieve.contextMaxChars): Promise<string> {
   const wanted = [...new Set(ids.map(id => id.trim()).filter(Boolean))];
   if (!wanted.length) throw new Error('記録のIDを1件以上指定してください');
@@ -274,6 +279,8 @@ export async function bundle(config: HubConfig, ids: string[], maxChars = config
         ...(owned ? [`プロジェクト: ${projects.get(owned) ?? owned}（${owned}、本人指定）`] : []),
         ...(estimated.length ? [`関連候補（AI推定、帰属未確定）: ${estimated.map(p => `${projects.get(p) ?? p}（${p}）`).join(', ')}`] : []),
         ...(unit.chain.revisions.length ? [correctionNotice(unit)] : []),
+        // 続きとして書いたメモは、前のメモを示す（前のメモの本文は、そのIDも束ねたときにだけ載せる）。
+        ...(root.continues_input_id ? [`前のメモの続き: ${continuationRef(root.continues_input_id, units)}`] : []),
         ...(unit.receipt?.result ? [`有効解釈（AI整理・未検証）: ${oneLine(hideSecrets(unit.receipt.result.summary))}`] : []),
         unit.chain.revisions.length ? `本文（最新の訂正 [${latest.id}](${latest.path})）:` : '本文:',
         fenced(hideSecrets(latest.text)),

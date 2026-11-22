@@ -70,12 +70,20 @@ export async function readItemSchedules(vault: Vault, options: { raw?: boolean }
   records.sort((a, b) => a.id.localeCompare(b.id));
   return { records: options.raw ? records : await settleItemRecords(vault, records), problems };
 }
+/** 項目に結び付けた本人の記録（日付・手間の目安など）に共通する欄。 */
+export interface ItemRecordLike { project_id: string; item_key: string; section: string; text: string; input_id: string }
+/** 日付の記録が、日付を外した記録か。 */
+const scheduleCleared = (r: Pick<ItemSchedule, 'due' | 'review_after'>) => r.due === null && r.review_after === null;
+/** 項目ごとに最後の記録だけを有効にする。最後の記録が外した記録（clearedが真）なら含めない。 */
+export function activeItemRecords<T extends ItemRecordLike>(records: T[], cleared: (r: T) => boolean, projectId?: string): Map<string, T> {
+  const latest = new Map<string, T>();
+  for (const r of records) if (!projectId || r.project_id === projectId) latest.set(r.item_key, r);
+  for (const [key, r] of latest) if (cleared(r)) latest.delete(key);
+  return latest;
+}
 /** 項目ごとに最後の記録だけを有効にする。最後の記録が日付を外したものなら含めない。 */
 export function activeSchedules(records: ItemSchedule[], projectId?: string): Map<string, ItemSchedule> {
-  const latest = new Map<string, ItemSchedule>();
-  for (const r of records) if (!projectId || r.project_id === projectId) latest.set(r.item_key, r);
-  for (const [key, r] of latest) if (r.due === null && r.review_after === null) latest.delete(key);
-  return latest;
+  return activeItemRecords(records, scheduleCleared, projectId);
 }
 
 /**
@@ -84,22 +92,29 @@ export function activeSchedules(records: ItemSchedule[], projectId?: string): Ma
  * 作業要約が届くたびに次の一手の根拠（入力ID）が変わり、同じ本文でも別の項目になるため。
  * 引き継ぎ先のない記録だけを付け直しの対象として返す。解決済み・完了の項目の記録は返さない。
  */
-export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: { key: string; section: string; text: string; resolution: unknown; input_id?: string; action?: { from?: { input_id: string; text: string; key?: string } } }[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
-  const active = activeSchedules(records, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, ItemSchedule>();
+type EffectiveItem = { key: string; section: string; text: string; resolution: unknown; input_id?: string; action?: { from?: { input_id: string; text: string; key?: string } } };
+export function effectiveSchedules(records: ItemSchedule[], projectId: string, items: EffectiveItem[], resolvedKeys: { has(key: string): boolean }): { byKey: Map<string, ItemSchedule>; orphaned: ItemSchedule[] } {
+  return effectiveItemRecords(records, projectId, items, resolvedKeys, scheduleCleared);
+}
+/**
+ * effectiveSchedulesと同じ引き継ぎの規則を、項目に結び付けたほかの本人の記録（手間の目安など）にも使う。clearedは「外した記録」の判定。
+ */
+export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], projectId: string, items: EffectiveItem[], resolvedKeys: { has(key: string): boolean }, cleared: (r: T) => boolean): { byKey: Map<string, T>; orphaned: T[] } {
+  const active = activeItemRecords(records, cleared, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, T>();
   // 項目自身のキーで記録があれば（日付を外した記録を含む）、それが本人の最新の判断なので引き継ぎより優先する。
   const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
   const loose = [...active.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
   // 本人が追加した行動は、文面を直しても同じ行動（同じ入力）なので、直す前の文面に付けた日付を引き継ぐ。
   // AIの行を引き取った行動は、引き取った元の行（キー・本文）に付けた日付も同じ行動の日付として扱う。
   type Item = typeof items[number];
-  const lineage = (r: ItemSchedule, i: Item) => i.action !== undefined && (r.input_id === i.input_id || (i.action.from !== undefined && (r.item_key === i.action.from.key || r.text === i.action.from.text)));
-  const same = (r: ItemSchedule, i: Item) => r.section === i.section && (r.text === i.text || lineage(r, i));
+  const lineage = (r: T, i: Item) => i.action !== undefined && (r.input_id === i.input_id || (i.action.from !== undefined && (r.item_key === i.action.from.key || r.text === i.action.from.text)));
+  const same = (r: T, i: Item) => r.section === i.section && (r.text === i.text || lineage(r, i));
   // 引き継ぎの候補は、NOWから外れた同じ欄・同じ本文の記録のうち、日付を外した記録も含めて最新のもの。
   // 最新が日付を外した記録なら、それより前の古い日付を引き継がない（K1で付けK2で外した後、K3へ移った場合など）。
-  const latestPerKey = new Map<string, ItemSchedule>();
+  const latestPerKey = new Map<string, T>();
   for (const r of records) if (r.project_id === projectId) { latestPerKey.delete(r.item_key); latestPerKey.set(r.item_key, r); }
   const detached = [...latestPerKey.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
-  const isCleared = (r: ItemSchedule) => r.due === null && r.review_after === null;
+  const isCleared = cleared;
   for (const item of items) {
     if (item.resolution) continue;
     // 行動は、同じ行動の記録（直す前の文面・引き取った元の行を含む）のうち最新のものが効く。文面を前の形へ戻しても、古いキーの古い日付に戻らない。

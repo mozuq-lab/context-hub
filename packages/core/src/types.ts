@@ -45,6 +45,8 @@ export interface CaptureRequest {
   kind?: 'memo' | 'work-summary' | 'action'; project?: string; tool?: string; meta?: Record<string, string>;
   /** 本人が後から記録した出来事の日付（YYYY-MM-DD）。occurredAtは実際に書いた日時のまま渡す。 */
   happenedOn?: string;
+  /** 続きとして書いたときの前のメモの入力ID。projectを省くと、前のメモで本人が指定したプロジェクトを引き継ぐ。 */
+  continues?: string;
 }
 export interface CaptureResult { inputId: string; deduped: boolean; path: string; receivedAt: string }
 export interface Input {
@@ -53,6 +55,8 @@ export interface Input {
   meta?: Record<string, string>; origin: 'user-note' | 'ai-self-report'; text: string; path: string;
   /** 本人が指定した出来事の日付。あるときoccurred_atはその日の正午で、recorded_atが実際に書いた日時。 */
   happened_on?: string; recorded_at?: string;
+  /** 本人が「続き」として書いたときの前のメモ（訂正を除いた元の入力）のID。 */
+  continues_input_id?: string;
 }
 export interface Project {
   id: string; title: string; aliases: string[]; keywords: string[]; status: string;
