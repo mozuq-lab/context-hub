@@ -12,6 +12,7 @@ import { insightFeedbackSection, insightsSection, readInsights } from './insight
 import { UNASSIGNED_SCOPE, activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions, readNowItems } from './item-resolutions.js';
 import { WAITING_LONG_DAYS, waitingDays } from './item-waits.js';
 import { buildSomedayList, somedayDigestLines } from './someday.js';
+import { buildWeeklyReview, weeklyReviewDigestLines } from './weekly-review.js';
 import { todayIn } from './item-schedules.js';
 import { UNASSIGNED_TITLE } from './unassigned-actions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
@@ -66,12 +67,16 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   // 続けて、気づきへの本人の反応と答えの件数を出す（ふりかえりだけに出す）。
   let insights = '', feedback = '';
   if (config.synthesis.enabled) try { const build = await readInsights(config, vault, effective, now); insights = insightsSection(config, build.insights, now); feedback = insightFeedbackSection(config, build); } catch { /* HOMEで示す。 */ }
+  // 週次レビューの点検（HOMEとアプリと同じ一覧）。今週の気づきの後、件数の集計より前に置き、Obsidianだけでも同じ順で確かめられるようにする。
+  let weekly: string[] = [];
+  try { weekly = weeklyReviewDigestLines(await buildWeeklyReview(config, vault, now, { projects, effective }), now, config.timezone); } catch { /* 壊れた記録はHOMEとdoctorで示す。 */ }
   const lines: string[] = [
     `# 直近${days}日のふりかえり`, '',
     `期間: ${label(start.toISOString())} 〜 ${label(now.toISOString())} ${config.timezone}`,
     '受領・整理の記録から決定的に集計した一覧です。要約と抽出はAI生成・未検証です。判断の前にリンク先の原文と出典を確認してください。', '',
     ...(insights ? [insights, ''] : []),
     ...(feedback ? [feedback, ''] : []),
+    ...weekly,
     '## 概要',
     `- この期間に届いた入力: ${recent.length}件（整理済み ${count('organized')} / 整理待ち ${count('waiting')} / 整理失敗 ${count('failed')}${count('action') ? ` / 本人が追加した行動 ${count('action')}` : ''}）`,
     `- プロジェクト未帰属（整理済みのうち）: ${unassigned}件`,

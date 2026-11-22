@@ -24,6 +24,7 @@ import { setItemEffort,readItemEfforts,itemEfforts,itemEffortLabels,type ItemEff
 import { setItemWait,readItemWaits,effectiveWaits,WAIT_WHO_CHARS,type ItemWaiting } from './item-waits.js';
 import { setItemSomeday,readItemSomedays,effectiveSomedays,type ItemSomeday } from './item-somedays.js';
 import { buildSomedayList,setSomedayReview,somedayStale,readSomedayReviews,SOMEDAY_REVIEW_DAYS,type SomedayReviewAction } from './someday.js';
+import { buildWeeklyReview,daysSinceWeeklyReview,setWeeklyReview,WEEKLY_REVIEW_INTERVAL_DAYS } from './weekly-review.js';
 import { setItemSchedule,readItemSchedules,activeSchedules,effectiveSchedules,completeOccurrence,readItemOccurrences,repeatLabel,todayIn,REPEAT_EVERY_MAX,type RepeatRule } from './item-schedules.js';
 import { rebuildHistories } from './history.js';
 import { dismissResolutionHint } from './resolution-hints.js';
@@ -230,6 +231,10 @@ const event=last&&last.source==='cli'&&last.action===action&&last.on===on&&last.
 const result=await setSomedayReview(c,{target,targetId:id,action,on,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);};
 someday.command('idea <idea-id> <action>').description('アイデアを「いつかやる」に置く（add）・見直したが今は始めない（keep）・始めたので外す（start。プロジェクトか行動は別に作る）・やめて外す（drop）。アイデアのファイルは書き換えない').requiredOption('--confirm','アイデアを確認した本人による判断').action(async(id,action)=>{if(!['add','keep','start','drop'].includes(action))throw new Error('actionはadd・keep・start・dropのどれかです');await somedayReview('idea',id,action);});
 someday.command('keep-project <project>').description('休止中のプロジェクトを見直し、今は再開しない（そのまま）と記録する。再開・完了はproject statusで切り替える').requiredOption('--confirm','プロジェクトを確認した本人による判断').action(async id=>somedayReview('project',id,'keep'));
+const weekly=program.command('weekly-review').description(`週次レビュー: 確認待ち・プロジェクト未定の行動・進行中のプロジェクト・停滞・連絡待ち・期日・いつかやるを順に点検する。${WEEKLY_REVIEW_INTERVAL_DAYS}日以上見直していなければHOMEで促す。見直した記録は本人の報告だけで作る`);
+weekly.command('show').description('点検の一覧（モデルを使わずに作る。アプリとREVIEW.mdの「週次レビューの点検」と同じ）').action(async()=>{const c=await config(),list=await buildWeeklyReview(c,new Vault(c));output({...list,days_since_last_review:daysSinceWeeklyReview(list,todayIn(c.timezone))});});
+weekly.command('done').description('週次レビューを終えた（見直した）と記録し、HOMEとふりかえりを作り直す。同じ日の記録が既にあれば増やさない').option('--on <date>','見直した日（YYYY-MM-DD。既定は今日）').requiredOption('--confirm','点検を終えた本人による報告')
+  .action(async opts=>{const c=await config(),on=opts.on??todayIn(c.timezone);const result=await setWeeklyReview(c,{on,source:'cli',sourceEventId:`cli:weekly-review:${on}`});await rebuildDigest(c);await rebuildDashboard(c);output(result);});
 const conflict=program.command('conflict').description('生成物の競合（手で書き換えたNOW・HOME・REVIEW）を確認し、生成版へ戻す');
 conflict.command('list').description('対象ごとの退避・手で変えた行・確認用ハッシュを表示').action(async()=>output(await listConflicts(await config())));
 conflict.command('resolve <target>').description('手で変えた行をメモとして残し、最新の入力から作り直して退避を片付ける（例: 10_projects/<id>/NOW.md）').requiredOption('--hash <sha256>','conflict listで確認した対象のハッシュ').option('--no-memo','NOWの手で変えた行をメモとして保存しない（置き換えた全文は記録に残る）').requiredOption('--confirm','差分を確認した本人による操作').action(async(target,opts)=>{const c=await config();const result=await resolveConflict(c,{target,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:conflict:${target}:${opts.hash}`,saveManualAsMemo:opts.memo});await rebuildDashboard(c);output(result);});

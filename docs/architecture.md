@@ -41,6 +41,8 @@ POLICY.md                      共通の有効方針（派生集約）
 90_system/item-somedays/       次の一手・未解決を本人が「いつかやる」へ移した記録（移した日・見直した日）
 90_system/someday-reviews/     アイデアを「いつかやる」に置く・見直す・外す、休止中のプロジェクトを見直した記録
 90_system/someday.json         「いつかやる」の一覧（派生。アプリが読む）
+90_system/weekly-reviews/      本人が週次レビューを終えた（見直した）記録
+90_system/weekly-review.json   週次レビューの点検の一覧（派生。アプリが読む）
 90_system/answers/             記録に聞くの問いと答え（30日で片付ける）
 90_system/client-preferences.json アプリの好み（ピン留め・ひな形・文脈かごの上限）を端末間でそろえる共有の記録
 HOME.md                        受領と整理状況への入口
