@@ -11,6 +11,7 @@ import { lastEvidenceAt } from './views.js';
 import { insightFeedbackSection, insightsSection, readInsights } from './insights.js';
 import { UNASSIGNED_SCOPE, activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions, readNowItems } from './item-resolutions.js';
 import { WAITING_LONG_DAYS, waitingDays } from './item-waits.js';
+import { buildSomedayList, somedayDigestLines } from './someday.js';
 import { todayIn } from './item-schedules.js';
 import { UNASSIGNED_TITLE } from './unassigned-actions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
@@ -147,13 +148,17 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const text = (u: Unit) => u.unit.chain.latest.text, state = (u: Unit) => closedNow.get(itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u)));
     // 連絡待ちの印を付けた行動は「残っている行動」に数えず、下の「連絡待ち」に示す（HOMEとアプリの件数と同じ）。
     let waitingKeys = new Set<string>();
-    try { waitingKeys = new Set(((await readNowItems(vault, UNASSIGNED_SCOPE))?.items ?? []).filter(i => i.resolution === null && i.waiting).map(i => i.key)); } catch { /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
-    const waitingOwn = (u: Unit) => !state(u) && waitingKeys.has(itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u)));
-    const remaining = own.filter(u => !state(u) && !waitingOwn(u)), parked = own.filter(waitingOwn).length, added = own.filter(u => inWindow(u.input.received_at));
+    // 「いつかやる」へ移した行動も「残っている行動」に数えず、下の「いつかやる」に示す。
+    let somedayKeys = new Set<string>();
+    try { const items = (await readNowItems(vault, UNASSIGNED_SCOPE))?.items ?? []; waitingKeys = new Set(items.filter(i => i.resolution === null && i.waiting && !i.someday).map(i => i.key)); somedayKeys = new Set(items.filter(i => i.resolution === null && i.someday).map(i => i.key)); } catch { /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
+    const keyOf = (u: Unit) => itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u));
+    const waitingOwn = (u: Unit) => !state(u) && waitingKeys.has(keyOf(u)), somedayOwn = (u: Unit) => !state(u) && somedayKeys.has(keyOf(u));
+    const remaining = own.filter(u => !state(u) && !waitingOwn(u) && !somedayOwn(u)), parked = own.filter(waitingOwn).length, someday = own.filter(somedayOwn).length, added = own.filter(u => inWindow(u.input.received_at));
     const closedIn = (action: 'resolve' | 'exclude') => own.filter(u => { const r = state(u); return r?.action === action && inWindow(r.created_at); });
     const done = closedIn('resolve'), dropped = closedIn('exclude');
     const oldest = [...remaining].sort((a, b) => Date.parse(a.input.received_at) - Date.parse(b.input.received_at) || a.input.id.localeCompare(b.input.id));
-    lines.push('## プロジェクト未定の行動', `- 残っている行動: ${remaining.length}件${parked ? `（ほかに連絡待ち ${parked}件）` : ''} / 期間内に追加 ${added.length}件・完了 ${done.length}件・却下 ${dropped.length}件`);
+    const others = [parked ? `連絡待ち ${parked}件` : '', someday ? `いつかやる ${someday}件` : ''].filter(Boolean).join('・');
+    lines.push('## プロジェクト未定の行動', `- 残っている行動: ${remaining.length}件${others ? `（ほかに${others}）` : ''} / 期間内に追加 ${added.length}件・完了 ${done.length}件・却下 ${dropped.length}件`);
     for (const u of [...done].sort((a, b) => state(b)!.id.localeCompare(state(a)!.id)).slice(0, 5)) lines.push(`  - 完了: ${clip(text(u))} ${ref(u.input)}`);
     if (oldest.length) lines.push(`- 残っている行動（追加した順に最大5件）:`, ...oldest.slice(0, 5).map(u => `  - ${clip(text(u))} ${ref(u.input)}（${daysSince(u.input.received_at, now)}日前に追加）`));
     lines.push('');
@@ -164,7 +169,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const lists: { id: string; place: string }[] = [...projects.filter(p => !merged.has(p.id) && lifecycleOf(p) === 'active').map(p => ({ id: p.id, place: `[${plain(p.title)}](10_projects/${p.id}/NOW.md)` })), { id: UNASSIGNED_SCOPE, place: UNASSIGNED_TITLE }];
     for (const { id, place } of lists) {
       let list; try { list = await readNowItems(vault, id); } catch { continue; /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
-      for (const i of list?.items ?? []) if (i.resolution === null && i.waiting && (id !== UNASSIGNED_SCOPE || i.action)) waits.push({ days: waitingDays(i.waiting.since, today), since: i.waiting.since, place, text: `${i.section === 'next' ? '次の一手: ' : i.label ? '' : '未解決: '}${clip(i.label + i.text)}`, ...(i.waiting.who ? { who: i.waiting.who } : {}) });
+      for (const i of list?.items ?? []) if (i.resolution === null && i.waiting && !i.someday && (id !== UNASSIGNED_SCOPE || i.action)) waits.push({ days: waitingDays(i.waiting.since, today), since: i.waiting.since, place, text: `${i.section === 'next' ? '次の一手: ' : i.label ? '' : '未解決: '}${clip(i.label + i.text)}`, ...(i.waiting.who ? { who: i.waiting.who } : {}) });
     }
     if (waits.length) {
       const long = waits.filter(w => w.days >= WAITING_LONG_DAYS).length;
@@ -173,6 +178,8 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
       lines.push('');
     }
   }
+  // 「いつかやる」の件数と、長く見直していないもの（移した項目・休止中のプロジェクト・置いたアイデア）。
+  try { lines.push(...somedayDigestLines(await buildSomedayList(config, vault, now, projects), todayIn(config.timezone, now))); } catch { /* 壊れた記録はHOMEとdoctorで示す。 */ }
   lines.push('## 確認待ちの候補');
   if (!pending.length) lines.push('確認待ちの候補はありません。');
   for (const c of [...pending].sort((a, b) => (Date.parse(since(a) ?? '') || 0) - (Date.parse(since(b) ?? '') || 0))) {

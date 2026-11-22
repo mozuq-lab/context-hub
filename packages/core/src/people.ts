@@ -255,8 +255,8 @@ async function removePageLocked(vault: Vault, personId: string): Promise<void> {
 }
 
 export interface PersonRecord { inputId: string; path: string; occurredAt: string; kind: 'memo' | 'work-summary'; excerpt: string; projects: { id: string; inferred: boolean }[]; corrected: boolean }
-/** waitingは、本人が連絡待ちの印を付けた項目の頼んだ日（印のない項目にはない）。 */
-export interface PersonItem { projectId: string; projectTitle: string; paused: boolean; section: 'next' | 'open'; text: string; due: string | null; inputId: string; waiting?: string }
+/** waitingは、本人が連絡待ちの印を付けた項目の頼んだ日（印のない項目にはない）。somedayは、本人が「いつかやる」へ移した項目。 */
+export interface PersonItem { projectId: string; projectTitle: string; paused: boolean; section: 'next' | 'open'; text: string; due: string | null; inputId: string; waiting?: string; someday?: true }
 export interface PersonSummary { person: Person; records: PersonRecord[]; items: PersonItem[]; lastSeen: string | null }
 
 /** 登録した人ごとに、名前が出てくる記録（訂正があれば最新の訂正の本文で判定）と未完了の項目を集める。 */
@@ -287,7 +287,7 @@ export async function collectPeople(config: HubConfig, vault: Vault, people: Per
       const text = redactText(item.text, settings).text;
       // 連絡待ちの相手として名前を付けた項目も、その人の未完了の項目に含める（本文に名前がなくても）。
       const who = item.waiting?.who;
-      for (const p of terms) if (findMention(text, p.terms) || (who !== undefined && findMention(who, p.terms))) items.get(p.id)!.push({ projectId: project.id, projectTitle: project.title, paused: lifecycleOf(project) === 'paused', section: item.section, text, due: item.schedule?.due ?? null, inputId: item.input_id, ...(item.waiting ? { waiting: item.waiting.since } : {}) });
+      for (const p of terms) if (findMention(text, p.terms) || (who !== undefined && findMention(who, p.terms))) items.get(p.id)!.push({ projectId: project.id, projectTitle: project.title, paused: lifecycleOf(project) === 'paused', section: item.section, text, due: item.schedule?.due ?? null, inputId: item.input_id, ...(item.waiting ? { waiting: item.waiting.since } : {}), ...(item.someday ? { someday: true as const } : {}) });
     }
   }
   return people.map(person => {
@@ -313,7 +313,7 @@ export function buildPersonText(config: HubConfig, summary: PersonSummary, proje
   lines.push(`## 未完了の次の一手・未解決（${items.length}件）`);
   if (!items.length) lines.push('名前が出てくる未完了の項目はありません。');
   for (const item of items.slice(0, PERSON_ITEMS_SHOWN)) {
-    const notes = [item.waiting ? `連絡待ち ${item.waiting}から` : '', item.due ? `期日 ${item.due}` : '', item.paused ? '休止中のプロジェクト' : ''].filter(Boolean);
+    const notes = [item.someday ? 'いつかやる' : '', item.waiting ? `連絡待ち ${item.waiting}から` : '', item.due ? `期日 ${item.due}` : '', item.paused ? '休止中のプロジェクト' : ''].filter(Boolean);
     lines.push(`- [${plain(item.projectTitle)}](../../10_projects/${item.projectId}/NOW.md) ${sectionLabel[item.section]}: ${clip(item.text)}${notes.length ? `（${notes.join(' / ')}）` : ''}`);
   }
   if (items.length > PERSON_ITEMS_SHOWN) lines.push(`ほか${items.length - PERSON_ITEMS_SHOWN}件は載せていません。`);

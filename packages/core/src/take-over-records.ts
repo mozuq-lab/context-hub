@@ -5,13 +5,14 @@ import { UNASSIGNED_SCOPE, activeResolutions, itemKey, readItemResolutions, read
 import { effectiveItemRecords, effectiveSchedules, readItemSchedules, takeOverEvent, type ItemSchedule } from './item-schedules.js';
 import { readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
 import { readItemWaits, waitCleared, waitPath, type ItemWaitRecord } from './item-waits.js';
+import { readItemSomedays, somedayCleared, somedayPath, type ItemSomedayRecord } from './item-somedays.js';
 import type { HubConfig } from './types.js';
 
 /** 引き取った行動。scopeは行動の置き場のプロジェクト（省略はプロジェクト未定）、textは保存した行動の本文。 */
 export interface TakenOverAction { inputId: string; scope?: string; text: string; fromKey: string; source: string }
 
 /**
- * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、連絡待ちの印を、行動の記録として写す（Writerロック内）。
+ * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、連絡待ちの印、「いつかやる」を、行動の記録として写す（Writerロック内）。
  * 元の行と行動は置き場もキーも違うことがあり（別のプロジェクト・プロジェクト未定）、元の行の日付は作業要約が届くたびに別のキーの記録から引き継がれているため、
  * 読むたびに元の行をたどるのではなく、引き取った時点で効いている記録を行動の記録にする。
  * 写した記録の受付IDは元の記録のIDを含み（takeOverEvent）、元の記録は引き取られた記録として、元の置き場では外した記録と同じに扱う（同じ本文の行が後から出直しても日付を二重に付けない）。
@@ -37,6 +38,11 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
     const record: ItemWaitRecord = { ...base, id: `WAIT-${ulid()}`, waiting: wait.waiting, source_event_id: takeOverEvent(action.inputId, wait.id) };
     if (!await vault.create(waitPath(record.id), JSON.stringify(sorted(record, waitOrder), null, 2) + '\n')) throw new Error('連絡待ちの記録が競合しました');
   }
+  const somedays = await readItemSomedays(vault), someday = effectiveItemRecords(somedays.records, source.scope, source.items, resolved, somedayCleared).byKey.get(action.fromKey);
+  if (someday && !somedays.records.some(r => r.source_event_id === takeOverEvent(action.inputId, someday.id))) {
+    const record: ItemSomedayRecord = { ...base, id: `SMD-${ulid()}`, someday: someday.someday, source_event_id: takeOverEvent(action.inputId, someday.id) };
+    if (!await vault.create(somedayPath(record.id), JSON.stringify(sorted(record, somedayOrder), null, 2) + '\n')) throw new Error('「いつかやる」の記録が競合しました');
+  }
 }
 
 /** 元の行が載っている置き場と、その項目一覧。キーは置き場ごとに異なるので、見つかるのは1か所だけ。 */
@@ -52,6 +58,7 @@ async function findSourceRow(config: HubConfig, vault: Vault, key: string): Prom
 
 /** 本人が付けた記録と同じ欄の順で書く。 */
 const scheduleOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'due', 'review_after', 'repeat', 'source', 'source_event_id', 'created_at'];
+const somedayOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'someday', 'source', 'source_event_id', 'created_at'];
 const waitOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'waiting', 'source', 'source_event_id', 'created_at'];
 const effortOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'effort', 'source', 'source_event_id', 'created_at'];
 function sorted<T extends object>(record: T, order: string[]): T {

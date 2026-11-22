@@ -5,6 +5,8 @@ import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { effortLabel,type ItemEffort } from './item-efforts.js';
 import { readItemWaits,waitingDays } from './item-waits.js';
+import { readItemSomedays,orphanedSomedays } from './item-somedays.js';
+import { readSomedayReviews,rebuildSomedayLocked,somedaySection } from './someday.js';
 import { effectiveSchedules,readItemOccurrences,readItemSchedules,repeatLabel,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
 import { readAskRecords } from './ask.js';
 import { Vault,hash,parseMarkdown } from './storage.js';
@@ -101,6 +103,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const unit of effective){const key=actionSource(unit.chain.root)?.key;if(key)takenKeys.add(key);}
   // カレンダーに書き出す、進行中のプロジェクトの日付付きの項目（HOMEの「次の一手」と同じ範囲）。
   const calendarItems:CalendarItem[]=[];
+  const somedayRecords=(await readItemSomedays(vault)).records,somedayOrphans:string[]=[];
   for(const project of projects){
    const now=`10_projects/${project.id}/NOW.md`,target=await vault.read(now)!==undefined?now:`10_projects/${project.id}/project.md`;
    const mergeTarget=projects.find(p=>p.id===mergedInto.get(project.id));
@@ -123,6 +126,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     if(!list){nextUnread.push(project.title);continue;}
     const front=new Set<string>(),{byKey:scheduled,orphaned:loose}=effectiveSchedules(schedules.records,project.id,list.items,activeResolutions(resolutionRecords,project.id));
     for(const i of list.items){
+     // 「いつかやる」へ移した項目は、次の一手の一覧・期日の欄・連絡待ち・カレンダーのどれにも出さず、「いつかやる」の欄にだけ載せる。
+     if(i.resolution===null&&i.someday){front.add(i.key);continue;}
      const schedule=i.resolution===null?scheduled.get(i.key):undefined;
      if(i.resolution===null&&i.waiting){front.add(i.key);waiting.push({since:i.waiting.since,id:project.id,place:`[${plain(project.title)}](${now})`,text:`${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}`,...(i.waiting.who?{who:i.waiting.who}:{}),dates:schedule?scheduleLabel(schedule):'',check:schedule?.review_after!=null&&schedule.review_after<=today});}
      if(!schedule)continue;
@@ -135,6 +140,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
     for(const s of loose)if(!takenKeys.has(s.item_key))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
+    // 「いつかやる」へ移した項目がNOWから外れたときも、黙って消さずに示す（AIの行は言い回しが変わることがある）。
+    for(const s of orphanedSomedays(somedayRecords,project.id,list.items,activeResolutions(resolutionRecords,project.id)))if(!takenKeys.has(s.item_key))somedayOrphans.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（移した日 ${s.someday!.since}） / ${project.id} ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     // 本人が付けた手間の目安も、日付と並べて行末に示す（NOWの項目一覧に載っている）。
     const later=(i:{key:string;effort?:ItemEffort})=>{const s=scheduled.get(i.key),label=[s?scheduleLabel(s):'',i.effort?effortLabel(i.effort):''].filter(Boolean).join('・');return label?`（${label}）`:'';};
@@ -145,7 +152,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const unassignedBuilt=await rebuildUnassignedActionsLocked(config,vault,effective,clock),unassignedFront=new Set<string>();
   // プロジェクト未定の行動に本人が付けた期日も、プロジェクトの項目と一緒に期日順で前に出し、見直す日が先の行動はたたむ。
   for(const i of unassignedBuilt.items.items){
-   if(!i.action||i.resolution!==null)continue;
+   if(!i.action||i.resolution!==null||i.someday)continue;
    if(i.waiting)waiting.push({since:i.waiting.since,id:UNASSIGNED_SCOPE,place:UNASSIGNED_TITLE,text:`次の一手: ${clip(i.label+i.text)}`,...(i.waiting.who?{who:i.waiting.who}:{}),dates:i.schedule?scheduleLabel({due:i.schedule.due,review_after:i.schedule.review_after,repeat:i.schedule.repeat??null}):'',check:i.schedule?.review_after!=null&&i.schedule.review_after<=today});
    if(!i.schedule)continue;
    const schedule={due:i.schedule.due,review_after:i.schedule.review_after},repeat=i.schedule.repeat;
@@ -207,7 +214,11 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   try{const built=await rebuildInsightsLocked(config,vault,effective,clock);insightsText=insightsSection(config,built.insights,clock);insightsLines=insightsNotices(config,built,clock);}
   catch{if(config.synthesis.enabled)insightsLines=['- 週次の統合の記録を読めません（`ctx doctor`で確認してください）'];}
   // 今週の気づきと、行動につながる欄（次の一手）を、プロジェクトの一覧より前に置く。
-  const lead=[insightsText,nextSection,unassignedActions,waitingSection].filter(Boolean).map(x=>x+'\n\n').join('');
+  // 「いつかやる」の一覧（アプリが読む派生物）と欄。移した項目・休止中のプロジェクト・置いたアイデアを、最後に見直した日の古い順に並べる。
+  let somedayText='';
+  try{somedayText=somedaySection(await rebuildSomedayLocked(config,vault,clock,projects),today);}catch{/* 一覧を作れなくてもHOMEは作る。記録の不正は「失敗と競合」に示す。 */}
+  if(somedayOrphans.length)somedayText=`${somedayText||'## いつかやる'}\n\n「いつかやる」から外れた項目（本文が変わったかNOWから外れたため、移したままにできませんでした。${somedayOrphans.length}件。新しい項目をアプリの「…」から移し直し、この記録は\`ctx item someday <project> <key> --clear --confirm\`で外してください）:\n${somedayOrphans.join('\n')}`;
+  const lead=[insightsText,nextSection,unassignedActions,waitingSection,somedayText].filter(Boolean).map(x=>x+'\n\n').join('');
   // 秘密情報らしい文字列を含むメモ。原文は変えずモデルへ渡す前に伏せているが、同期先の端末には原文のまま残る。
   const secretRows=secretInputRows(config,effective.flatMap(u=>[u.chain.root,...u.chain.revisions]));
   // 似ているアイデアの索引。束ねの記録が壊れていてもHOMEは作り、壊れた記録を示す。
@@ -234,6 +245,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const project of projects)if(await referencesStopped(vault,project.id))errors.push(`- [資料の更新が止まっています](${referencesPath(project.id)}): ${plain(project.title)} — REFERENCES.mdが手で変更されています。資料は整理結果から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
   for(const path of (await readItemWaits(vault)).problems)errors.push(`- [連絡待ちの記録が不正です](${path})`);
+  for(const path of [...(await readItemSomedays(vault)).problems,...(await readSomedayReviews(vault)).problems])errors.push(`- [「いつかやる」の記録が不正です](${path})`);
   for(const issue of people.issues)errors.push(`- [人の定義を確かめてください](${issue.path}): ${plain(issue.message)}`);
   for(const path of await stoppedPeoplePages(vault))errors.push(`- [人ごとの見返しの更新が止まっています](${path}) — 手で変更されています。記録から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of (await readItemOccurrences(vault)).problems)errors.push(`- [定例の回の記録が不正です](${path})`);

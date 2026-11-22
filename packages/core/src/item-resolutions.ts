@@ -54,6 +54,8 @@ const nowItemSchema = z.object({
   effort: z.enum(['quick', 'hour', 'half-day']).optional(),
   // 本人が付けた連絡待ちの印（item-waits）。sinceは頼んだ日、whoは相手（任意）。印のない項目と旧版の一覧にはない。
   waiting: z.object({ id: z.string().regex(/^WAIT-[0-9A-HJKMNP-TV-Z]{26}$/), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), who: z.string().min(1).max(40).optional() }).strict().optional(),
+  // 本人が「いつかやる」へ移した項目（item-somedays）。sinceは移した日、reviewedは最後に見直した日（見直していなければ移した日）。移していない項目と旧版の一覧にはない。
+  someday: z.object({ id: z.string().regex(/^SMD-[0-9A-HJKMNP-TV-Z]{26}$/), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), reviewed: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict().optional(),
   // 本人がプロジェクトを指定したメモから、AIが「片付いたかも」と示したもの。未確認で、完了・解決ではない。片付いていない項目にだけ付く。
   hints: z.array(z.object({ input_id: inputIdSchema, quote: z.string().min(1).max(200), at: z.string().datetime({ offset: true }) }).strict()).max(20).optional(),
   // 本人が直接追加した行動（入力の種類action）。fromはAIが読み取った行を行動にしたときの元の行（根拠の入力ID・直す前の本文・項目キー）。旧版の一覧にはない。
