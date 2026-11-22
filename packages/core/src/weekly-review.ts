@@ -203,10 +203,12 @@ export const daysSinceWeeklyReview = (list: Pick<WeeklyReviewList, 'last_review'
 export const weeklyReviewDue = (list: Pick<WeeklyReviewList, 'last_review' | 'interval_days'>, today: string): boolean => { const days = daysSinceWeeklyReview(list, today); return days === null || days >= list.interval_days; };
 
 /** HOMEの冒頭に置く1行（前後の改行は含めない）。 */
-export function weeklyReviewHomeLine(list: WeeklyReviewList, today: string): string {
+export function weeklyReviewHomeLine(list: WeeklyReviewList, today: string, reviewExists = true): string {
   const days = daysSinceWeeklyReview(list, today);
   const head = days === null ? '週次レビュー: まだ見直した記録がありません' : `週次レビュー: 最後に見直したのは${list.last_review!.on}（${days === 0 ? '今日' : `${days}日前`}）`;
-  return weeklyReviewDue(list, today) ? `${head}。アプリの「ふりかえり」の「週次レビューを始める」か、[REVIEW.md](REVIEW.md)の「週次レビューの点検」を順に確かめてください。` : `${head}。`;
+  // ふりかえり（REVIEW.md）がまだ無いVaultでは、無いファイルへのリンクを出さない。
+  const how = reviewExists ? 'アプリの「ふりかえり」の「週次レビューを始める」か、[REVIEW.md](REVIEW.md)の「週次レビューの点検」を順に確かめてください。' : 'アプリの「ふりかえり」の「週次レビューを始める」から順に確かめてください。';
+  return weeklyReviewDue(list, today) ? `${head}。${how}` : `${head}。`;
 }
 
 const place = (scope: string, projects: ReadonlyMap<string, string>) => scope === UNASSIGNED_SCOPE ? UNASSIGNED_TITLE : `[${listText(projects.get(scope) ?? scope)}](10_projects/${scope}/NOW.md)`;

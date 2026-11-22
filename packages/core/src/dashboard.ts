@@ -186,7 +186,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const reviewLink=reviewRaw!==undefined?`\n直近${reviewDays}日のふりかえり: [REVIEW.md](REVIEW.md)`:'';
   // 週次レビューの点検の一覧（アプリが読む派生物）と、最後に見直してからの日数。一覧を作れなくてもHOMEは作り、記録の不正は「失敗と競合」に示す。
   let weeklyLine='';
-  try{weeklyLine=`\n${weeklyReviewHomeLine(await rebuildWeeklyReviewLocked(config,vault,clock,{projects,effective}),today)}`;}catch{weeklyLine='\n週次レビューの点検の一覧を作れませんでした（`ctx doctor`で確認してください）。';}
+  try{weeklyLine=`\n${weeklyReviewHomeLine(await rebuildWeeklyReviewLocked(config,vault,clock,{projects,effective}),today,reviewRaw!==undefined)}`;}catch{weeklyLine='\n週次レビューの点検の一覧を作れませんでした（`ctx doctor`で確認してください）。';}
   // 人ごとの見返し。人を登録しているときだけ一覧へのリンクを出す。
   const people=await inspectPeople(vault),peopleLink=people.people.length&&await vault.read(peopleIndexPath)!==undefined?`\n人ごとの見返し（${people.people.length}人）: [PEOPLE.md](${peopleIndexPath})`:'';
   // 受領と整理状況は、対応が要るもの（受付待ち・内容変更・整理待ち・整理失敗）を全件、受領済み・整理済みは新しい順にSTATUS_ROWS件まで並べ、残りは件数で示す。

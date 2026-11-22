@@ -98,7 +98,9 @@ test('点検の一覧に、次の一手がないプロジェクト・長く残�
 test('見直した記録は本人の報告だけで作り、HOMEとふりかえりに最後の見直しからの日数を示す。一覧は内容が変わったときだけ書き直す', async () => {
   const { config, vault } = await fixture();
   const home = async () => (await vault.read('HOME.md'))!;
-  expect(await home()).toContain('週次レビュー: まだ見直した記録がありません。アプリの「ふりかえり」の「週次レビューを始める」か、[REVIEW.md](REVIEW.md)の「週次レビューの点検」を順に確かめてください。');
+  // ふりかえりがまだ無いうちは、無いファイルへのリンクを出さない。
+  expect(await home()).toContain('週次レビュー: まだ見直した記録がありません。アプリの「ふりかえり」の「週次レビューを始める」から順に確かめてください。');
+  expect(await home()).not.toContain('REVIEW.md');
   // 内容が変わらなければ書き直さない（同期を起こさない）。
   const first = (await vault.read(weeklyReviewPath))!;
   await rebuildDashboard(config, { now: new Date(clock.getTime() + 3_600_000) });
@@ -126,7 +128,7 @@ test('見直した記録は本人の報告だけで作り、HOMEとふりかえ�
   await rebuildDashboard(config, { now: new Date('2026-11-26T03:00:00Z') });
   expect(await home()).toContain('最後に見直したのは2026-11-20（6日前）。\n');
   await rebuildDashboard(config, { now: week });
-  expect(await home()).toContain('最後に見直したのは2026-11-20（7日前）。アプリの「ふりかえり」の「週次レビューを始める」');
+  expect(await home()).toContain('最後に見直したのは2026-11-20（7日前）。アプリの「ふりかえり」の「週次レビューを始める」か、[REVIEW.md](REVIEW.md)の「週次レビューの点検」を順に確かめてください。');
   // 後の日の見直しが最後の見直しになる。
   await setWeeklyReview(config, { on: '2026-11-21', source: 'cli', now: week });
   expect((await list(vault)).last_review?.on).toBe('2026-11-21');
