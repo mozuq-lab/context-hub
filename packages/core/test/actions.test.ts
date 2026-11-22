@@ -15,8 +15,10 @@ import { rebuildDashboard } from '../src/dashboard.js';
 import { find, pending, context } from '../src/retrieve.js';
 import { mergeProjects } from '../src/project-merges.js';
 import { itemKey, readNowItems, setItemResolution } from '../src/item-resolutions.js';
-import { setItemSchedule, completeOccurrence } from '../src/item-schedules.js';
+import { setItemSchedule, completeOccurrence, readItemSchedules } from '../src/item-schedules.js';
+import { readItemEfforts, setItemEffort } from '../src/item-efforts.js';
 import { hash } from '../src/storage.js';
+import { CALENDAR_PATH } from '../src/calendar.js';
 import type { LlmClient, OrganizeResult } from '../src/types.js';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
@@ -264,4 +266,58 @@ test('日付を付けた行をプロジェクトを決めない行動にする�
   expect((await readNowItems(vault, '_unassigned'))!.items.find(i => i.action)!.schedule).toMatchObject({ due: '2026-12-01' });
   // 同じプロジェクトのほかの行の日付はそのまま。
   expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === other)!.schedule).toMatchObject({ due: '2026-12-02' });
+});
+
+test('作業要約で別のキーへ引き継がれた日付と手間の目安も、行動にした時点で行動へ写し、同じ本文の行が出直しても日付を二重に付けない', async () => {
+  const { config, vault } = await fixture();
+  const first = await capture(config, summary(['名前を決める']));
+  await organize(config, new MockLlm());
+  const k1 = itemKey('hub', 'next', first.inputId, '名前を決める');
+  await setItemSchedule(config, { projectId: 'hub', itemKey: k1, due: '2026-12-01', reviewAfter: null, repeat: { unit: 'week', every: 1 }, source: 'cli' });
+  await setItemEffort(config, { projectId: 'hub', itemKey: k1, effort: 'hour', source: 'cli' });
+  // 次の作業要約で同じ次の一手が別のキー（K2）になり、日付は本文で引き継がれている（K2の記録はない）。
+  const second = await capture(config, summary(['名前を決める'], '2026-10-31T00:00:00Z'));
+  await organize(config, new MockLlm());
+  const k2 = itemKey('hub', 'next', second.inputId, '名前を決める');
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === k2)).toMatchObject({ schedule: { due: '2026-12-01' }, effort: 'hour' });
+  const action = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-03T00:00:00Z', text: '名前を決める', meta: { action_from_input: second.inputId, action_from_text: '名前を決める', action_from_key: k2 } });
+  const own = (await readNowItems(vault, '_unassigned'))!.items.find(i => i.action)!;
+  expect(own).toMatchObject({ schedule: { due: '2026-12-01', repeat: { unit: 'week', every: 1 } }, effort: 'hour' });
+  // 写した記録は1件ずつで、再送しても増えない。
+  const copies = async () => (await readItemSchedules(vault)).records.filter(r => r.source_event_id?.startsWith(`take-over:${action.inputId}:`)).length + (await readItemEfforts(vault)).records.filter(r => r.source_event_id?.startsWith(`take-over:${action.inputId}:`)).length;
+  expect(await copies()).toBe(2);
+  await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-03T00:00:00Z', text: '名前を決める', meta: { action_from_input: second.inputId, action_from_text: '名前を決める', action_from_key: k2 } });
+  expect(await copies()).toBe(2);
+  await rebuildDashboard(config);
+  let home = (await vault.read('HOME.md'))!;
+  expect(home).not.toContain('日付を付け直す項目');
+  // 同じ次の一手が新しい作業要約でまた挙がっても、元の日付は行動へ移ったので付けない（期日の欄・カレンダーに二重に出さない）。
+  const third = await capture(config, summary(['名前を決める'], '2026-11-04T00:00:00Z'));
+  await organize(config, new MockLlm());
+  config.calendar = { enabled: true, reviewDates: false, titles: 'item' };
+  const k3 = itemKey('hub', 'next', third.inputId, '名前を決める'), again = (await readNowItems(vault, 'hub'))!.items.find(i => i.key === k3)!;
+  expect(again.schedule).toBeNull();
+  expect(again.effort).toBeUndefined();
+  await rebuildDashboard(config);
+  home = (await vault.read('HOME.md'))!;
+  expect(home).not.toContain('日付を付け直す項目');
+  expect((await vault.read(CALENDAR_PATH))!.match(/BEGIN:VEVENT/g)).toHaveLength(1);
+  // 行動の日付を外しても、元のプロジェクトの行には戻らない。
+  await setItemSchedule(config, { projectId: '_unassigned', itemKey: own.key, due: null, reviewAfter: null, source: 'cli' });
+  expect((await readNowItems(vault, '_unassigned'))!.items.find(i => i.action)!.schedule).toBeUndefined();
+  expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === k3)!.schedule).toBeNull();
+});
+
+test('同じプロジェクトの行を行動にしたときも日付を写し、同じ本文の行が出直しても行動にだけ日付が付く', async () => {
+  const { config, vault } = await fixture();
+  const first = await capture(config, summary(['名前を決める']));
+  await organize(config, new MockLlm());
+  const k1 = itemKey('hub', 'next', first.inputId, '名前を決める');
+  await setItemSchedule(config, { projectId: 'hub', itemKey: k1, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+  const action = await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-03T00:00:00Z', text: '名前を決める（案を3つ）', meta: { action_from_input: first.inputId, action_from_text: '名前を決める', action_from_key: k1 } });
+  const again = await capture(config, summary(['名前を決める'], '2026-11-04T00:00:00Z'));
+  await organize(config, new MockLlm());
+  const items = (await readNowItems(vault, 'hub'))!.items;
+  expect(items.find(i => i.key === itemKey('hub', 'next', action.inputId, '名前を決める（案を3つ）'))!.schedule).toMatchObject({ due: '2026-12-01' });
+  expect(items.find(i => i.key === itemKey('hub', 'next', again.inputId, '名前を決める'))!.schedule).toBeNull();
 });

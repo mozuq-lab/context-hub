@@ -412,14 +412,14 @@ describe('プロジェクト未定の行動の期日と手間の目安', () => {
     expect(dated.indexOf('歯医者を予約する')).toBeLessThan(dated.indexOf('説明を書く'));
     expect(dated).toContain(`- 期日 ${addDays(today, 1)} — プロジェクト未定 次の一手: 本人が追加: 歯医者を予約する（手間 15分ほど）`);
     expect(text).toContain('見直す日まで休ませている項目: 1件');
-    // プロジェクト未定の欄には、期日の欄へ出した・休ませている行動を件数だけで示し、ほかは日付付きで載せる。
+    // プロジェクト未定の欄には、期日の欄へ出した行動を件数だけで示し、ほか（休ませている行動を含む）は日付付きで載せる。
     const section = unassignedSection(text)!;
     expect(section).toMatch(/^（本人が追加した行動4件）/);
     expect(section).not.toContain('歯医者を予約する');
-    expect(section).not.toContain('棚を片付ける');
+    expect(section).toContain(`- 本人が追加: 棚を片付ける（見直す日 ${addDays(today, 10)}） — `);
     expect(section).toContain(`- 本人が追加: 本を返す（期日 ${addDays(today, 30)}） — `);
     expect(section).toContain('- 本人が追加: 牛乳を買う — ');
-    expect(section).toContain('期日が近い・見直す日まで休ませている行動2件');
+    expect(section).toContain('期日が近い行動1件は、「次の一手」の期日の欄で示します');
     expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).item_record_scopes).toEqual([UNASSIGNED_SCOPE]);
     // 日付の付いた行があっても、内容が変わらなければ作り直しで書き換えない（端末は作成時刻で反映を判断する）。
     const before = await vault.read(unassignedItemsPath);

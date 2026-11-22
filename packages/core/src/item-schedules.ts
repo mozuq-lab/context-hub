@@ -74,7 +74,16 @@ export async function readItemSchedules(vault: Vault, options: { raw?: boolean }
   return { records: options.raw ? records : await settleItemRecords(vault, records), problems };
 }
 /** 項目に結び付けた本人の記録（日付・手間の目安など）に共通する欄。idは種類ごとの接頭辞とULIDで、同じ種類では作った順に並ぶ。 */
-export interface ItemRecordLike { id: string; project_id: string; item_key: string; section: string; text: string; input_id: string }
+export interface ItemRecordLike { id: string; project_id: string; item_key: string; section: string; text: string; input_id: string; source_event_id?: string }
+/** 「自分の行動にする」で元の行の記録を行動へ写した記録の受付ID（行動の入力IDと、写した元の記録のID）。take-over-records.tsが書く。 */
+export const takeOverEvent = (inputId: string, recordId: string) => `take-over:${inputId}:${recordId}`;
+const takeOverPattern = /^take-over:IN-[0-9A-HJKMNP-TV-Z]{26}:((?:SCH|EFF)-[0-9A-HJKMNP-TV-Z]{26})$/;
+/** 行動へ写された（引き取られた）元の記録のID。元の置き場では、外した記録と同じに扱う。 */
+export function takenOverRecordIds(records: Pick<ItemRecordLike, 'source_event_id'>[]): Set<string> {
+  const ids = new Set<string>();
+  for (const r of records) { const m = r.source_event_id ? takeOverPattern.exec(r.source_event_id) : null; if (m) ids.add(m[1]!); }
+  return ids;
+}
 /** 同じ種類の記録の作った順。接頭辞を除いたULIDで比べる。 */
 const recordOrder = (r: Pick<ItemRecordLike, 'id'>) => r.id.slice(r.id.indexOf('-') + 1);
 /** 日付の記録が、日付を外した記録か。 */
@@ -104,7 +113,9 @@ export function effectiveSchedules(records: ItemSchedule[], projectId: string, i
 /**
  * effectiveSchedulesと同じ引き継ぎの規則を、項目に結び付けたほかの本人の記録（手間の目安など）にも使う。clearedは「外した記録」の判定。
  */
-export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], projectId: string, items: EffectiveItem[], resolvedKeys: { has(key: string): boolean }, cleared: (r: T) => boolean): { byKey: Map<string, T>; orphaned: T[] } {
+export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], projectId: string, items: EffectiveItem[], resolvedKeys: { has(key: string): boolean }, clearedRecord: (r: T) => boolean): { byKey: Map<string, T>; orphaned: T[] } {
+  // 行動へ写された元の記録は、元の行が引き取られたので、外した記録と同じに扱う（同じ本文の行が出直しても引き継がず、付け直しも求めない）。
+  const taken = takenOverRecordIds(records), cleared = (r: T) => clearedRecord(r) || taken.has(r.id);
   const active = activeItemRecords(records, cleared, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, T>();
   // 項目自身のキーで記録があれば（日付を外した記録を含む）、それが本人の最新の判断なので引き継ぎより優先する。
   const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
@@ -116,20 +127,16 @@ export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], pro
   const same = (r: T, i: Item) => r.section === i.section && (r.text === i.text || lineage(r, i));
   // 引き継ぎの候補は、NOWから外れた同じ欄・同じ本文の記録のうち、日付を外した記録も含めて最新のもの。
   // 最新が日付を外した記録なら、それより前の古い日付を引き継がない（K1で付けK2で外した後、K3へ移った場合など）。
-  const latestPerKey = new Map<string, T>(), latestAnywhere = new Map<string, T>();
-  for (const r of records) {
-    latestAnywhere.set(r.item_key, r);
-    if (r.project_id === projectId) { latestPerKey.delete(r.item_key); latestPerKey.set(r.item_key, r); }
-  }
+  const latestPerKey = new Map<string, T>();
+  for (const r of records) if (r.project_id === projectId) { latestPerKey.delete(r.item_key); latestPerKey.set(r.item_key, r); }
   const detached = [...latestPerKey.values()].filter(r => !keys.has(r.item_key) && !resolvedKeys.has(r.item_key));
   const isCleared = cleared;
   for (const item of items) {
     if (item.resolution) continue;
     // 行動は、同じ行動の記録（直す前の文面・引き取った元の行を含む）のうち最新のものが効く。文面を前の形へ戻しても、古いキーの古い日付に戻らない。
     if (item.action !== undefined) {
-      // 別の置き場（別のプロジェクト・プロジェクト未定）の行を引き取った行動は、元の行のキーに付けた記録も引き継ぐ（キーは置き場ごとに異なる）。
-      const taken = item.action.from?.key ? latestAnywhere.get(item.action.from.key) : undefined;
-      const mine = [...latestPerKey.values(), ...(taken && taken.project_id !== projectId && taken.section === item.section ? [taken] : [])]
+      // 引き取った元の行に効いていた記録は、引き取ったときに行動の記録として写してある（take-over-records.ts。別の置き場の行でも）。
+      const mine = [...latestPerKey.values()]
         .filter(r => r.section === item.section && lineage(r, item) && (r.item_key === item.key || (!keys.has(r.item_key) && !resolvedKeys.has(r.item_key))))
         .sort((a, b) => recordOrder(a).localeCompare(recordOrder(b))).at(-1);
       if (mine && !isCleared(mine)) byKey.set(item.key, mine);

@@ -194,7 +194,7 @@ export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort'>):
 /**
  * HOMEの「プロジェクト未定の次の一手」（前後の空行は含めない）。本人が追加した行動と対象のメモがなければ空文字。
  * pathsは入力IDから原文のパスを引く表（本人が追加した行動の原文へのリンクに使う）。
- * frontは、期日が近い・見直す日まで休ませているため、HOMEの「次の一手」の期日の欄に載せた（またはたたんだ）行動のキー。ここでは件数だけを示す。
+ * frontは、期日が近いため、HOMEの「次の一手」の期日の欄に載せた行動のキー。ここでは件数だけを示す（見直す日まで休ませている行動は、HOMEではここにだけ載るので、日付を付けて載せる）。
  */
 export function unassignedActionsSection(config: HubConfig, built: { actions: UnassignedActions; items: NowItems }, paths: ReadonlyMap<string, string> = new Map(), front: ReadonlySet<string> = new Set()): string {
   const { actions } = built, open = built.items.items.filter(i => i.action && i.resolution === null), own = open.filter(i => !front.has(i.key));
@@ -204,7 +204,7 @@ export function unassignedActionsSection(config: HubConfig, built: { actions: Un
   const ownRows = [
     ...own.slice(0, UNASSIGNED_HOME_ACTIONS).map(i => `- ${ACTION_LABEL}${clip(i.text)}${unassignedItemLabel(i)} — ${link(i.input_id)}`),
     ...(own.length > UNASSIGNED_HOME_ACTIONS ? [`- ほか本人が追加した行動${own.length - UNASSIGNED_HOME_ACTIONS}件（アプリの「次の一手」で確認）`] : []),
-    ...(moved ? [`- 期日が近い・見直す日まで休ませている行動${moved}件は、「次の一手」の期日の欄で示します`] : []),
+    ...(moved ? [`- 期日が近い行動${moved}件は、「次の一手」の期日の欄で示します`] : []),
   ];
   const rows = actions.memos.slice(0, UNASSIGNED_HOME_MEMOS).flatMap(m => [
     `- ${dateLabel(m.occurred_at, config.timezone).slice(0, 10)} ${m.own_words ? '' : 'AI要約: '}${clip(m.text)} — [${m.input_id}](${destination(m.path)})${m.task ? ' / タスク候補' : ''}`,

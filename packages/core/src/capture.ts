@@ -178,6 +178,12 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
       const projects = await readProjects(config), target = request.project ? resolveProject(projects, request.project) : undefined, inputs = await readInputs(config), receipts = await readReceipts(config);
       // AIの読み取りを行動にしたときは、元の行が載っているほかのプロジェクトのNOWと、プロジェクト未定の一覧からも外す。
       const from = actionSource({ kind: 'action', meta: request.meta });
+      // 元の行に効いていた期日・手間の目安は、元の行が一覧から外れる前に行動の記録へ写す（再送では写した記録があれば何もしない）。
+      const action = inputs.find(i => i.id === saved.inputId);
+      if (from?.key && action) {
+        const { carryTakenOverRecordsLocked } = await import('./take-over-records.js');
+        await carryTakenOverRecordsLocked(config, vault, { inputId: action.id, scope: target, text: action.text, fromKey: from.key, source: action.source });
+      }
       if (from) await rebuildNowsForInputLocked(vault, config, projects.map(p => p.id), from.input_id, target, inputs, receipts);
       else if (target) await rebuildNowLocked(vault, config, target, inputs, receipts);
       if (!target || from) {

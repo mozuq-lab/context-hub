@@ -68,6 +68,20 @@ test('CLIで期日を付けると保たれ、片方だけ変えられ、--clear�
  const history=await cli(config,['history','hub']);expect(history.code).toBe(0);expect(JSON.parse(history.out)).toEqual([{projectId:'hub',path:'10_projects/hub/HISTORY.md',written:false}]);
  expect(await readFile(join(root,'vault/10_projects/hub/HISTORY.md'),'utf8')).toContain('# 集約ツールの経緯');
 },20000);
+test('CLIで引き継いだ日付の片方だけを変えても、もう片方と繰り返しを保つ',async()=>{
+ const{config}=await setup();await cli(config,['init']);
+ await cli(config,['project','add','hub','--title','集約ツール']);
+ await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-30T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n');
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const first=(JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string}[])[0]!.key;
+ expect((await cli(config,['item','schedule','hub',first,'--due','2099-12-01','--repeat','weekly','--confirm'])).code).toBe(0);
+ // 次の作業要約で同じ次の一手が別のキーになり、日付は本文で引き継がれる（新しいキーの記録はない）。
+ await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-31T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n');
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const second=(JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string;due:string|null}[]).find(i=>i.key!==first&&i.due)!;
+ expect(second.due).toBe('2099-12-01');
+ expect(JSON.parse((await cli(config,['item','schedule','hub',second.key,'--review','2099-11-01','--confirm'])).out)).toMatchObject({due:'2099-12-01',review_after:'2099-11-01',repeat:'毎週'});
+},20000);
 test('CLIで項目を誤りとして外すと、完了とは別の欄へ移り、未解決へ戻せる',async()=>{
  const{root,config}=await setup();await cli(config,['init']);
  expect((await cli(config,['project','add','hub','--title','集約ツール'])).code).toBe(0);

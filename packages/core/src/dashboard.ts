@@ -138,7 +138,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    const schedule={due:i.schedule.due,review_after:i.schedule.review_after},repeat=i.schedule.repeat;
    calendarItems.push({projectId:UNASSIGNED_SCOPE,projectTitle:UNASSIGNED_TITLE,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedules.records.find(r=>r.id===i.schedule!.id)?.created_at??clock.toISOString()});
    const {bucket,hidden}=scheduleBucket(schedule,today);
-   if(hidden){resting++;unassignedFront.add(i.key);}
+   if(hidden)resting++;
    else if(bucket==='overdue'||bucket==='today'||bucket==='week'){unassignedFront.add(i.key);dated.push({bucket,due:schedule.due!,id:UNASSIGNED_SCOPE,row:`- 期日 ${schedule.due}${repeat?`（${repeatLabel(repeat)}）`:''} — ${UNASSIGNED_TITLE} 次の一手: ${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
   }
   // 進行中は最近動いた順、停滞は長く止まっている順に並べる。
@@ -150,7 +150,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const order={overdue:0,today:1,week:2} as const,datedRows=dated.sort((a,b)=>order[a.bucket]-order[b.bucket]||a.due.localeCompare(b.due)||a.id.localeCompare(b.id));
   const usesDates=dated.length>0||resting>0||orphaned.length>0;
   const datedPart=!usesDates?'':`期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
-  const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOWとアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
+  const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOW・プロジェクト未定の一覧とアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
   const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
   const projectSections=`## プロジェクト一覧\n${rows.join('\n')||(listed.length?'進行中で最近動いたプロジェクトはありません。':'プロジェクトはまだありません。')}${staleRows.length?`\n\n## 停滞しているプロジェクト（${staleRows.length}件）\n最終根拠から${config.retrieve.staleDays}日を超えて新しい入力がない進行中のプロジェクトです。再開するか、休止・完了にするかを判断してください。\n${staleRows.join('\n')}`:''}${inactiveRows.length?`\n\n## 休止・完了（${inactiveRows.length}件）\n${inactiveRows.join('\n')}`:''}${mergedRows.length?`\n\n## 統合済み（${mergedRows.length}件）\n本人が別のプロジェクトへまとめたプロジェクトです。統合元の入力・完了報告・日付は統合先のものとして読み替えており、原文と記録は動かしていません。取り消すにはアプリのプロジェクト画面か\`ctx project unmerge\`を使います。\n${mergedRows.join('\n')}`:''}`;
   // 本人が設定したリポジトリのコミットから作った下書きのうち、未確認のもの。

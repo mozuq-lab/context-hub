@@ -144,7 +144,9 @@ item.command('schedule <project> <key>').description('項目に期日・次に�
 if(opts.clear&&(opts.due!==undefined||opts.review!==undefined||opts.repeat!==undefined))throw new Error('--clearと--due・--review・--repeatは同時に指定できません');
 if(!opts.clear&&opts.due===undefined&&opts.review===undefined&&opts.repeat===undefined)throw new Error('--due・--review・--repeat・--clearのいずれかを指定してください');
 const rule=opts.repeat===undefined?undefined:parseRepeat(opts.repeat);
-const c=await config(),vault=new Vault(c),records=(await readItemSchedules(vault)).records,current=activeSchedules(records,id).get(key);
+const c=await config(),vault=new Vault(c),records=(await readItemSchedules(vault)).records,list=(await readNowItems(vault,id))?.items??[];
+// 指定しなかった欄は、項目に今効いている日付（文面を直す前・引き継いだ記録を含む）から保つ。NOWから外れた記録はその記録から。
+const current=(list.some(i=>i.key===key)?effectiveSchedules(records,id,list,activeResolutions(await readItemResolutions(vault),id)).byKey.get(key):undefined)??activeSchedules(records,id).get(key);
 const pick=(value:string|undefined,kept:string|null)=>value===undefined?kept:value==='none'?null:value;
 const due=opts.clear?null:pick(opts.due,current?.due??null),reviewAfter=opts.clear?null:pick(opts.review,current?.review_after??null);
 // 直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
