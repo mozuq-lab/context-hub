@@ -7,6 +7,7 @@ import { effortLabel,type ItemEffort } from './item-efforts.js';
 import { readItemWaits,waitingDays } from './item-waits.js';
 import { readItemSomedays,orphanedSomedays } from './item-somedays.js';
 import { readSomedayReviews,rebuildSomedayLocked,somedaySection } from './someday.js';
+import { readWeeklyReviews,rebuildWeeklyReviewLocked,weeklyReviewHomeLine } from './weekly-review.js';
 import { effectiveSchedules,readItemOccurrences,readItemSchedules,repeatLabel,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
 import { readAskRecords } from './ask.js';
 import { Vault,hash,parseMarkdown } from './storage.js';
@@ -183,6 +184,9 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const reviewRaw=await vault.read('REVIEW.md');let reviewDays=config.retrieve.digestDays;
   if(reviewRaw!==undefined)try{const d=parseMarkdown(reviewRaw).meta.period_days;if(typeof d==='number'&&Number.isSafeInteger(d)&&d>0)reviewDays=d;}catch{/* 解析できないふりかえりは設定の日数で案内する。 */}
   const reviewLink=reviewRaw!==undefined?`\n直近${reviewDays}日のふりかえり: [REVIEW.md](REVIEW.md)`:'';
+  // 週次レビューの点検の一覧（アプリが読む派生物）と、最後に見直してからの日数。一覧を作れなくてもHOMEは作り、記録の不正は「失敗と競合」に示す。
+  let weeklyLine='';
+  try{weeklyLine=`\n${weeklyReviewHomeLine(await rebuildWeeklyReviewLocked(config,vault,clock,{projects,effective}),today,reviewRaw!==undefined)}`;}catch{weeklyLine='\n週次レビューの点検の一覧を作れませんでした（`ctx doctor`で確認してください）。';}
   // 人ごとの見返し。人を登録しているときだけ一覧へのリンクを出す。
   const people=await inspectPeople(vault),peopleLink=people.people.length&&await vault.read(peopleIndexPath)!==undefined?`\n人ごとの見返し（${people.people.length}人）: [PEOPLE.md](${peopleIndexPath})`:'';
   // 受領と整理状況は、対応が要るもの（受付待ち・内容変更・整理待ち・整理失敗）を全件、受領済み・整理済みは新しい順にSTATUS_ROWS件まで並べ、残りは件数で示す。
@@ -246,6 +250,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
   for(const path of (await readItemWaits(vault)).problems)errors.push(`- [連絡待ちの記録が不正です](${path})`);
   for(const path of [...(await readItemSomedays(vault)).problems,...(await readSomedayReviews(vault)).problems])errors.push(`- [「いつかやる」の記録が不正です](${path})`);
+  for(const path of (await readWeeklyReviews(vault)).problems)errors.push(`- [週次レビューの記録が不正です](${path})`);
   for(const issue of people.issues)errors.push(`- [人の定義を確かめてください](${issue.path}): ${plain(issue.message)}`);
   for(const path of await stoppedPeoplePages(vault))errors.push(`- [人ごとの見返しの更新が止まっています](${path}) — 手で変更されています。記録から作り直す派生物なので、ファイルを消すと次のcycleで作り直します`);
   for(const path of (await readItemOccurrences(vault)).problems)errors.push(`- [定例の回の記録が不正です](${path})`);
@@ -279,7 +284,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    for(const path of overlays.problems)errors.push(`- [読み直しの記録が不正です](${path})`);
   }catch{errors.push('- 完了・解決・誤りとして外した記録を読めません（`ctx doctor`で確認してください）');}
   for(const p of gitProblems)errors.push(`- 作業記録の下書き（${plain(p.projectId)} / ${plain(p.repo)}）: ${plain(p.error)}`);
-  const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n同期された時点の表示です。端末保存・Mac mini受領・整理完了はそれぞれ別の状態です。${reviewLink}${peopleLink}${backupLine}\n\n${lead}${projectSections}${draftSection}\n\n## 確認待ち（${pending.length}件）\n${reviewRows(pending)}\n\n候補を開いて内容・理由・出典を確認し、QuickAddの承認／却下を実行してください。保留は閉じるだけです。AI候補は未承認です。${policyReviewSection}\n\n## 要確認（${attention.length}件）\n${attention.length?'古くなった候補（元のメモの訂正・同じ名前のプロジェクトなど）と、同期・形式を確かめられない候補です。古くなった候補は採用できません。不要なら却下すると判断履歴へ移ります。\n':''}${reviewRows(attention)}\n\n## 有効方針\n[共通方針](POLICY.md)。各プロジェクトのPOLICY.mdに対象方針を掲載します。参考知識は必要時に検索します。\n\n## 判断履歴\n${reviewRows(history)}${ideaText}${unassignedReferenceSection(config,effective)}${secretRows}\n\n## 受領と整理状況\n${statusSummary}${statuses.join('\n')||'入力はありません。'}\n\n## 失敗と競合\n${errors.join('\n')||'記録された失敗・競合はありません。'}\n\n正式知識は根拠が訂正されても自動変更しません。根拠の訂正履歴と承認内容を確認してください。\n`;
+  const text=`# ContextHub\n\n生成時点: ${clock.toISOString()}\n同期された時点の表示です。端末保存・Mac mini受領・整理完了はそれぞれ別の状態です。${reviewLink}${weeklyLine}${peopleLink}${backupLine}\n\n${lead}${projectSections}${draftSection}\n\n## 確認待ち（${pending.length}件）\n${reviewRows(pending)}\n\n候補を開いて内容・理由・出典を確認し、QuickAddの承認／却下を実行してください。保留は閉じるだけです。AI候補は未承認です。${policyReviewSection}\n\n## 要確認（${attention.length}件）\n${attention.length?'古くなった候補（元のメモの訂正・同じ名前のプロジェクトなど）と、同期・形式を確かめられない候補です。古くなった候補は採用できません。不要なら却下すると判断履歴へ移ります。\n':''}${reviewRows(attention)}\n\n## 有効方針\n[共通方針](POLICY.md)。各プロジェクトのPOLICY.mdに対象方針を掲載します。参考知識は必要時に検索します。\n\n## 判断履歴\n${reviewRows(history)}${ideaText}${unassignedReferenceSection(config,effective)}${secretRows}\n\n## 受領と整理状況\n${statusSummary}${statuses.join('\n')||'入力はありません。'}\n\n## 失敗と競合\n${errors.join('\n')||'記録された失敗・競合はありません。'}\n\n正式知識は根拠が訂正されても自動変更しません。根拠の訂正履歴と承認内容を確認してください。\n`;
   return writeGeneratedLocked(vault,'HOME.md',generatedMarkdown({schema_version:1,generated_by:{model:'deterministic-writer',prompt_version:1},generated_at:clock.toISOString(),verified:false},text));
  }
 }

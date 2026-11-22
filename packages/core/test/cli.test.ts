@@ -224,3 +224,19 @@ test('CLIで項目を「いつかやる」へ移すとHOMEの次の一手から�
  expect(JSON.parse((await cli(config,['item','someday','hub',key,'--clear','--confirm'])).out)).toMatchObject({someday:null});
  expect(await home()).toContain('  - 利用者に見せる');
 },30000);
+test('CLIで週次レビューの点検の一覧を確かめ、本人の確認付きで見直したと記録するとHOMEとふりかえりに日付が出る',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ await cli(config,['project','add','hub','--title','集約ツール']);
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const shown=JSON.parse((await cli(config,['weekly-review','show'])).out);
+ expect(shown).toMatchObject({last_review:null,days_since_last_review:null,projects:[{project_id:'hub',next:0}]});
+ expect(await readFile(join(root,'vault/HOME.md'),'utf8')).toContain('週次レビュー: まだ見直した記録がありません');
+ expect((await cli(config,['weekly-review','done'])).code).not.toBe(0);
+ expect((await cli(config,['weekly-review','done','--on','2999-01-01','--confirm'])).code).not.toBe(0);
+ const done=JSON.parse((await cli(config,['weekly-review','done','--confirm'])).out);
+ expect(done).toMatchObject({deduped:false,weeklyReviewId:expect.stringMatching(/^WRV-/)});
+ expect(JSON.parse((await cli(config,['weekly-review','done','--confirm'])).out)).toMatchObject({weeklyReviewId:done.weeklyReviewId,deduped:true});
+ expect(await readFile(join(root,'vault/HOME.md'),'utf8')).toContain(`週次レビュー: 最後に見直したのは${done.on}（今日）。`);
+ expect(await readFile(join(root,'vault/REVIEW.md'),'utf8')).toContain(`最後に見直した日: ${done.on}（今日）`);
+ expect(JSON.parse((await cli(config,['weekly-review','show'])).out)).toMatchObject({last_review:{id:done.weeklyReviewId},days_since_last_review:0});
+},30000);

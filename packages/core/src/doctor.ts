@@ -16,6 +16,7 @@ import { readItemEfforts } from './item-efforts.js';
 import { readItemWaits } from './item-waits.js';
 import { readItemSomedays } from './item-somedays.js';
 import { readSomedayReviews } from './someday.js';
+import { readWeeklyReviews } from './weekly-review.js';
 import { readAskRecords } from './ask.js';
 import { readPolicyReviews } from './policy-reviews.js';
 import { readItemResolutions } from './item-resolutions.js';
@@ -63,6 +64,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { for (const path of (await readItemEfforts(vault)).problems) issues.push(`手間の目安の記録が不正です: ${path}`); } catch { issues.push('手間の目安の記録を走査できません'); }
   try { for (const path of (await readItemWaits(vault)).problems) issues.push(`連絡待ちの記録が不正です: ${path}`); } catch { issues.push('連絡待ちの記録を走査できません'); }
   try { for (const path of [...(await readItemSomedays(vault)).problems, ...(await readSomedayReviews(vault)).problems]) issues.push(`「いつかやる」の記録が不正です: ${path}`); } catch { issues.push('「いつかやる」の記録を走査できません'); }
+  try { for (const path of (await readWeeklyReviews(vault)).problems) issues.push(`週次レビューの記録が不正です: ${path}`); } catch { issues.push('週次レビューの記録を走査できません'); }
   try { for (const path of (await readItemOccurrences(vault)).problems) issues.push(`定例の回の記録が不正です: ${path}`); } catch { issues.push('定例の回の記録を走査できません'); }
   try { for (const path of (await readAskRecords(vault)).problems) issues.push(`記録に聞くの問いと答えの記録が不正です: ${path}`); } catch { issues.push('記録に聞くの問いと答えの記録を走査できません'); }
   try { for (const path of (await readPolicyReviews(vault)).problems) issues.push(`方針の見直しの記録が不正です: ${path}`); } catch { issues.push('方針の見直しの記録を走査できません'); }

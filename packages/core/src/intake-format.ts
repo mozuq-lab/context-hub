@@ -54,6 +54,8 @@ const itemSomeday=z.object({...base,operation:z.literal('item-someday'),project_
 // アイデアを「いつかやる」に置く・見直す・始めた／やめたとして外す、休止中のプロジェクトを見直した（keepだけ）。onは本人が判断した日。
 const somedayReview=z.object({...base,operation:z.literal('someday-review'),target:z.enum(somedayTargets),target_id:z.string(),action:z.enum(somedayReviewActions),on:scheduleDateSchema,confirmed:z.literal(true),text:z.string()}).strict()
  .refine(v=>(v.target==='idea'?ideaIdSchema:projectIdSchema).safeParse(v.target_id).success,'対象のIDが不正です').refine(v=>v.target==='idea'||v.action==='keep','プロジェクトには「そのまま」だけを送ります');
+// 本人が週次レビューを終えた（見直した）ことの報告。onは見直した日。AIの出力からは送らない。
+const weeklyReview=z.object({...base,operation:z.literal('weekly-review'),on:scheduleDateSchema,confirmed:z.literal(true),text:z.string()}).strict();
 const itemHintDismiss=z.object({...base,operation:z.literal('item-hint-dismiss'),project_id:projectIdSchema,item_key:itemKeySchema,input_id:inputIdSchema,confirmed:z.literal(true),text:z.string()}).strict();
 const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss'),draft_id:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),draft_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 名前・別名・キーワードは変更後の全体を送る。上限と重複の整理は本体が検証する。
@@ -76,7 +78,7 @@ const askSchema=z.object({...base,operation:z.literal('ask'),project:projectIdSc
 const preferencesSchema=z.object({...base,operation:z.literal('client-preferences'),confirmed:z.literal(true),text:z.string()}).strict();
 // 採用した方針を本人が「まだ有効」と確かめた。ハッシュは確かめた時点の知識のファイルのもの。
 const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemWait, itemSomeday, somedayReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
