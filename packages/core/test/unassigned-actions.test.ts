@@ -589,4 +589,52 @@ describe('プロジェクト未定の行動をプロジェクトへ移す', () =
     expect(section).toContain('- 残っている行動: 1件 / 期間内に追加 2件・完了 0件・却下 0件・プロジェクトへ移した 1件');
     expect(section).not.toContain('見積もりを頼む');
   });
+
+  test('文面を直す前の記録を付け直しに出さず、移した先の同じ本文の無関係な記録を拾わない', async () => {
+    const { config, vault } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    // プロジェクトの行動に期日を付けてから文面を直し、新しい期日を付けて、プロジェクト未定へ移す。
+    const own = await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-01T00:00:00Z', text: '見積もりを頼む' });
+    const k1 = (await readNowItems(vault, 'hub'))!.items.find(i => i.input_id === own.inputId)!.key;
+    await setItemSchedule(config, { projectId: 'hub', itemKey: k1, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+    await correctInput(config, own.inputId, { source: 'cli', occurredAt: '2026-11-02T00:00:00Z', text: '見積もりを2社に頼む' });
+    const k2 = (await readNowItems(vault, 'hub'))!.items.find(i => i.input_id === own.inputId)!.key;
+    await setItemSchedule(config, { projectId: 'hub', itemKey: k2, due: '2026-12-10', reviewAfter: null, source: 'cli' });
+    const moved = await move(config, 'hub', k2, UNASSIGNED_SCOPE);
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.key === moved.itemKey)!.schedule).toMatchObject({ due: '2026-12-10' });
+    await rebuildDashboard(config);
+    expect((await vault.read('HOME.md'))!).not.toContain('日付を付け直す項目');
+    // 移す先のプロジェクトに、同じ本文で外れた記録（別の行動の直す前の文面）があっても引き継がない。
+    const other = await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-03T00:00:00Z', text: '電話する' });
+    const h1 = (await readNowItems(vault, 'hub'))!.items.find(i => i.input_id === other.inputId)!.key;
+    await setItemSchedule(config, { projectId: 'hub', itemKey: h1, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+    await correctInput(config, other.inputId, { source: 'cli', occurredAt: '2026-11-04T00:00:00Z', text: '電話をかける' });
+    const plain = await action(config, '電話する');
+    const second = await move(config, UNASSIGNED_SCOPE, plain.key, 'hub');
+    expect((await readNowItems(vault, 'hub'))!.items.find(i => i.key === second.itemKey)!.schedule).toBeNull();
+  });
+
+  test('受付ファイルでも、片付けた行動・既に移した行動は移さず、古いキーを指しても今の行から記録を写す', async () => {
+    const { config, vault } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    const done = await action(config, '書類を出す');
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: done.key, action: 'resolve', source: 'cli' });
+    const from = (id: string, text: string, key: string) => ({ action_from_input: id, action_from_text: text, action_from_key: key });
+    await packet(config, { kind: 'action', project: 'hub', source: 'flutter-mac', meta: from(done.id, '書類を出す', done.key) }, '書類を出す');
+    expect(await ingest(config)).toMatchObject({ accepted: 0, rejected: 1 });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.input_id === done.id)!.resolution).not.toBeNull();
+    // 文面を直す前のキーを指した依頼でも、今の行の期日を写す。
+    const own = await action(config, '本を返す');
+    await correctInput(config, own.id, { source: 'cli', occurredAt: '2026-11-02T00:00:00Z', text: '図書館に本を返す' });
+    const current = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.input_id === own.id)!;
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: current.key, due: '2026-12-05', reviewAfter: null, source: 'cli' });
+    await packet(config, { kind: 'action', project: 'hub', source: 'flutter-mac', meta: from(own.id, '本を返す', own.key) }, '本を返す');
+    expect(await ingest(config)).toMatchObject({ accepted: 1 });
+    expect((await readNowItems(vault, 'hub'))!.items.find(i => i.action?.from?.input_id === own.id)!.schedule).toMatchObject({ due: '2026-12-05' });
+    // 同じ行動をもう一度移す依頼は断る（行動が2つにならない）。
+    await packet(config, { kind: 'action', source: 'flutter-mac', meta: from(own.id, '図書館に本を返す', current.key) }, '図書館に本を返す');
+    expect(await ingest(config)).toMatchObject({ accepted: 0, rejected: 1 });
+    expect((await readInputs(config)).filter(i => i.kind === 'action' && i.meta?.action_from_input === own.id)).toHaveLength(1);
+  });
 });
+

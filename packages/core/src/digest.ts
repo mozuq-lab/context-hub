@@ -45,6 +45,10 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   const vault = new Vault(config), projects = await readProjects(config), effective = await readEffectiveInputs(config), receipts = await readReceipts(config);
   const review = await buildReviewIndex(config), resolutions = await readItemResolutions(vault);
   const units: Unit[] = effective.map(unit => ({ input: unit.chain.root, unit, projects: unit.receipt ? associatedProjects(unit.chain.root, unit.receipt, config) : unit.chain.root.project ? [unit.chain.root.project] : [] }));
+  // 別の置き場へ移した行動（元の行動の入力ID→移した日時）。移した先の行動が引き継ぐので、元の置き場では追加・残りに数えない
+  // （プロジェクト未定の欄では、期間内に移した件数だけを示す。移したのが今より後なら、まだ元の置き場の行動として数える）。
+  const movedAt = new Map<string, string>();
+  for (const u of units) { const from = actionSource(u.input); if (from && Date.parse(u.input.received_at) <= now.getTime() && !movedAt.has(from.input_id)) movedAt.set(from.input_id, u.input.received_at); }
   // 訂正も入力として扱い、元の入力か訂正のどれかが期間内に届いたものを「届いた入力」に数える。
   const evidenceOf = (u: Unit) => [u.unit.chain.root, ...u.unit.chain.revisions];
   const corrected = (u: Unit) => u.unit.chain.revisions.some(i => inWindow(i.received_at));
@@ -103,7 +107,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const byOccurred = (a: Unit, b: Unit) => Date.parse(a.input.occurred_at) - Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id);
     const summaries = mine.filter(u => u.input.kind === 'work-summary').sort(byOccurred);
     const latestNow = summaries.at(-1), latestThen = summaries.filter(u => resultThen(u)).at(-1), thenResult = latestThen ? resultThen(latestThen) : undefined;
-    const added = fresh.filter(u => u.input.kind === 'action' && inWindow(u.input.received_at));
+    const added = fresh.filter(u => u.input.kind === 'action' && inWindow(u.input.received_at) && !movedAt.has(u.input.id));
     const out = [`### ${head}`, `- 新しい入力: ${fresh.length}件（作業要約 ${fresh.filter(u => u.input.kind === 'work-summary').length} / メモ ${fresh.filter(u => u.input.kind === 'memo').length}${added.length ? ` / 行動 ${added.length}` : ''}${fresh.some(corrected) ? ` / うち期間内の訂正 ${fresh.filter(corrected).length}` : ''}）`];
     for (const [title, key] of [['現在地', 'current'], ['次の一手', 'next']] as const) {
       const then = thenResult ? confirmed(thenResult.extracted[key]) : [], current = latestNow ? confirmed(groundedResult(latestNow.unit.chain, latestNow.unit.receipt!.input_id, latestNow.unit.receipt!.result!).extracted[key]) : [];
@@ -148,9 +152,6 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   if (quiet.length) lines.push('## 動きのなかった進行中のプロジェクト', ...quiet, '');
   if (inactive.length) lines.push(merged.size ? '## 休止・完了・統合済み' : '## 休止・完了', ...inactive, '');
   // プロジェクトを決めずに本人が追加した行動。残っている件数と、期間内に追加・完了・却下した件数を示す（項目キーは最新の文面で決まる）。
-  // プロジェクトへ移した行動は、移した先の行動が引き継ぐので数えず、期間内に移した件数だけを示す（移したのが今より後なら、まだ残っている行動として数える）。
-  const movedAt = new Map<string, string>();
-  for (const u of units) { const from = actionSource(u.input); if (from && Date.parse(u.input.received_at) <= now.getTime() && !movedAt.has(from.input_id)) movedAt.set(from.input_id, u.input.received_at); }
   const ownAll = units.filter(u => u.input.kind === 'action' && u.input.project === undefined && Date.parse(u.input.received_at) <= now.getTime());
   const own = ownAll.filter(u => !movedAt.has(u.input.id)), movedOut = ownAll.filter(u => inWindow(movedAt.get(u.input.id) ?? '')).length;
   if (own.length || movedOut) {

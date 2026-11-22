@@ -169,6 +169,8 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
   const vault = new Vault(config);
   const started = Date.now();
   const result = await vault.withLock(async () => {
+    // 本人が追加した行動を指す行動（別の置き場へ移す依頼）は、元の行動を確かめてから保存する。
+    const movedKey = request.kind === 'action' ? await (await import('./take-over-records.js')).movedActionSourceLocked(config, vault, request) : undefined;
     const saved = await captureLocked(config, vault, request);
     // 行動はモデルの整理を待たずにNOWへ載せる。保存の後、NOWの再生成前に停止しても、同じイベントの再送で再生成だけを行う。
     if (request.kind === 'action') {
@@ -180,9 +182,10 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
       const from = actionSource({ kind: 'action', meta: request.meta });
       // 元の行に効いていた期日・手間の目安は、元の行が一覧から外れる前に行動の記録へ写す（再送では写した記録があれば何もしない）。
       const action = inputs.find(i => i.id === saved.inputId);
-      if (from?.key && action) {
+      const fromKey = movedKey ?? from?.key;
+      if (fromKey && action) {
         const { carryTakenOverRecordsLocked } = await import('./take-over-records.js');
-        await carryTakenOverRecordsLocked(config, vault, { inputId: action.id, scope: target, text: action.text, fromKey: from.key, source: action.source });
+        await carryTakenOverRecordsLocked(config, vault, { inputId: action.id, scope: target, text: action.text, fromKey, source: action.source });
       }
       if (from) await rebuildNowsForInputLocked(vault, config, projects.map(p => p.id), from.input_id, target, inputs, receipts);
       else if (target) await rebuildNowLocked(vault, config, target, inputs, receipts);
