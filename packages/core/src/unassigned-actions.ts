@@ -157,7 +157,8 @@ async function writeIfChanged<T extends { generated_at: string }>(vault: Vault, 
   const raw = await vault.read(path);
   let old: T | undefined;
   if (raw !== undefined) try { old = parse(raw); } catch { /* 壊れた一覧は作り直す。 */ }
-  if (old && JSON.stringify({ ...old, generated_at: '' }) === JSON.stringify({ ...built, generated_at: '' })) return old;
+  // 読み直した形（スキーマの項目順）どうしで比べる。組み立てた順のままだと、日付の付いた行で毎回書き直してしまう。
+  if (old && JSON.stringify({ ...old, generated_at: '' }) === JSON.stringify({ ...parse(JSON.stringify(built)), generated_at: '' })) return old;
   await vault.write(path, JSON.stringify(built, null, 2) + '\n');
   return built;
 }

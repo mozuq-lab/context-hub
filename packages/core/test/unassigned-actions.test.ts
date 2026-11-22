@@ -421,6 +421,10 @@ describe('プロジェクト未定の行動の期日と手間の目安', () => {
     expect(section).toContain('- 本人が追加: 牛乳を買う — ');
     expect(section).toContain('期日が近い・見直す日まで休ませている行動2件');
     expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).item_record_scopes).toEqual([UNASSIGNED_SCOPE]);
+    // 日付の付いた行があっても、内容が変わらなければ作り直しで書き換えない（端末は作成時刻で反映を判断する）。
+    const before = await vault.read(unassignedItemsPath);
+    await rebuildDashboard(config, { now: new Date('2030-01-01T00:00:00Z') });
+    expect(await vault.read(unassignedItemsPath)).toBe(before);
   });
 
   test('進行中のプロジェクトがなくても、期日が近い行動はHOMEの期日の欄に出る', async () => {
