@@ -37,6 +37,7 @@ POLICY.md                      共通の有効方針（派生集約）
 90_system/privacy/patterns.json 設定の伏せ字の追加規則（派生。アプリが読む）
 90_system/item-occurrences/    定例の回の完了・見送りの記録
 90_system/item-efforts/        次の一手・未解決に本人が付けた手間の目安
+90_system/item-waits/          次の一手・未解決に本人が付けた連絡待ちの印（相手・頼んだ日）
 90_system/answers/             記録に聞くの問いと答え（30日で片付ける）
 90_system/client-preferences.json アプリの好み（ピン留め・ひな形・文脈かごの上限）を端末間でそろえる共有の記録
 HOME.md                        受領と整理状況への入口
@@ -59,7 +60,7 @@ _ContextHub/                   共有する入力ツールとテンプレート
 - 前のメモが見つからない（同期が遅れて届いていない、行動を指しているなど）ときは、本文を失わないよう、つながない普通のメモとして保存します。メモと作業要約にだけ付けられ、行動には付けられません。
 - 束ねた資料（`bundle`）では「前のメモの続き」としてリンクを示します。
 
-HOMEを作るたびに`90_system/intake-features.json`へ、受け付ける依頼の種類（`operations`）、メモに付けられる項目（`capture_fields`。`happened_on`は出来事の日付、`continues`は続き）、送れる入力の種類（`capture_kinds`。`action`は本人が次の一手に直接足す行動）、プロジェクトを指定せずに行動を足せる置き場（`action_scopes`。`_unassigned`はプロジェクト未定の次の一手）、出来事の日付をさかのぼれる日数（`max_backdate_days`）、期日のカレンダーの件名の設定（`calendar_titles`）、期日の依頼に添えられる欄（`item_schedule_fields`。`repeat`は定例）、手間の目安の依頼で選べる値（`item_efforts`）、完了・却下を受け付けるプロジェクト以外の置き場（`item_scopes`。`_unassigned`はプロジェクト未定の次の一手）、期日・定例の回・手間の目安を受け付けるプロジェクト以外の置き場（`item_record_scopes`。`_unassigned`はプロジェクト未定の本人が追加した行動）、確認待ち以外で却下を受け付ける候補の状態（`review_rejects`。`stale`は古くなった候補）、「記録に聞く」が有効かと問いの上限の文字数（`ask`）を書きます。端末はこれを読んで、古い本体が受け付けない依頼を出さず、本体の設定に合わせます。
+HOMEを作るたびに`90_system/intake-features.json`へ、受け付ける依頼の種類（`operations`）、メモに付けられる項目（`capture_fields`。`happened_on`は出来事の日付、`continues`は続き）、送れる入力の種類（`capture_kinds`。`action`は本人が次の一手に直接足す行動）、プロジェクトを指定せずに行動を足せる置き場（`action_scopes`。`_unassigned`はプロジェクト未定の次の一手）、出来事の日付をさかのぼれる日数（`max_backdate_days`）、期日のカレンダーの件名の設定（`calendar_titles`）、期日の依頼に添えられる欄（`item_schedule_fields`。`repeat`は定例）、手間の目安の依頼で選べる値（`item_efforts`）、完了・却下を受け付けるプロジェクト以外の置き場（`item_scopes`。`_unassigned`はプロジェクト未定の次の一手）、期日・定例の回・手間の目安・連絡待ちを受け付けるプロジェクト以外の置き場（`item_record_scopes`。`_unassigned`はプロジェクト未定の本人が追加した行動）、確認待ち以外で却下を受け付ける候補の状態（`review_rejects`。`stale`は古くなった候補）、「記録に聞く」が有効かと問いの上限の文字数（`ask`）を書きます。端末はこれを読んで、古い本体が受け付けない依頼を出さず、本体の設定に合わせます。
 
 モデルは保存先やIDを決めません。結果はスキーマで検証し、出典・日時・未検証表示を維持します。分類不能のunclassifiedは正常な結果であり、処理成功と内容の確認済みは別です。
 

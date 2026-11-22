@@ -9,6 +9,7 @@ import { shortMemoText } from './short-memo.js';
 import { ACTION_LABEL, actionSource, sourceRef } from './actions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel, type ItemSchedule } from './item-schedules.js';
 import { effectiveEfforts, effortLabel, readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
+import { effectiveWaits, readItemWaits, waitingLabel, type ItemWaitRecord } from './item-waits.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -19,7 +20,7 @@ import type { HubConfig } from './types.js';
  * 本人は行を完了にする・「もう古い」として外す（却下）・未解決へ戻すことができ、片付けた行はこの一覧から外れる。
  * メモがプロジェクトに結び付くと一覧から外れ、そのプロジェクトのNOWに載る。
  * 本人がプロジェクトを指定せずに追加した行動（入力の種類action）も、「本人が追加: 」を付けて項目一覧の先頭に載せる。メモの件数の上限には数えず、
- * 片付けるまで残す。行動には、プロジェクトの項目と同じく期日・見直す日・定例の繰り返しと手間の目安を付けられる（項目一覧のschedule・effort）。
+ * 片付けるまで残す。行動には、プロジェクトの項目と同じく期日・見直す日・定例の繰り返しと手間の目安、連絡待ちの印を付けられる（項目一覧のschedule・effort・waiting）。
  * AIの行には付けない（先に行動にしてもらう）。行動はモデルで読まないため、後からプロジェクトに結び付くことはない。メモの一覧（unassigned-actions.json）には載せない
  * （旧版のアプリが読む形を変えないため。HOMEには載せる）。
  * 行動にしたAIの読み取り（タスク候補・AIの提案）は、本人が引き取ったものとして一覧から外す（プロジェクトのNOWと同じ扱い）。
@@ -75,8 +76,8 @@ export const unassignedItemKey = (inputId: string, text: string) => itemKey(UNAS
 export function buildUnassignedActions(config: HubConfig, units: EffectiveInput[], now = new Date(), resolutions: ItemResolution[] = []): UnassignedActions {
   return buildUnassigned(config, units, now, resolutions).actions;
 }
-/** 本人が行動に付けた記録（期日・見直す日・手間の目安）。読めなかったときは空として一覧を作る。 */
-export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[] }
+/** 本人が行動に付けた記録（期日・見直す日・手間の目安・連絡待ち）。読めなかったときは空として一覧を作る。 */
+export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[]; waits?: ItemWaitRecord[] }
 export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now = new Date(), resolutions: ItemResolution[] = [], records: UnassignedRecords = {}): { actions: UnassignedActions; items: NowItems } {
   const settings = secretSettings(config), hide = (s: string) => settings.enabled ? redactText(s, settings).text : s;
   const closed = activeResolutions(resolutions, UNASSIGNED_SCOPE);
@@ -105,10 +106,12 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
   const ownItems = [...ownOpen, ...ownClosed];
   const scheduled = effectiveSchedules(records.schedules ?? [], UNASSIGNED_SCOPE, ownItems, closed).byKey;
   const efforts = effectiveEfforts(records.efforts ?? [], UNASSIGNED_SCOPE, ownItems, closed);
+  const waits = effectiveWaits(records.waits ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   for (const item of ownOpen) {
-    const s = scheduled.get(item.key), e = efforts.get(item.key);
+    const s = scheduled.get(item.key), e = efforts.get(item.key), w = waits.get(item.key);
     if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) };
     if (e) item.effort = e;
+    if (w) item.waiting = w;
   }
   for (const unit of units) {
     const { chain, receipt } = unit, result = receipt?.result;
@@ -165,7 +168,7 @@ async function writeIfChanged<T extends { generated_at: string }>(vault: Vault, 
 /**
  * Writerロックを持つ呼び出し元から使う。一覧と項目一覧を書く（内容が変わったときだけ）。
  * 完了・却下の記録を読めないときは、片付けた行がないものとして一覧を作る（不正な記録はdoctorとHOMEで示し、報告の受付も止まる）。
- * 日付・手間の目安の記録を読めないときは、付いていないものとして作る。
+ * 日付・手間の目安・連絡待ちの記録を読めないときは、付いていないものとして作る。
  */
 export async function rebuildUnassignedActionsLocked(config: HubConfig, vault: Vault, units: EffectiveInput[], now = new Date()): Promise<{ actions: UnassignedActions; items: NowItems }> {
   let resolutions: ItemResolution[] = [];
@@ -174,11 +177,12 @@ export async function rebuildUnassignedActionsLocked(config: HubConfig, vault: V
   const records: UnassignedRecords = {};
   try { records.schedules = (await readItemSchedules(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.efforts = (await readItemEfforts(vault)).records; } catch { /* 上のとおり。 */ }
+  try { records.waits = (await readItemWaits(vault)).records; } catch { /* 上のとおり。 */ }
   const built = buildUnassigned(config, units, now, resolutions, records);
   const items = await writeIfChanged(vault, unassignedItemsPath, built.items, raw => nowItemsSchema.parse(JSON.parse(raw)));
   return { actions: await writeIfChanged(vault, unassignedActionsPath, built.actions, raw => unassignedActionsSchema.parse(JSON.parse(raw))), items };
 }
-/** 行の完了・却下、行動の日付・手間の目安を記録した後に、一覧と項目一覧を作り直す（Writerロック内）。 */
+/** 行の完了・却下、行動の日付・手間の目安・連絡待ちを記録した後に、一覧と項目一覧を作り直す（Writerロック内）。 */
 export async function rebuildUnassignedLocked(config: HubConfig, vault: Vault, now = new Date()): Promise<void> {
   await rebuildUnassignedActionsLocked(config, vault, await readEffectiveInputs(config), now);
 }
@@ -186,18 +190,21 @@ export async function rebuildUnassignedLocked(config: HubConfig, vault: Vault, n
 const clip = (s: string, n = 120) => clipText(s, n);
 /** 原文へのリンク先。空白や括弧を含むパスは、リンクが途中で切れないよう山括弧で囲む。 */
 const destination = (path: string) => /[\s()]/.test(path) ? `<${path}>` : path;
-/** 行動の行末に付ける、本人が付けた日付と手間の目安の表示（なければ空文字）。 */
-export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort'>): string {
-  const label = [item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : ''].filter(Boolean).join('・');
+/** 行動の行末に付ける、本人が付けた連絡待ち・日付・手間の目安の表示（なければ空文字）。連絡待ちの相手は、呼び出し側が必要なときだけ示す。 */
+export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort' | 'waiting'>): string {
+  const label = [item.waiting ? waitingLabel(item.waiting) : '', item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : ''].filter(Boolean).join('・');
   return label ? `（${label}）` : '';
 }
 /**
  * HOMEの「プロジェクト未定の次の一手」（前後の空行は含めない）。本人が追加した行動と対象のメモがなければ空文字。
  * pathsは入力IDから原文のパスを引く表（本人が追加した行動の原文へのリンクに使う）。
  * frontは、期日が近いため、HOMEの「次の一手」の期日の欄に載せた行動のキー。ここでは件数だけを示す（見直す日まで休ませている行動は、HOMEではここにだけ載るので、日付を付けて載せる）。
+ * 連絡待ちの行動は、HOMEの「連絡待ち」の欄に載せ、ここでは件数だけを示す（waitingを渡したときだけ。旧来の呼び出しでは数えない）。
  */
-export function unassignedActionsSection(config: HubConfig, built: { actions: UnassignedActions; items: NowItems }, paths: ReadonlyMap<string, string> = new Map(), front: ReadonlySet<string> = new Set()): string {
-  const { actions } = built, open = built.items.items.filter(i => i.action && i.resolution === null), own = open.filter(i => !front.has(i.key));
+export function unassignedActionsSection(config: HubConfig, built: { actions: UnassignedActions; items: NowItems }, paths: ReadonlyMap<string, string> = new Map(), front: ReadonlySet<string> = new Set(), waiting = false): string {
+  const { actions } = built, all = built.items.items.filter(i => i.action && i.resolution === null), waits = waiting ? all.filter(i => i.waiting).length : 0;
+  const open = waiting ? all.filter(i => !i.waiting) : all, own = open.filter(i => !front.has(i.key));
+  // 連絡待ちの行動しかないときは、「連絡待ち」の欄にだけ載せる。
   if (!actions.memos.length && !open.length) return '';
   const link = (inputId: string) => { const path = paths.get(inputId); return path ? `[${inputId}](${destination(path)})` : inputId; };
   const moved = open.length - own.length;
@@ -205,6 +212,7 @@ export function unassignedActionsSection(config: HubConfig, built: { actions: Un
     ...own.slice(0, UNASSIGNED_HOME_ACTIONS).map(i => `- ${ACTION_LABEL}${clip(i.text)}${unassignedItemLabel(i)} — ${link(i.input_id)}`),
     ...(own.length > UNASSIGNED_HOME_ACTIONS ? [`- ほか本人が追加した行動${own.length - UNASSIGNED_HOME_ACTIONS}件（アプリの「次の一手」で確認）`] : []),
     ...(moved ? [`- 期日が近い行動${moved}件は、「次の一手」の期日の欄で示します`] : []),
+    ...(waits ? [`- 連絡待ちの行動${waits}件は、「連絡待ち」の欄で示します`] : []),
   ];
   const rows = actions.memos.slice(0, UNASSIGNED_HOME_MEMOS).flatMap(m => [
     `- ${dateLabel(m.occurred_at, config.timezone).slice(0, 10)} ${m.own_words ? '' : 'AI要約: '}${clip(m.text)} — [${m.input_id}](${destination(m.path)})${m.task ? ' / タスク候補' : ''}`,
@@ -212,7 +220,7 @@ export function unassignedActionsSection(config: HubConfig, built: { actions: Un
     ...(m.suggestions.length > UNASSIGNED_SUGGESTIONS_PER_MEMO ? [`  - ほかAI提案${m.suggestions.length - UNASSIGNED_SUGGESTIONS_PER_MEMO}件（アプリの「次の一手」で確認）`] : []),
   ]);
   const counts = [open.length ? `本人が追加した行動${open.length}件` : '', actions.memos.length ? `メモ${actions.total_memos}件` : ''].filter(Boolean).join('・');
-  const ownText = open.length ? `「${ACTION_LABEL.trim()}」は、本人がプロジェクトを決めずに追加した行動です（${own.length > UNASSIGNED_HOME_ACTIONS ? `古い${UNASSIGNED_HOME_ACTIONS}件を載せます。` : ''}完了・却下するまで残ります。期日・見直す日・手間の目安を付けられます）。` : '';
+  const ownText = open.length ? `「${ACTION_LABEL.trim()}」は、本人がプロジェクトを決めずに追加した行動です（${own.length > UNASSIGNED_HOME_ACTIONS ? `古い${UNASSIGNED_HOME_ACTIONS}件を載せます。` : ''}完了・却下するまで残ります。期日・見直す日・手間の目安と連絡待ちの印を付けられます）。` : '';
   const memoText = actions.memos.length ? `${own.length ? 'ほかは、' : ''}どのプロジェクトにも結び付いていないメモから、AIが「タスク」と分類したものと、AIが挙げた次の一手の提案を集めた一覧です。短いメモは本人の言葉のまま、長いメモは「AI要約:」を付けた一行要約で示します。分類・要約・提案はAI生成・未検証です。` : '';
   const moveText = actions.memos.length ? `メモがプロジェクトに結び付くと、そのプロジェクトのNOWへ移ります。${actions.total_memos > UNASSIGNED_HOME_MEMOS ? `新しい${UNASSIGNED_HOME_MEMOS}件を載せます。` : ''}` : '';
   return `## プロジェクト未定の次の一手（${counts}）\n${ownText}${memoText}アプリから行ごとに「今日やる」「完了」「却下」ができ、片付けた行はここから外れます${actions.memos.length ? '（AIの行に期日を付けるときは、先に「自分の行動にする」で行動にしてください）' : ''}。${moveText}\n${[...ownRows, ...rows].join('\n')}`;

@@ -168,3 +168,28 @@ test('CLIで人を登録・変更・外し、変更と外すには確認した�
  expect(JSON.parse((await cli(config,['person','list'])).out).people).toEqual([]);
  expect(await readdir(join(root,'vault/40_people/tanaka')).catch(()=>[])).toEqual([]);
 },20000);
+test('CLIで連絡待ちの印を付けるとHOMEの次の一手から外れて連絡待ちにまとまり、--clearで外せる',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ await cli(config,['project','add','hub','--title','集約ツール']);
+ await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-30T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n- [確認済み] 名前を決める\n');
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const key=(JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string;text:string}[]).find(i=>i.text==='利用者に見せる')!.key;
+ const home=()=>readFile(join(root,'vault/HOME.md'),'utf8');
+ expect((await cli(config,['item','wait','hub',key])).code).not.toBe(0);
+ expect((await cli(config,['item','wait','hub',key,'--since','2026-02-30','--confirm'])).code).not.toBe(0);
+ expect((await cli(config,['item','wait','hub',key,'--clear','--who','山田さん','--confirm'])).code).not.toBe(0);
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--who','山田さん','--since','2026-11-01','--confirm'])).out)).toMatchObject({waiting:{who:'山田さん',since:'2026-11-01'},deduped:false});
+ // 同じ内容をもう一度送ると、記録後の停止からの回復として同じ受付IDで受け付ける。
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--who','山田さん','--since','2026-11-01','--confirm'])).out)).toMatchObject({deduped:true});
+ expect(JSON.parse((await cli(config,['item','list','hub'])).out).find((i:{key:string})=>i.key===key).waiting).toMatchObject({who:'山田さん',since:'2026-11-01'});
+ // 相手だけ変えても頼んだ日は今のまま（待った日数を数え直さない）。--no-whoで相手だけ外せる。
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--who','佐藤さん','--confirm'])).out)).toMatchObject({waiting:{who:'佐藤さん',since:'2026-11-01'},deduped:false});
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--no-who','--confirm'])).out).waiting).toEqual({since:'2026-11-01'});
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--who','山田さん','--confirm'])).out)).toMatchObject({waiting:{who:'山田さん',since:'2026-11-01'},deduped:false});
+ expect(await home()).not.toContain('  - 利用者に見せる');
+ expect(await home()).toContain('次の一手: 利用者に見せる（相手: 山田さん・2026-11-01から');
+ expect(await readFile(join(root,'vault/10_projects/hub/NOW.md'),'utf8')).not.toContain('山田');
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--clear','--confirm'])).out)).toMatchObject({waiting:null});
+ expect(await home()).toContain('  - 利用者に見せる');
+ expect(await home()).not.toContain('## 連絡待ち');
+},20000);
