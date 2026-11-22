@@ -22,6 +22,7 @@ import { setItemResolution,readNowItems,readItemResolutions,activeResolutions,ex
 import { ACTION_TEXT_CHARS } from './actions.js';
 import { moveAction } from './action-moves.js';
 import { setItemEffort,readItemEfforts,itemEfforts,itemEffortLabels,type ItemEffort } from './item-efforts.js';
+import { setItemContexts,readItemContexts,CONTEXT_TAGS_MAX,CONTEXT_TAG_CHARS } from './item-contexts.js';
 import { setItemWait,readItemWaits,effectiveWaits,WAIT_WHO_CHARS,type ItemWaiting } from './item-waits.js';
 import { setItemSomeday,readItemSomedays,effectiveSomedays,type ItemSomeday } from './item-somedays.js';
 import { buildSomedayList,setSomedayReview,somedayStale,readSomedayReviews,SOMEDAY_REVIEW_DAYS,type SomedayReviewAction } from './someday.js';
@@ -122,7 +123,7 @@ for(const action of ['approve','reject'] as const){const command=project.command
  if(action==='approve')command.option('--outcome <text>','作るプロジェクトの望む結果（改行は\\nで書けます）');
  command.action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`,...(opts.outcome!==undefined?{outcome:outcomeArg(opts.outcome)}:{})})));}
 const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決にする、誤りとして外す、または未解決へ戻す');
-item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,repeat:i.schedule?.repeat?repeatLabel(i.schedule.repeat):null,effort:i.effort??null,waiting:i.waiting?{since:i.waiting.since,who:i.waiting.who??null}:null,someday:i.someday?{since:i.someday.since,reviewed:i.someday.reviewed}:null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{}),...(i.action?{added_by_person:true,...(i.action.from?{from:i.action.from}:{})}:{})})));});
+item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,repeat:i.schedule?.repeat?repeatLabel(i.schedule.repeat):null,effort:i.effort??null,contexts:i.contexts??[],waiting:i.waiting?{since:i.waiting.since,who:i.waiting.who??null}:null,someday:i.someday?{since:i.someday.since,reviewed:i.someday.reviewed}:null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{}),...(i.action?{added_by_person:true,...(i.action.from?{from:i.action.from}:{})}:{})})));});
 for(const action of ['resolve','reopen'] as const)item.command(`${action} <project> <key>`).description(action==='resolve'?'項目を完了・解決にする':'解決済み、または誤りとして外した項目を未解決へ戻す').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,_opts)=>{const c=await config(),vault=new Vault(c);
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ操作なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.action===action&&last.source_event_id?last.source_event_id:`cli:${key}:${action}:${last?.id??'none'}`;const result=await setItemResolution(c,{projectId:id,itemKey:key,action,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
@@ -132,6 +133,7 @@ const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.ite
 // 本人が決めた行動を、モデルを通さずにNOWの次の一手へ載せる。AIが読み取った行を行動にするときは、元の行を--from-key（キー付きの項目）か--fromと--from-text（提案）で示す。
 item.command('add <project> [text]').description(`本人が決めた行動を次の一手に追加する（1行・${ACTION_TEXT_CHARS}文字以内。モデルを使わない）。projectを${UNASSIGNED_SCOPE}にすると、プロジェクト未定の次の一手に追加する。AIが読み取った行を行動にするときは元の行を指定し、textを省くと元の本文のまま追加する`)
   .option('--from-key <key>','行動にするNOWの項目のキー（item listで確認）').option('--from <input-id>','行動にする提案の根拠の入力ID').option('--from-text <text>','行動にする提案の本文（ラベルを除く）')
+  .addOption(new Option('--effort <effort>','一緒に付ける手間の目安').choices([...itemEfforts])).option('--context <tag...>',`一緒に付ける場所・道具の札（複数可・${CONTEXT_TAGS_MAX}個まで）`)
   .option('--event-id <id>','再送判定用ID（付けると、途中で止まった追加を同じIDで再送しても重複しない）').requiredOption('--confirm','文面を確認した本人による追加').action(async(id,text,opts)=>{const c=await config(),vault=new Vault(c);
   if(opts.fromKey!==undefined&&(opts.from!==undefined||opts.fromText!==undefined))throw new Error('--from-keyと--from・--from-textは同時に指定できません');
   if((opts.from===undefined)!==(opts.fromText===undefined))throw new Error('--fromと--from-textは組で指定してください');
@@ -140,7 +142,7 @@ item.command('add <project> [text]').description(`本人が決めた行動を次
   const body=text??from?.text;if(body===undefined)throw new Error('行動の文面を指定してください');
   // プロジェクト未定の置き場を指定したときは、プロジェクトを付けずに保存する（項目キーは置き場のもの）。
   const unassigned=id===UNASSIGNED_SCOPE;
-  const result=await capture(c,{text:body,kind:'action',project:unassigned?undefined:id,source:'cli',sourceEventId:opts.eventId,occurredAt:new Date().toISOString(),...(from?{meta:{action_from_input:from.input_id,action_from_text:from.text,...(from.key?{action_from_key:from.key}:{})}}:{})});
+  const result=await capture(c,{text:body,kind:'action',project:unassigned?undefined:id,source:'cli',sourceEventId:opts.eventId,occurredAt:new Date().toISOString(),...(from?{meta:{action_from_input:from.input_id,action_from_text:from.text,...(from.key?{action_from_key:from.key}:{})}}:{}),...(opts.effort!==undefined?{effort:opts.effort as ItemEffort}:{}),...(opts.context!==undefined?{contexts:opts.context as string[]}:{})});
   // 同じ受付IDの再送で、別の内容の入力が記録されていれば項目キーを示さない（--event-idを付けて再送すると重複しない）。
   const saved=(await readInputs(c)).find(i=>i.id===result.inputId);if(saved?.kind!=='action'||saved.text!==body||saved.project!==(unassigned?undefined:id))throw new Error('同じ受付IDで別の内容が記録されています。--event-idを確認してください');
   const key=itemKey(id,'next',result.inputId,body);await rebuildDashboard(c);output({...result,projectId:id,itemKey:key});});
@@ -175,6 +177,14 @@ item.command('effort <project> <key>').description(`項目に手間の目安を�
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemEfforts(vault)).records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.effort===effort&&last.source_event_id?last.source_event_id:`cli:${key}:effort:${effort??'none'}:${last?.id??'none'}`;
 const result=await setItemEffort(c,{projectId:id,itemKey:key,effort,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,effort});});
+item.command('contexts <project> <key> [tags...]').description(`項目の場所・道具の札（例: 家・外出先・PC・電話）を、指定した札の全体に置き換える（${CONTEXT_TAGS_MAX}個まで・1つ${CONTEXT_TAG_CHARS}文字以内）。今いる場所や手元の道具でできる項目を選ぶ手掛かりにする。AIは付けない`).option('--clear','札をすべて外す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,tags:string[],opts)=>{
+if(opts.clear&&tags.length)throw new Error('--clearと札は同時に指定できません');
+if(!opts.clear&&!tags.length)throw new Error('札か--clearを指定してください');
+const c=await config(),vault=new Vault(c),contexts=opts.clear?null:tags;
+// 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
+const same=(a:string[]|null)=>a===null?contexts===null:contexts!==null&&a.join('\n')===contexts.join('\n');
+const last=(await readItemContexts(vault)).records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&same(last.contexts)&&last.source_event_id?last.source_event_id:`cli:${key}:contexts:${last?.id??'none'}:${contexts===null?'none':hash(contexts.join('\n')).slice(0,16)}`;
+const result=await setItemContexts(c,{projectId:id,itemKey:key,contexts,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,contexts:contexts??[]});});
 item.command('wait <project> <key>').description(`項目に「連絡待ち」の印を付ける（人に頼んだこと・返事を待っていること）。印を付けた項目はHOMEの「次の一手」から外れ、「連絡待ち」にまとまる。見直す日（schedule --review）が来ると「次の一手」の先頭に確認として出る。AIは付けない`).option('--who <name>',`待っている相手（任意・${WAIT_WHO_CHARS}文字以内。HOMEとアプリにだけ示し、NOWとモデルへ渡す資料には載せない）`).option('--no-who','相手を外す').option('--since <date>','頼んだ日（YYYY-MM-DD。既定は、印が付いていれば今の頼んだ日、なければ今日）').option('--clear','印を外して元の欄へ戻す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
 if(opts.clear&&(opts.who!==undefined||opts.since!==undefined))throw new Error('--clearと--who・--sinceは同時に指定できません');
 const c=await config(),vault=new Vault(c),records=(await readItemWaits(vault)).records;

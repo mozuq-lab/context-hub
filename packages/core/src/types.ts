@@ -47,6 +47,8 @@ export interface CaptureRequest {
   happenedOn?: string;
   /** 続きとして書いたときの前のメモの入力ID。projectを省くと、前のメモで本人が指定したプロジェクトを引き継ぐ。 */
   continues?: string;
+  /** 行動（kind: action）を追加するときに一緒に付ける手間の目安と場所・道具の札。行動の記録（item-efforts・item-contexts）として書く。 */
+  effort?: 'quick' | 'hour' | 'half-day'; contexts?: string[];
 }
 export interface CaptureResult { inputId: string; deduped: boolean; path: string; receivedAt: string }
 export interface Input {

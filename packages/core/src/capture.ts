@@ -104,7 +104,10 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     assertActionMeta(request.meta);
     // 行動は出来事の記録ではないため、出来事の日付は付けない。
     if (request.happenedOn !== undefined) throw new Error('行動には出来事の日付を指定できません');
-  }
+    const { actionTagsSchema } = await import('./take-over-records.js');
+    const tags = actionTagsSchema.safeParse({ effort: request.effort, contexts: request.contexts });
+    if (!tags.success) throw new Error(tags.error.issues[0]?.message ?? '手間の目安か札が不正です');
+  } else if (request.effort !== undefined || request.contexts !== undefined) throw new Error('手間の目安と札は行動にだけ付けられます');
   if (request.happenedOn !== undefined) calendarDateSchema.parse(request.happenedOn);
   if (request.continues !== undefined) {
     inputIdSchema.parse(request.continues);
@@ -186,6 +189,11 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
       if (fromKey && action) {
         const { carryTakenOverRecordsLocked } = await import('./take-over-records.js');
         await carryTakenOverRecordsLocked(config, vault, { inputId: action.id, scope: target, text: action.text, fromKey, source: action.source });
+      }
+      // 追加と一緒に付けた手間の目安・札は、行動の記録として書く（元の行から写した記録より後に書くので、こちらが効く）。
+      if (action && (request.effort !== undefined || request.contexts !== undefined)) {
+        const { writeActionTagsLocked } = await import('./take-over-records.js');
+        await writeActionTagsLocked(vault, { inputId: action.id, scope: target, text: action.text, source: action.source, effort: request.effort, contexts: request.contexts });
       }
       if (from) await rebuildNowsForInputLocked(vault, config, projects.map(p => p.id), from.input_id, target, inputs, receipts);
       else if (target) await rebuildNowLocked(vault, config, target, inputs, receipts);

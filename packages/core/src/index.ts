@@ -25,6 +25,7 @@ export * from './project-merges.js';
 export * from './item-resolutions.js';
 export * from './item-schedules.js';
 export * from './item-efforts.js';
+export * from './item-contexts.js';
 export * from './item-waits.js';
 export * from './item-somedays.js';
 export * from './someday.js';
