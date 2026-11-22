@@ -9,6 +9,7 @@ import { shortMemoText } from './short-memo.js';
 import { ACTION_LABEL, actionSource, movedActionIds, sourceRef } from './actions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel, type ItemSchedule } from './item-schedules.js';
 import { effectiveEfforts, effortLabel, readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
+import { effectiveContexts, readItemContexts, type ItemContextRecord } from './item-contexts.js';
 import { effectiveWaits, readItemWaits, waitingLabel, type ItemWaitRecord } from './item-waits.js';
 import { effectiveSomedays, readItemSomedays, SOMEDAY_LABEL, type ItemSomedayRecord } from './item-somedays.js';
 import type { HubConfig } from './types.js';
@@ -79,7 +80,7 @@ export function buildUnassignedActions(config: HubConfig, units: EffectiveInput[
   return buildUnassigned(config, units, now, resolutions).actions;
 }
 /** 本人が行動に付けた記録（期日・見直す日・手間の目安・連絡待ち）。読めなかったときは空として一覧を作る。 */
-export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[]; waits?: ItemWaitRecord[]; somedays?: ItemSomedayRecord[] }
+export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[]; contexts?: ItemContextRecord[]; waits?: ItemWaitRecord[]; somedays?: ItemSomedayRecord[] }
 export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now = new Date(), resolutions: ItemResolution[] = [], records: UnassignedRecords = {}): { actions: UnassignedActions; items: NowItems } {
   const settings = secretSettings(config), hide = (s: string) => settings.enabled ? redactText(s, settings).text : s;
   const closed = activeResolutions(resolutions, UNASSIGNED_SCOPE);
@@ -110,12 +111,15 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
   const ownItems = [...ownOpen, ...ownClosed];
   const scheduled = effectiveSchedules(records.schedules ?? [], UNASSIGNED_SCOPE, ownItems, closed).byKey;
   const efforts = effectiveEfforts(records.efforts ?? [], UNASSIGNED_SCOPE, ownItems, closed);
+  const contexts = effectiveContexts(records.contexts ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   const waits = effectiveWaits(records.waits ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   const somedays = effectiveSomedays(records.somedays ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   for (const item of ownOpen) {
     const s = scheduled.get(item.key), e = efforts.get(item.key), w = waits.get(item.key), d = somedays.get(item.key);
     if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) };
     if (e) item.effort = e;
+    const t = contexts.get(item.key);
+    if (t) item.contexts = t;
     if (w) item.waiting = w;
     if (d) item.someday = d;
   }
@@ -183,6 +187,7 @@ export async function rebuildUnassignedActionsLocked(config: HubConfig, vault: V
   const records: UnassignedRecords = {};
   try { records.schedules = (await readItemSchedules(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.efforts = (await readItemEfforts(vault)).records; } catch { /* 上のとおり。 */ }
+  try { records.contexts = (await readItemContexts(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.waits = (await readItemWaits(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.somedays = (await readItemSomedays(vault)).records; } catch { /* 上のとおり。 */ }
   const built = buildUnassigned(config, units, now, resolutions, records);

@@ -37,6 +37,7 @@ POLICY.md                      共通の有効方針（派生集約）
 90_system/privacy/patterns.json 設定の伏せ字の追加規則（派生。アプリが読む）
 90_system/item-occurrences/    定例の回の完了・見送りの記録
 90_system/item-efforts/        次の一手・未解決に本人が付けた手間の目安
+90_system/item-contexts/       次の一手・未解決に本人が付けた場所・道具の札
 90_system/item-waits/          次の一手・未解決に本人が付けた連絡待ちの印（相手・頼んだ日）
 90_system/item-somedays/       次の一手・未解決を本人が「いつかやる」へ移した記録（移した日・見直した日）
 90_system/someday-reviews/     アイデアを「いつかやる」に置く・見直す・外す、休止中のプロジェクトを見直した記録
@@ -44,7 +45,7 @@ POLICY.md                      共通の有効方針（派生集約）
 90_system/weekly-reviews/      本人が週次レビューを終えた（見直した）記録
 90_system/weekly-review.json   週次レビューの点検の一覧（派生。アプリが読む）
 90_system/answers/             記録に聞くの問いと答え（30日で片付ける）
-90_system/client-preferences.json アプリの好み（ピン留め・ひな形・文脈かごの上限）を端末間でそろえる共有の記録
+90_system/client-preferences.json アプリの好み（ピン留め・ひな形・文脈かごの上限・場所・道具の札の語彙）を端末間でそろえる共有の記録
 HOME.md                        受領と整理状況への入口
 REVIEW.md                      直近の期間のふりかえり（派生）
 _ContextHub/                   共有する入力ツールとテンプレート
@@ -65,7 +66,7 @@ _ContextHub/                   共有する入力ツールとテンプレート
 - 前のメモが見つからない（同期が遅れて届いていない、行動を指しているなど）ときは、本文を失わないよう、つながない普通のメモとして保存します。メモと作業要約にだけ付けられ、行動には付けられません。
 - 束ねた資料（`bundle`）では「前のメモの続き」としてリンクを示します。
 
-HOMEを作るたびに`90_system/intake-features.json`へ、受け付ける依頼の種類（`operations`）、メモに付けられる項目（`capture_fields`。`happened_on`は出来事の日付、`continues`は続き）、送れる入力の種類（`capture_kinds`。`action`は本人が次の一手に直接足す行動）、プロジェクトを指定せずに行動を足せる置き場（`action_scopes`。`_unassigned`はプロジェクト未定の次の一手）、本人が追加した行動を別の置き場へ移せるか（`action_moves`）、プロジェクトの望む結果を送れるかとその上限（`project_outcome`。`max_chars`・`max_lines`）、出来事の日付をさかのぼれる日数（`max_backdate_days`）、期日のカレンダーの件名の設定（`calendar_titles`）、期日の依頼に添えられる欄（`item_schedule_fields`。`repeat`は定例）、手間の目安の依頼で選べる値（`item_efforts`）、「いつかやる」で見直していないとみなす日数（`someday_review_days`）、完了・却下を受け付けるプロジェクト以外の置き場（`item_scopes`。`_unassigned`はプロジェクト未定の次の一手）、期日・定例の回・手間の目安・連絡待ち・「いつかやる」を受け付けるプロジェクト以外の置き場（`item_record_scopes`。`_unassigned`はプロジェクト未定の本人が追加した行動）、確認待ち以外で却下を受け付ける候補の状態（`review_rejects`。`stale`は古くなった候補）、「記録に聞く」が有効かと問いの上限の文字数（`ask`）を書きます。端末はこれを読んで、古い本体が受け付けない依頼を出さず、本体の設定に合わせます。
+HOMEを作るたびに`90_system/intake-features.json`へ、受け付ける依頼の種類（`operations`）、メモに付けられる項目（`capture_fields`。`happened_on`は出来事の日付、`continues`は続き）、送れる入力の種類（`capture_kinds`。`action`は本人が次の一手に直接足す行動）、プロジェクトを指定せずに行動を足せる置き場（`action_scopes`。`_unassigned`はプロジェクト未定の次の一手）、本人が追加した行動を別の置き場へ移せるか（`action_moves`）、プロジェクトの望む結果を送れるかとその上限（`project_outcome`。`max_chars`・`max_lines`）、出来事の日付をさかのぼれる日数（`max_backdate_days`）、期日のカレンダーの件名の設定（`calendar_titles`）、期日の依頼に添えられる欄（`item_schedule_fields`。`repeat`は定例）、手間の目安の依頼で選べる値（`item_efforts`）、行動の追加に添えて付けられる欄（`action_fields`。`effort`は手間の目安、`contexts`は場所・道具の札）、場所・道具の札の上限と、アプリの好みでそろえる札の語彙の上限（`item_contexts`。`max_tags`・`max_chars`・`vocabulary_max`）、「いつかやる」で見直していないとみなす日数（`someday_review_days`）、完了・却下を受け付けるプロジェクト以外の置き場（`item_scopes`。`_unassigned`はプロジェクト未定の次の一手）、期日・定例の回・手間の目安・場所・道具の札・連絡待ち・「いつかやる」を受け付けるプロジェクト以外の置き場（`item_record_scopes`。`_unassigned`はプロジェクト未定の本人が追加した行動）、確認待ち以外で却下を受け付ける候補の状態（`review_rejects`。`stale`は古くなった候補）、「記録に聞く」が有効かと問いの上限の文字数（`ask`）を書きます。端末はこれを読んで、古い本体が受け付けない依頼を出さず、本体の設定に合わせます。
 
 モデルは保存先やIDを決めません。結果はスキーマで検証し、出典・日時・未検証表示を維持します。分類不能のunclassifiedは正常な結果であり、処理成功と内容の確認済みは別です。
 
@@ -97,4 +98,4 @@ cycleのモデル不要受付とAI処理枠は別です。`cycle --limit 2`は�
 
 [記録に聞く](ask.md)は、CLIでは呼んだその場で、アプリからの問いは受付で答え待ちとして記録し、`cycle`が整理の後に答えます。週次の統合と同じ整理用ロックで1つずつ実行し、モデルを待つ間はWriterロックを持ちません。
 
-アプリの好み（ピン留めと並び順・メモのひな形・文脈かごの上限）は、アプリが`operation: client-preferences`の受付ファイル（本文が変えたまとまりのJSON）で送り、本体がまとまりごとに新しい方を`90_system/client-preferences.json`へ残します。遅れて届いた古い変更で巻き戻さず、端末の時計が進みすぎていても受け付けた時刻より新しい日時は記録しません。ひな形に秘密情報らしい文字列があれば、理由付きで断ります。本体は好みの中身を使いません。既読・ウインドウの位置・通知の許可・APIキーのような端末ごとの状態は扱いません。
+アプリの好み（ピン留めと並び順・メモのひな形・文脈かごの上限・場所・道具の札の語彙）は、アプリが`operation: client-preferences`の受付ファイル（本文が変えたまとまりのJSON）で送り、本体がまとまりごとに新しい方を`90_system/client-preferences.json`へ残します。遅れて届いた古い変更で巻き戻さず、端末の時計が進みすぎていても受け付けた時刻より新しい日時は記録しません。ひな形に秘密情報らしい文字列があれば、理由付きで断ります。本体は好みの中身を使いません。既読・ウインドウの位置・通知の許可・APIキーのような端末ごとの状態は扱いません。

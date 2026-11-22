@@ -11,6 +11,7 @@ import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage
 import { activeResolutions, closedMergeWindows, withinMergeWindow, exclusionReasonLabels, itemKey, nowItemsPath, readItemResolutions, type ItemSection, type NowItem } from './item-resolutions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel } from './item-schedules.js';
 import { effectiveEfforts, effortLabel, readItemEfforts } from './item-efforts.js';
+import { contextsLabel, effectiveContexts, readItemContexts } from './item-contexts.js';
 import { effectiveWaits, readItemWaits, waitingLabel } from './item-waits.js';
 import { effectiveSomedays, readItemSomedays, SOMEDAY_LABEL } from './item-somedays.js';
 import { evidenceBound, inputWhen } from './happened.js';
@@ -195,18 +196,21 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   }
   const scheduled = effectiveSchedules((await readItemSchedules(vault)).records, projectId, [...items.values()], resolved).byKey;
   const efforts = effectiveEfforts((await readItemEfforts(vault)).records, projectId, [...items.values()], resolved);
+  const contexts = effectiveContexts((await readItemContexts(vault)).records, projectId, [...items.values()], resolved);
   const waits = effectiveWaits((await readItemWaits(vault)).records, projectId, [...items.values()], resolved);
   const somedays = effectiveSomedays((await readItemSomedays(vault)).records, projectId, [...items.values()], resolved);
   for (const item of items.values()) {
     const s = scheduled.get(item.key), e = efforts.get(item.key), w = waits.get(item.key), d = somedays.get(item.key);
     if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) };
     if (e) item.effort = e;
+    const t = contexts.get(item.key);
+    if (t) item.contexts = t;
     if (w) item.waiting = w;
     if (d) item.someday = d;
   }
   // 連絡待ちの印は行末に示す（相手の名前は載せない。NOWは別AI向けのcontext・bundleの元になるため。相手は項目一覧とHOMEに載せる）。
   // 「いつかやる」へ移した項目も、欄に置いたまま行末に示す（今は取り組まないことを、NOWを読む別AIにも伝える）。
-  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key), e = efforts.get(key), w = waits.get(key), d = somedays.get(key), label = [d ? SOMEDAY_LABEL : '', w ? waitingLabel(w) : '', s ? scheduleLabel(s) : '', e ? effortLabel(e) : ''].filter(Boolean).join('・'); return label ? ` — ${label}` : ''; }));
+  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key), e = efforts.get(key), t = contexts.get(key), w = waits.get(key), d = somedays.get(key), label = [d ? SOMEDAY_LABEL : '', w ? waitingLabel(w) : '', s ? scheduleLabel(s) : '', e ? effortLabel(e) : '', t ? contextsLabel(t) : ''].filter(Boolean).join('・'); return label ? ` — ${label}` : ''; }));
   next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
   // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。

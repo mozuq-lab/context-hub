@@ -13,6 +13,7 @@ import { associationSchema,associationViewsComplete,projectRegistryHash } from '
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
 import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
 import { readItemEfforts } from './item-efforts.js';
+import { readItemContexts } from './item-contexts.js';
 import { readItemWaits } from './item-waits.js';
 import { readItemSomedays } from './item-somedays.js';
 import { readSomedayReviews } from './someday.js';
@@ -64,6 +65,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { await readPersonChanges(vault); } catch (error) { issues.push(error instanceof Error && error.message.startsWith('人の定義の変更記録') ? error.message : '人の定義の変更記録を走査できません'); }
   try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
   try { for (const path of (await readItemEfforts(vault)).problems) issues.push(`手間の目安の記録が不正です: ${path}`); } catch { issues.push('手間の目安の記録を走査できません'); }
+  try { for (const path of (await readItemContexts(vault)).problems) issues.push(`場所・道具の札の記録が不正です: ${path}`); } catch { issues.push('場所・道具の札の記録を走査できません'); }
   try { for (const path of (await readItemWaits(vault)).problems) issues.push(`連絡待ちの記録が不正です: ${path}`); } catch { issues.push('連絡待ちの記録を走査できません'); }
   try { for (const path of [...(await readItemSomedays(vault)).problems, ...(await readSomedayReviews(vault)).problems]) issues.push(`「いつかやる」の記録が不正です: ${path}`); } catch { issues.push('「いつかやる」の記録を走査できません'); }
   try { for (const path of (await readWeeklyReviews(vault)).problems) issues.push(`週次レビューの記録が不正です: ${path}`); } catch { issues.push('週次レビューの記録を走査できません'); }

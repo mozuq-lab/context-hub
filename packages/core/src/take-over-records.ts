@@ -1,11 +1,13 @@
 import { ulid } from 'ulid';
+import { z } from 'zod';
 import { Vault } from './storage.js';
 import { readProjects, resolveProject } from './projects.js';
 import { readInputs } from './capture.js';
 import { actionSource } from './actions.js';
 import { ItemTargetError, UNASSIGNED_SCOPE, activeResolutions, itemKey, readItemResolutions, readNowItems, type NowItem } from './item-resolutions.js';
 import { effectiveItemRecords, effectiveSchedules, readItemSchedules, takeOverEvent, type ItemSchedule } from './item-schedules.js';
-import { readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
+import { itemEffortSchema, readItemEfforts, type ItemEffort, type ItemEffortRecord } from './item-efforts.js';
+import { contextCleared, contextPath, contextTagsSchema, readItemContexts, type ItemContextRecord } from './item-contexts.js';
 import { readItemWaits, waitCleared, waitPath, type ItemWaitRecord } from './item-waits.js';
 import { readItemSomedays, somedayCleared, somedayPath, type ItemSomedayRecord } from './item-somedays.js';
 import type { HubConfig } from './types.js';
@@ -14,7 +16,7 @@ import type { HubConfig } from './types.js';
 export interface TakenOverAction { inputId: string; scope?: string; text: string; fromKey: string; source: string }
 
 /**
- * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、連絡待ちの印、「いつかやる」を、行動の記録として写す（Writerロック内）。
+ * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、場所・道具の札、連絡待ちの印、「いつかやる」を、行動の記録として写す（Writerロック内）。
  * 元の行と行動は置き場もキーも違うことがあり（別のプロジェクト・プロジェクト未定）、元の行の日付は作業要約が届くたびに別のキーの記録から引き継がれているため、
  * 読むたびに元の行をたどるのではなく、引き取った時点で効いている記録を行動の記録にする。
  * 写した記録の受付IDは元の記録のIDを含み（takeOverEvent）、元の記録は引き取られた記録として、元の置き場では外した記録と同じに扱う（同じ本文の行が後から出直しても日付を二重に付けない）。
@@ -35,6 +37,11 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
     const record: ItemEffortRecord = { ...base, id: `EFF-${ulid()}`, effort: effort.effort, source_event_id: takeOverEvent(action.inputId, effort.id) };
     if (!await vault.create(`90_system/item-efforts/${record.id}.json`, JSON.stringify(sorted(record, effortOrder), null, 2) + '\n')) throw new Error('手間の目安の記録が競合しました');
   }
+  const contexts = await readItemContexts(vault), context = effectiveItemRecords(contexts.records, source.scope, source.items, resolved, contextCleared).byKey.get(action.fromKey);
+  if (context && !contexts.records.some(r => r.source_event_id === takeOverEvent(action.inputId, context.id))) {
+    const record: ItemContextRecord = { ...base, id: `CTX-${ulid()}`, contexts: context.contexts, source_event_id: takeOverEvent(action.inputId, context.id) };
+    if (!await vault.create(contextPath(record.id), JSON.stringify(sorted(record, contextOrder), null, 2) + '\n')) throw new Error('札の記録が競合しました');
+  }
   const waits = await readItemWaits(vault), wait = effectiveItemRecords(waits.records, source.scope, source.items, resolved, waitCleared).byKey.get(action.fromKey);
   if (wait && !waits.records.some(r => r.source_event_id === takeOverEvent(action.inputId, wait.id))) {
     const record: ItemWaitRecord = { ...base, id: `WAIT-${ulid()}`, waiting: wait.waiting, source_event_id: takeOverEvent(action.inputId, wait.id) };
@@ -44,6 +51,29 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
   if (someday && !somedays.records.some(r => r.source_event_id === takeOverEvent(action.inputId, someday.id))) {
     const record: ItemSomedayRecord = { ...base, id: `SMD-${ulid()}`, someday: someday.someday, source_event_id: takeOverEvent(action.inputId, someday.id) };
     if (!await vault.create(somedayPath(record.id), JSON.stringify(sorted(record, somedayOrder), null, 2) + '\n')) throw new Error('「いつかやる」の記録が競合しました');
+  }
+}
+
+/** 行動の追加に添えて付ける手間の目安と場所・道具の札（どちらも任意）。 */
+export const actionTagsSchema = z.object({ effort: itemEffortSchema.optional(), contexts: contextTagsSchema.optional() }).strict();
+/** 行動の追加に添えた手間の目安・札の記録の受付ID（行動の入力ID）。 */
+const actionTagEvent = (inputId: string) => `action-add:${inputId}`;
+/**
+ * 行動の追加に添えて本人が選んだ手間の目安と場所・道具の札を、追加した行動の記録として書く（Writerロック内。NOWの再生成の前に呼ぶ）。
+ * 行動の項目キーは置き場・入力ID・本文で決まるので、NOWの再生成を待たずに書ける。
+ * 同じ行動の再送では、元の行から写した記録を除き、その種類の記録が行動に1件でもあれば何もしない（先に書いた値や、その後に本人が付け直した値を、再送で戻さない）。
+ * 元の行から写した記録は先に書かれていて、この記録が後から効く（写した記録は、元の行の記録を引き取った印として残す）。
+ */
+export async function writeActionTagsLocked(vault: Vault, action: { inputId: string; scope?: string; text: string; source: string; effort?: ItemEffort; contexts?: string[] }): Promise<void> {
+  const scope = action.scope ?? UNASSIGNED_SCOPE, event = actionTagEvent(action.inputId), now = new Date().toISOString();
+  const base = { schema_version: 1 as const, project_id: scope, item_key: itemKey(scope, 'next', action.inputId, action.text), section: 'next' as const, text: action.text, input_id: action.inputId, source: action.source, source_event_id: event, created_at: now };
+  if (action.effort !== undefined && !(await readItemEfforts(vault, { raw: true })).records.some(r => r.input_id === action.inputId && !r.source_event_id?.startsWith('take-over:'))) {
+    const record: ItemEffortRecord = { ...base, id: `EFF-${ulid()}`, effort: action.effort };
+    if (!await vault.create(`90_system/item-efforts/${record.id}.json`, JSON.stringify(sorted(record, effortOrder), null, 2) + '\n')) throw new Error('手間の目安の記録が競合しました');
+  }
+  if (action.contexts !== undefined && !(await readItemContexts(vault, { raw: true })).records.some(r => r.input_id === action.inputId && !r.source_event_id?.startsWith('take-over:'))) {
+    const record: ItemContextRecord = { ...base, id: `CTX-${ulid()}`, contexts: action.contexts };
+    if (!await vault.create(contextPath(record.id), JSON.stringify(sorted(record, contextOrder), null, 2) + '\n')) throw new Error('札の記録が競合しました');
   }
 }
 
@@ -89,6 +119,7 @@ async function findSourceRow(config: HubConfig, vault: Vault, key: string): Prom
 const scheduleOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'due', 'review_after', 'repeat', 'source', 'source_event_id', 'created_at'];
 const somedayOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'someday', 'source', 'source_event_id', 'created_at'];
 const waitOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'waiting', 'source', 'source_event_id', 'created_at'];
+const contextOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'contexts', 'source', 'source_event_id', 'created_at'];
 const effortOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'effort', 'source', 'source_event_id', 'created_at'];
 function sorted<T extends object>(record: T, order: string[]): T {
   return Object.fromEntries(order.flatMap(k => k in record ? [[k, (record as Record<string, unknown>)[k]]] : [])) as T;

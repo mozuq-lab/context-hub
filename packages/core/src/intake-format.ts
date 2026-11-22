@@ -7,6 +7,7 @@ import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySc
 import { occurrenceActionSchema, repeatRuleSchema, scheduleDateSchema } from './item-schedules.js';
 import { calendarDateSchema } from './happened.js';
 import { itemEffortSchema } from './item-efforts.js';
+import { contextTagsSchema } from './item-contexts.js';
 import { itemWaitingSchema } from './item-waits.js';
 import { itemSomedaySchema } from './item-somedays.js';
 import { somedayReviewActions, somedayTargets } from './someday.js';
@@ -28,7 +29,8 @@ const outcomeField = z.string().max(PROJECT_OUTCOME_CHARS * 4).refine(s => { try
 // kind: actionは本人が直接追加する次の一手。projectを省くとプロジェクト未定の次の一手に載る。本文は1行・200文字以内（本体のcaptureが検証する）。
 // happened_onは本人が後から記録した出来事の日付。occurred_atは実際に書いた日時のまま送る（actionには付けられない）。
 // continuesは続きとして書いたときの前のメモの入力ID（actionには付けられない）。projectを省くと前のメモで指定したプロジェクトを引き継ぐ。
-const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), continues: inputIdSchema.optional(), text: z.string() }).strict().refine(v => v.kind !== 'action' || v.continues === undefined, '行動には前のメモを指定できません');
+// effortとcontextsは、行動（kind: action）を追加するときに一緒に付ける手間の目安と場所・道具の札（本体が行動の記録として書く）。
+const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), continues: inputIdSchema.optional(), effort: itemEffortSchema.optional(), contexts: contextTagsSchema.optional(), text: z.string() }).strict().refine(v => v.kind !== 'action' || v.continues === undefined, '行動には前のメモを指定できません').refine(v => v.kind === 'action' || (v.effort === undefined && v.contexts === undefined), '手間の目安と札は行動にだけ付けられます');
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
 // cover_idsは、同じ対象の案として同じ判断にまとめる確認待ちの案。cover_hashesは同じ順で、本人が確認した内容のハッシュ。本体が同じ組の案かを検証する。
 const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), cover_ids: z.array(z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), cover_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), outcome: outcomeField.optional(), confirmed: z.literal(true), text: z.string() }).strict().refine(v => v.outcome === undefined || v.operation === 'project-approve', '望む結果は採用のときだけ送ります').refine(v => (v.cover_ids?.length ?? 0) === (v.cover_hashes?.length ?? 0), 'まとめる案のIDとハッシュの数が一致しません');
@@ -50,6 +52,8 @@ const itemOccurrence=z.object({...base,operation:z.literal('item-occurrence'),pr
 // 手間の目安。effortは変更後の目安で、nullは外す依頼。
 const itemEffort=z.object({...base,operation:z.literal('item-effort'),project_id:itemScopeSchema,item_key:itemKeySchema,effort:itemEffortSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 // 連絡待ちの印。waitingは変更後の全体（相手は任意、頼んだ日は必須）で、nullは印を外す依頼。
+// 場所・道具の札。contextsは変更後の全体（付けた順）で、nullはすべて外す依頼。
+const itemContexts=z.object({...base,operation:z.literal('item-contexts'),project_id:itemScopeSchema,item_key:itemKeySchema,contexts:contextTagsSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const itemWait=z.object({...base,operation:z.literal('item-wait'),project_id:itemScopeSchema,item_key:itemKeySchema,waiting:itemWaitingSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 // 「いつかやる」。somedayは変更後の全体（移した日と、最後に見直した日）で、nullは元の欄へ戻す依頼。
 const itemSomeday=z.object({...base,operation:z.literal('item-someday'),project_id:itemScopeSchema,item_key:itemKeySchema,someday:itemSomedaySchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
@@ -81,7 +85,7 @@ const askSchema=z.object({...base,operation:z.literal('ask'),project:projectIdSc
 const preferencesSchema=z.object({...base,operation:z.literal('client-preferences'),confirmed:z.literal(true),text:z.string()}).strict();
 // 採用した方針を本人が「まだ有効」と確かめた。ハッシュは確かめた時点の知識のファイルのもの。
 const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemContexts, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
