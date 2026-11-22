@@ -181,6 +181,7 @@ export function unassignedActionsSection(config: HubConfig, built: { actions: Un
   ]);
   const counts = [own.length ? `本人が追加した行動${own.length}件` : '', actions.memos.length ? `メモ${actions.total_memos}件` : ''].filter(Boolean).join('・');
   const ownText = own.length ? `「${ACTION_LABEL.trim()}」は、本人がプロジェクトを決めずに追加した行動です（${own.length > UNASSIGNED_HOME_ACTIONS ? `古い${UNASSIGNED_HOME_ACTIONS}件を載せます。` : ''}完了・却下するまで残ります）。` : '';
-  const memoText = actions.memos.length ? `${own.length ? 'ほかは、' : ''}どのプロジェクトにも結び付いていないメモから、AIが「タスク」と分類したものと、AIが挙げた次の一手の提案を集めた一覧です。短いメモは本人の言葉のまま、長いメモは「AI要約:」を付けた一行要約で示します。分類・要約・提案はAI生成・未検証です。メモがプロジェクトに結び付くと、そのプロジェクトのNOWへ移ります。${actions.total_memos > UNASSIGNED_HOME_MEMOS ? `新しい${UNASSIGNED_HOME_MEMOS}件を載せます。` : ''}` : '';
-  return `## プロジェクト未定の次の一手（${counts}）\n${ownText}${memoText}アプリから行ごとに「今日やる」「完了」「却下」ができ、片付けた行はここから外れます（期日は付けられません）。\n${[...ownRows, ...rows].join('\n')}`;
+  const memoText = actions.memos.length ? `${own.length ? 'ほかは、' : ''}どのプロジェクトにも結び付いていないメモから、AIが「タスク」と分類したものと、AIが挙げた次の一手の提案を集めた一覧です。短いメモは本人の言葉のまま、長いメモは「AI要約:」を付けた一行要約で示します。分類・要約・提案はAI生成・未検証です。` : '';
+  const moveText = actions.memos.length ? `メモがプロジェクトに結び付くと、そのプロジェクトのNOWへ移ります。${actions.total_memos > UNASSIGNED_HOME_MEMOS ? `新しい${UNASSIGNED_HOME_MEMOS}件を載せます。` : ''}` : '';
+  return `## プロジェクト未定の次の一手（${counts}）\n${ownText}${memoText}アプリから行ごとに「今日やる」「完了」「却下」ができ、片付けた行はここから外れます（期日は付けられません）。${moveText}\n${[...ownRows, ...rows].join('\n')}`;
 }
