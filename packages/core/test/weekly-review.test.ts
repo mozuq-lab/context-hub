@@ -138,6 +138,12 @@ test('見直した記録は本人の報告だけで作り、HOMEとふりかえ�
   await rebuildDashboard(config, { now: week });
   expect(await home()).toContain('[週次レビューの記録が不正です](90_system/weekly-reviews/WRV-01ARZ3NDEKTSV4RRFFQ69G5FAV.json)');
   expect((await doctor(config)).issues).toContain('週次レビューの記録が不正です: 90_system/weekly-reviews/WRV-01ARZ3NDEKTSV4RRFFQ69G5FAV.json');
+  // ほかの機能の記録が壊れていても、見直しの記録と一覧の書き直しは止めない（その段だけ数えない）。
+  await vault.write('90_system/item-resolutions/RES-01ARZ3NDEKTSV4RRFFQ69G5FAV.json', '{"broken":true}\n');
+  const later = new Date('2026-11-28T03:00:00Z');
+  const again = await setWeeklyReview(config, { on: '2026-11-28', source: 'cli', now: later });
+  expect(again.deduped).toBe(false);
+  expect((await list(vault)).last_review?.id).toBe(again.weeklyReviewId);
 }, 20000);
 
 test('受付ファイルで見直しを報告でき、本文付き・日付なしの依頼は受け付けない', async () => {

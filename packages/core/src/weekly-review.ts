@@ -89,8 +89,9 @@ export const weeklyReviewListSchema = z.object({
   lingering: z.array(lingeringSchema).max(ROWS_MAX), lingering_total: z.number().int().nonnegative(),
   /** 5. 連絡待ち（頼んだ日の古い順）。checkは見直す日が来たもの。 */
   waiting: z.array(waitingSchema),
-  /** 6. 期日（期限切れ・今日・7日以内の順、同じ区分は期日の順）。dated_totalは全件の数。 */
+  /** 6. 期日（期限切れ・今日・7日以内の順、同じ区分は期日の順）。dated_totalは全件の数、dated_countsは区分ごとの全件の数。 */
   dated: z.array(datedSchema).max(ROWS_MAX), dated_total: z.number().int().nonnegative(),
+  dated_counts: z.object({ overdue: z.number().int().nonnegative(), today: z.number().int().nonnegative(), week: z.number().int().nonnegative() }).strict(),
   /** 7. 「いつかやる」の件数と、長く見直していないものの件数（行はsomeday.jsonで読む）。 */
   someday: z.object({ total: z.number().int().nonnegative(), stale: z.number().int().nonnegative() }).strict(),
 }).strict();
@@ -104,14 +105,16 @@ export interface WeeklyReviewInputs { projects?: Project[]; effective?: Effectiv
  */
 export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = new Date(), inputs: WeeklyReviewInputs = {}): Promise<WeeklyReviewList> {
   const today = todayIn(config.timezone, now), projects = inputs.projects ?? await readProjects(config), merged = mergeTargets(projects);
-  const effective = inputs.effective ?? await readEffectiveInputs(config);
+  // 壊れた記録があっても一覧は作る（その段だけ数えない）。記録の不正はHOMEとdoctorで示す。見直しの記録の後に必ず書き直すため、ここで止めない。
+  const safe = async <T>(read: () => Promise<T>, fallback: T): Promise<T> => { try { return await read(); } catch { return fallback; } };
+  const effective = inputs.effective ?? await safe(() => readEffectiveInputs(config), []);
   // 項目の根拠のメモの日付。訂正のあるメモは元のメモの日付で数える（AIの行は訂正の後も同じ話が続いているため）。
   const sinceOf = new Map<string, string>();
   for (const u of effective) for (const i of [u.chain.root, ...u.chain.revisions]) sinceOf.set(i.id, todayIn(config.timezone, new Date(u.chain.root.occurred_at)));
-  const review = await buildReviewIndex(config, { now });
-  let drafts = 0;
-  try { drafts = (await readGitDraftRecords(config)).drafts.filter(d => d.status === 'pending').length; } catch { /* 壊れた下書きの記録はHOMEで示す。 */ }
-  const schedules = await readItemSchedules(vault), resolutions = await readItemResolutions(vault);
+  const candidates = await safe(async () => (await buildReviewIndex(config, { now })).items.filter(c => c.status === 'pending' && !c.duplicateOf).length, 0);
+  const drafts = await safe(async () => (await readGitDraftRecords(config)).drafts.filter(d => d.status === 'pending').length, 0);
+  const schedules = await safe(() => readItemSchedules(vault), { records: [], problems: [] } as Awaited<ReturnType<typeof readItemSchedules>>);
+  const resolutions = await safe(() => readItemResolutions(vault), [] as Awaited<ReturnType<typeof readItemResolutions>>);
   const ref = (scope: string, i: NowItem): ItemRow => ({ scope, item_key: i.key, section: i.section, label: i.label, text: i.text });
   const rows: WeeklyReviewList['projects'] = [], lingering: z.infer<typeof lingeringSchema>[] = [], dated: z.infer<typeof datedSchema>[] = [], waiting: z.infer<typeof waitingSchema>[] = [];
   /** 期日の区分。連絡待ち・「いつかやる」・見直す日まで休ませている項目は呼ぶ側で除く。 */
@@ -174,12 +177,13 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
     schema_version: 1, generated_at: now.toISOString(),
     interval_days: WEEKLY_REVIEW_INTERVAL_DAYS, next_stale_days: WEEKLY_NEXT_STALE_DAYS, open_stale_days: WEEKLY_OPEN_STALE_DAYS, project_stale_days: config.retrieve.staleDays, someday_review_days: SOMEDAY_REVIEW_DAYS,
     last_review: last ? { id: last.id, on: last.on, created_at: last.created_at } : null,
-    inbox: { candidates: review.items.filter(c => c.status === 'pending' && !c.duplicateOf).length, drafts },
+    inbox: { candidates, drafts },
     unassigned: { actions, suggestions },
     projects: rows,
     lingering: lingering.slice(0, ROWS_MAX), lingering_total: lingering.length,
     waiting,
     dated: dated.slice(0, ROWS_MAX), dated_total: dated.length,
+    dated_counts: { overdue: dated.filter(d => d.bucket === 'overdue').length, today: dated.filter(d => d.bucket === 'today').length, week: dated.filter(d => d.bucket === 'week').length },
     someday,
   };
 }
@@ -240,8 +244,8 @@ export function weeklyReviewDigestLines(list: WeeklyReviewList, now: Date, timez
   const checks = list.waiting.filter(w => w.check).length, long = list.waiting.filter(w => waitingDays(w.since, today) >= WAITING_LONG_DAYS).length;
   lines.push(`5. 連絡待ち: ${list.waiting.length}件（見直す日が来た ${checks}件・${WAITING_LONG_DAYS}日以上 ${long}件。催促する・待つ・片付ける）`);
   for (const w of list.waiting.filter(w => w.check).slice(0, DIGEST_ROWS)) lines.push(`   - 見直す日が来た: ${place(w.scope, titles)} ${rowText(w)}（頼んでから${waitingDays(w.since, today)}日）`);
-  const count = (b: 'overdue' | 'today' | 'week') => list.dated.filter(d => d.bucket === b).length;
-  lines.push(`6. 期日: 期限切れ ${count('overdue')}件・今日 ${count('today')}件・7日以内 ${count('week')}件${list.dated_total > list.dated.length ? `（全${list.dated_total}件）` : ''}（期限切れは日付を付け直すか片付け、来週の期日を確かめる）`);
+  const count = list.dated_counts;
+  lines.push(`6. 期日: 期限切れ ${count.overdue}件・今日 ${count.today}件・7日以内 ${count.week}件（期限切れは日付を付け直すか片付け、来週の期日を確かめる）`);
   for (const d of list.dated.slice(0, DIGEST_ROWS)) lines.push(`   - ${d.bucket === 'overdue' ? '期限切れ' : d.bucket === 'today' ? '今日' : '7日以内'} ${d.due} — ${place(d.scope, titles)} ${rowText(d)}`);
   lines.push(...more(Math.min(DIGEST_ROWS, list.dated.length), list.dated_total));
   lines.push(`7. いつかやる: ${list.someday.total}件（${list.someday_review_days}日以上見直していない ${list.someday.stale}件。始める・そのまま・やめる）`, '');
