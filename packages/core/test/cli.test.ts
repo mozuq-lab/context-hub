@@ -240,3 +240,12 @@ test('CLIで週次レビューの点検の一覧を確かめ、本人の確認�
  expect(await readFile(join(root,'vault/REVIEW.md'),'utf8')).toContain(`最後に見直した日: ${done.on}（今日）`);
  expect(JSON.parse((await cli(config,['weekly-review','show'])).out)).toMatchObject({last_review:{id:done.weeklyReviewId},days_since_last_review:0});
 },30000);
+test('CLIで本人が追加した行動をプロジェクトへ移し、確認なしでは移さない',async()=>{
+ const{config}=await setup();await cli(config,['init']);expect((await cli(config,['project','add','hub','--title','集約ツール'])).code).toBe(0);
+ const added=JSON.parse((await cli(config,['item','add','_unassigned','見積もりを頼む','--confirm'])).out) as {itemKey:string};
+ expect((await cli(config,['item','move','_unassigned',added.itemKey,'hub'])).code).not.toBe(0);
+ const moved=await cli(config,['item','move','_unassigned',added.itemKey,'hub','--event-id','m1','--confirm']);expect(moved.code).toBe(0);
+ const result=JSON.parse(moved.out) as {projectId:string;itemKey:string};expect(result.projectId).toBe('hub');
+ expect((JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string;text:string}[]).map(i=>[i.key,i.text])).toEqual([[result.itemKey,'本人が追加: 見積もりを頼む']]);
+ expect(JSON.parse((await cli(config,['item','list','_unassigned'])).out)).toEqual([]);
+},15000);

@@ -20,6 +20,7 @@ import { mergeProjects,unmergeProject,readProjectMerges } from './project-merges
 import { readProjectCatalog } from './knowledge-scope.js';
 import { setItemResolution,readNowItems,readItemResolutions,activeResolutions,exclusionReasons,exclusionReasonLabels,itemKey,UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { ACTION_TEXT_CHARS } from './actions.js';
+import { moveAction } from './action-moves.js';
 import { setItemEffort,readItemEfforts,itemEfforts,itemEffortLabels,type ItemEffort } from './item-efforts.js';
 import { setItemWait,readItemWaits,effectiveWaits,WAIT_WHO_CHARS,type ItemWaiting } from './item-waits.js';
 import { setItemSomeday,readItemSomedays,effectiveSomedays,type ItemSomeday } from './item-somedays.js';
@@ -134,6 +135,10 @@ item.command('add <project> [text]').description(`本人が決めた行動を次
   // 同じ受付IDの再送で、別の内容の入力が記録されていれば項目キーを示さない（--event-idを付けて再送すると重複しない）。
   const saved=(await readInputs(c)).find(i=>i.id===result.inputId);if(saved?.kind!=='action'||saved.text!==body||saved.project!==(unassigned?undefined:id))throw new Error('同じ受付IDで別の内容が記録されています。--event-idを確認してください');
   const key=itemKey(id,'next',result.inputId,body);await rebuildDashboard(c);output({...result,projectId:id,itemKey:key});});
+// 本人が追加した行動を、別のプロジェクト・プロジェクト未定へ移す。期日・手間の目安などの記録は移した先の行動へ写り、元の行動は元の一覧から外れる。
+item.command('move <project> <key> <to>').description(`本人が追加した行動を別の置き場へ移す（projectとtoはプロジェクトのIDか${UNASSIGNED_SCOPE}）。期日・見直す日・繰り返し・手間の目安・連絡待ち・「いつかやる」は移した先の行動に引き継ぐ。戻すときは、移した先の行動をもう一度移す`)
+  .option('--event-id <id>','再送判定用ID（付けると、途中で止まった移動を同じIDで再送しても重複しない）').requiredOption('--confirm','行動と移す先を確認した本人による移動').action(async(id,key,to,opts)=>{const c=await config();
+  const result=await moveAction(c,{from:id,itemKey:key,to,source:'cli',sourceEventId:opts.eventId,occurredAt:new Date().toISOString()});await rebuildDashboard(c);output(result);});
 item.command('dismiss-hint <project> <key> <input-id>').description('「片付いたかも」が違うとき、そのメモからの候補を見送る（項目は未解決のまま）').requiredOption('--confirm','候補と引用を確認した本人による見送り').action(async(id,key,inputId,_opts)=>{const c=await config();const result=await dismissResolutionHint(c,{projectId:id,itemKey:key,inputId,source:'cli',sourceEventId:`cli:${key}:${inputId}:dismiss-hint`});await rebuildDashboard(c);output(result);});
 /** 定例の繰り返しの指定。daily・weekly・monthly、またはN日・N週・Nか月ごと（例: 14d・2w・3m）。noneで外す。 */
 function parseRepeat(value:string):RepeatRule|null{

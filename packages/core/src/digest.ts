@@ -17,6 +17,7 @@ import { todayIn } from './item-schedules.js';
 import { UNASSIGNED_TITLE } from './unassigned-actions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
 import { inputWhen } from './happened.js';
+import { actionSource } from './actions.js';
 
 const DAY = 86_400_000;
 // 以前はHTMLコメントの開始を無効にしていなかった。ほかの生成物と同じ無害化にそろえる。
@@ -147,8 +148,12 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   if (quiet.length) lines.push('## 動きのなかった進行中のプロジェクト', ...quiet, '');
   if (inactive.length) lines.push(merged.size ? '## 休止・完了・統合済み' : '## 休止・完了', ...inactive, '');
   // プロジェクトを決めずに本人が追加した行動。残っている件数と、期間内に追加・完了・却下した件数を示す（項目キーは最新の文面で決まる）。
-  const own = units.filter(u => u.input.kind === 'action' && u.input.project === undefined && Date.parse(u.input.received_at) <= now.getTime());
-  if (own.length) {
+  // プロジェクトへ移した行動は、移した先の行動が引き継ぐので数えず、期間内に移した件数だけを示す（移したのが今より後なら、まだ残っている行動として数える）。
+  const movedAt = new Map<string, string>();
+  for (const u of units) { const from = actionSource(u.input); if (from && Date.parse(u.input.received_at) <= now.getTime() && !movedAt.has(from.input_id)) movedAt.set(from.input_id, u.input.received_at); }
+  const ownAll = units.filter(u => u.input.kind === 'action' && u.input.project === undefined && Date.parse(u.input.received_at) <= now.getTime());
+  const own = ownAll.filter(u => !movedAt.has(u.input.id)), movedOut = ownAll.filter(u => inWindow(movedAt.get(u.input.id) ?? '')).length;
+  if (own.length || movedOut) {
     const closedNow = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), UNASSIGNED_SCOPE);
     const text = (u: Unit) => u.unit.chain.latest.text, state = (u: Unit) => closedNow.get(itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u)));
     // 連絡待ちの印を付けた行動は「残っている行動」に数えず、下の「連絡待ち」に示す（HOMEとアプリの件数と同じ）。
@@ -158,12 +163,12 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     try { const items = (await readNowItems(vault, UNASSIGNED_SCOPE))?.items ?? []; waitingKeys = new Set(items.filter(i => i.resolution === null && i.waiting && !i.someday).map(i => i.key)); somedayKeys = new Set(items.filter(i => i.resolution === null && i.someday).map(i => i.key)); } catch { /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
     const keyOf = (u: Unit) => itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u));
     const waitingOwn = (u: Unit) => !state(u) && waitingKeys.has(keyOf(u)), somedayOwn = (u: Unit) => !state(u) && somedayKeys.has(keyOf(u));
-    const remaining = own.filter(u => !state(u) && !waitingOwn(u) && !somedayOwn(u)), parked = own.filter(waitingOwn).length, someday = own.filter(somedayOwn).length, added = own.filter(u => inWindow(u.input.received_at));
+    const remaining = own.filter(u => !state(u) && !waitingOwn(u) && !somedayOwn(u)), parked = own.filter(waitingOwn).length, someday = own.filter(somedayOwn).length, added = ownAll.filter(u => inWindow(u.input.received_at));
     const closedIn = (action: 'resolve' | 'exclude') => own.filter(u => { const r = state(u); return r?.action === action && inWindow(r.created_at); });
     const done = closedIn('resolve'), dropped = closedIn('exclude');
     const oldest = [...remaining].sort((a, b) => Date.parse(a.input.received_at) - Date.parse(b.input.received_at) || a.input.id.localeCompare(b.input.id));
     const others = [parked ? `連絡待ち ${parked}件` : '', someday ? `いつかやる ${someday}件` : ''].filter(Boolean).join('・');
-    lines.push('## プロジェクト未定の行動', `- 残っている行動: ${remaining.length}件${others ? `（ほかに${others}）` : ''} / 期間内に追加 ${added.length}件・完了 ${done.length}件・却下 ${dropped.length}件`);
+    lines.push('## プロジェクト未定の行動', `- 残っている行動: ${remaining.length}件${others ? `（ほかに${others}）` : ''} / 期間内に追加 ${added.length}件・完了 ${done.length}件・却下 ${dropped.length}件${movedOut ? `・プロジェクトへ移した ${movedOut}件` : ''}`);
     for (const u of [...done].sort((a, b) => state(b)!.id.localeCompare(state(a)!.id)).slice(0, 5)) lines.push(`  - 完了: ${clip(text(u))} ${ref(u.input)}`);
     if (oldest.length) lines.push(`- 残っている行動（追加した順に最大5件）:`, ...oldest.slice(0, 5).map(u => `  - ${clip(text(u))} ${ref(u.input)}（${daysSince(u.input.received_at, now)}日前に追加）`));
     lines.push('');

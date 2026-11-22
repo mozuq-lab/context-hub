@@ -21,6 +21,8 @@ import { CALENDAR_PATH } from '../src/calendar.js';
 import { ingest, readIntakeReceipts } from '../src/intake.js';
 import { readInputs } from '../src/capture.js';
 import { packet } from './workflow-fixtures.js';
+import { moveAction } from '../src/action-moves.js';
+import { setItemWait } from '../src/item-waits.js';
 import type { LlmClient } from '../src/types.js';
 import type { HubConfig, OrganizeResult } from '../src/types.js';
 
@@ -503,5 +505,88 @@ describe('プロジェクト未定の行動の期日と手間の目安', () => {
     expect(section).toContain('- 残っている行動: 1件 / 期間内に追加 3件・完了 1件・却下 1件');
     expect(section).toContain('  - 完了: 書類を出す');
     expect(section).toMatch(/- 残っている行動（追加した順に最大5件）:\n {2}- 本を返す \[IN-/);
+  });
+});
+
+describe('プロジェクト未定の行動をプロジェクトへ移す', () => {
+  const action = async (config: HubConfig, text: string, at = '2026-11-01T00:00:00Z') => {
+    const saved = await capture(config, { source: 'cli', kind: 'action', occurredAt: at, text });
+    return { id: saved.inputId, key: unassignedItemKey(saved.inputId, text) };
+  };
+  const move = (config: HubConfig, from: string, itemKey: string, to: string, sourceEventId?: string) => moveAction(config, { from, itemKey, to, source: 'cli', sourceEventId, occurredAt: '2026-11-05T00:00:00Z' });
+
+  test('移すと、期日・手間の目安・連絡待ちを写して元の一覧から外し、移した先の行動をもう一度移すと戻る', async () => {
+    const { config, vault } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    const own = await action(config, '見積もりを頼む'), other = await action(config, '牛乳を買う');
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, due: '2026-12-01', reviewAfter: null, repeat: { unit: 'week', every: 2 }, source: 'cli' });
+    await setItemEffort(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, effort: 'hour', source: 'cli' });
+    await setItemWait(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, waiting: { who: '業者', since: '2026-11-02' }, source: 'cli' });
+    const moved = await move(config, UNASSIGNED_SCOPE, own.key, 'hub', 'move-1');
+    expect(moved).toMatchObject({ projectId: 'hub', deduped: false });
+    // 元の行動は、プロジェクト未定の一覧から外れる（片付けた行としても残さない）。ほかの行動は残る。
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.map(i => i.input_id)).toEqual([other.id]);
+    // 移した先の行動は、元の行動を元の行として指し、付けていた記録を引き継ぐ。
+    const item = (await readNowItems(vault, 'hub'))!.items.find(i => i.key === moved.itemKey)!;
+    expect(item).toMatchObject({ text: '見積もりを頼む', input_id: moved.inputId, resolution: null, action: { from: { input_id: own.id, text: '見積もりを頼む', key: own.key } },
+      schedule: { due: '2026-12-01', review_after: null, repeat: { unit: 'week', every: 2 } }, effort: 'hour', waiting: { since: '2026-11-02', who: '業者' } });
+    expect((await vault.read('10_projects/hub/NOW.md'))!).toContain('本人が追加: 見積もりを頼む');
+    // 写した元の記録は付け直しを求めない。
+    await rebuildDashboard(config);
+    expect((await vault.read('HOME.md'))!).not.toContain('日付を付け直す項目');
+    // 同じ受付IDの再送は、元の行動が一覧から外れた後でも重複しない。
+    expect(await move(config, UNASSIGNED_SCOPE, own.key, 'hub', 'move-1')).toMatchObject({ inputId: moved.inputId, itemKey: moved.itemKey, deduped: true });
+    await expect(move(config, UNASSIGNED_SCOPE, other.key, 'hub', 'move-1')).rejects.toThrow('同じ受付IDで別の内容');
+    // 元の行動の文面を後から直しても、プロジェクト未定へは戻らない。
+    await correctInput(config, own.id, { source: 'cli', occurredAt: '2026-11-06T00:00:00Z', text: '見積もりを2社に頼む' });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.map(i => i.input_id)).toEqual([other.id]);
+    // 戻すときは、移した先の行動をもう一度移す。記録も一緒に戻る。
+    const back = await move(config, 'hub', moved.itemKey, UNASSIGNED_SCOPE);
+    expect((await readNowItems(vault, 'hub'))!.items.some(i => i.input_id === moved.inputId)).toBe(false);
+    expect((await vault.read('10_projects/hub/NOW.md'))!).not.toContain('見積もりを頼む');
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.key === back.itemKey)).toMatchObject({ input_id: back.inputId, schedule: { due: '2026-12-01' }, effort: 'hour', waiting: { who: '業者' } });
+  });
+
+  test('受付ファイルから、元の行動を指す行動の追加として移せる', async () => {
+    const { config, vault } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    const own = await action(config, '見積もりを頼む');
+    await packet(config, { kind: 'action', project: 'hub', source: 'flutter-mac', meta: { action_from_input: own.id, action_from_text: '見積もりを頼む', action_from_key: own.key } }, '見積もりを頼む');
+    expect(await ingest(config)).toMatchObject({ accepted: 1 });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items).toEqual([]);
+    expect((await readNowItems(vault, 'hub'))!.items.map(i => [i.text, i.action?.from?.input_id])).toEqual([['見積もりを頼む', own.id]]);
+    await rebuildDashboard(config);
+    expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).action_moves).toBe(true);
+  });
+
+  test('片付けた行動・AIの行・同じ置き場・ないプロジェクト・統合済みのプロジェクトへは移さない', async () => {
+    const { config } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    await addProject(config, { id: 'old', title: '古い集約ツール' });
+    const { mergeProjects } = await import('../src/project-merges.js'), { hash } = await import('../src/storage.js'), { readFile } = await import('node:fs/promises');
+    const projectHash = async (id: string) => hash(await readFile(join(config.vaultPath, `10_projects/${id}/project.md`), 'utf8'));
+    await mergeProjects(config, { fromId: 'old', intoId: 'hub', fromHash: await projectHash('old'), intoHash: await projectHash('hub'), source: 'cli' });
+    const done = await action(config, '書類を出す'), open = await action(config, '本を返す');
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: done.key, action: 'resolve', source: 'cli' });
+    await expect(move(config, UNASSIGNED_SCOPE, done.key, 'hub')).rejects.toThrow('未解決へ戻してから');
+    const memoId = await memo(config, '講習の申込をする', '2026-11-01T09:00:00+09:00', result({ category: 'task' }));
+    await rebuildDashboard(config);
+    await expect(move(config, UNASSIGNED_SCOPE, unassignedItemKey(memoId, '講習の申込をする'), 'hub')).rejects.toThrow('本人が追加した行動');
+    await expect(move(config, UNASSIGNED_SCOPE, open.key, UNASSIGNED_SCOPE)).rejects.toThrow('同じ');
+    await expect(move(config, UNASSIGNED_SCOPE, open.key, 'none')).rejects.toThrow('移す先のプロジェクトがありません');
+    await expect(move(config, UNASSIGNED_SCOPE, open.key, 'old')).rejects.toThrow();
+    await expect(move(config, UNASSIGNED_SCOPE, 'f'.repeat(64), 'hub')).rejects.toThrow('該当する項目がありません');
+  });
+
+  test('ふりかえりでは、移した行動を残っている件数に数えず、期間内に移した件数を示す', async () => {
+    const { config } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    const now = new Date();
+    const moved = await action(config, '見積もりを頼む', new Date(now.getTime() - 2 * 86_400_000).toISOString());
+    await action(config, '本を返す', new Date(now.getTime() - 86_400_000).toISOString());
+    await moveAction(config, { from: UNASSIGNED_SCOPE, itemKey: moved.key, to: 'hub', source: 'cli', occurredAt: now.toISOString() });
+    const section = (await buildDigest(config)).split('## プロジェクト未定の行動')[1]!.split('\n## ')[0]!;
+    expect(section).toContain('- 残っている行動: 1件 / 期間内に追加 2件・完了 0件・却下 0件・プロジェクトへ移した 1件');
+    expect(section).not.toContain('見積もりを頼む');
   });
 });
