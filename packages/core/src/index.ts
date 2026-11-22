@@ -24,6 +24,7 @@ export * from './project-definition.js';
 export * from './project-merges.js';
 export * from './item-resolutions.js';
 export * from './item-schedules.js';
+export * from './item-efforts.js';
 export * from './ask.js';
 export * from './client-preferences.js';
 export * from './item-rereads.js';
