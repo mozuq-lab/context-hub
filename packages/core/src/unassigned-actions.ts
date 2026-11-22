@@ -10,6 +10,7 @@ import { ACTION_LABEL, actionSource, sourceRef } from './actions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel, type ItemSchedule } from './item-schedules.js';
 import { effectiveEfforts, effortLabel, readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
 import { effectiveWaits, readItemWaits, waitingLabel, type ItemWaitRecord } from './item-waits.js';
+import { effectiveSomedays, readItemSomedays, SOMEDAY_LABEL, type ItemSomedayRecord } from './item-somedays.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -77,7 +78,7 @@ export function buildUnassignedActions(config: HubConfig, units: EffectiveInput[
   return buildUnassigned(config, units, now, resolutions).actions;
 }
 /** 本人が行動に付けた記録（期日・見直す日・手間の目安・連絡待ち）。読めなかったときは空として一覧を作る。 */
-export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[]; waits?: ItemWaitRecord[] }
+export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[]; waits?: ItemWaitRecord[]; somedays?: ItemSomedayRecord[] }
 export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now = new Date(), resolutions: ItemResolution[] = [], records: UnassignedRecords = {}): { actions: UnassignedActions; items: NowItems } {
   const settings = secretSettings(config), hide = (s: string) => settings.enabled ? redactText(s, settings).text : s;
   const closed = activeResolutions(resolutions, UNASSIGNED_SCOPE);
@@ -107,11 +108,13 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
   const scheduled = effectiveSchedules(records.schedules ?? [], UNASSIGNED_SCOPE, ownItems, closed).byKey;
   const efforts = effectiveEfforts(records.efforts ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   const waits = effectiveWaits(records.waits ?? [], UNASSIGNED_SCOPE, ownItems, closed);
+  const somedays = effectiveSomedays(records.somedays ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   for (const item of ownOpen) {
-    const s = scheduled.get(item.key), e = efforts.get(item.key), w = waits.get(item.key);
+    const s = scheduled.get(item.key), e = efforts.get(item.key), w = waits.get(item.key), d = somedays.get(item.key);
     if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) };
     if (e) item.effort = e;
     if (w) item.waiting = w;
+    if (d) item.someday = d;
   }
   for (const unit of units) {
     const { chain, receipt } = unit, result = receipt?.result;
@@ -178,6 +181,7 @@ export async function rebuildUnassignedActionsLocked(config: HubConfig, vault: V
   try { records.schedules = (await readItemSchedules(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.efforts = (await readItemEfforts(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.waits = (await readItemWaits(vault)).records; } catch { /* 上のとおり。 */ }
+  try { records.somedays = (await readItemSomedays(vault)).records; } catch { /* 上のとおり。 */ }
   const built = buildUnassigned(config, units, now, resolutions, records);
   const items = await writeIfChanged(vault, unassignedItemsPath, built.items, raw => nowItemsSchema.parse(JSON.parse(raw)));
   return { actions: await writeIfChanged(vault, unassignedActionsPath, built.actions, raw => unassignedActionsSchema.parse(JSON.parse(raw))), items };
@@ -191,8 +195,8 @@ const clip = (s: string, n = 120) => clipText(s, n);
 /** 原文へのリンク先。空白や括弧を含むパスは、リンクが途中で切れないよう山括弧で囲む。 */
 const destination = (path: string) => /[\s()]/.test(path) ? `<${path}>` : path;
 /** 行動の行末に付ける、本人が付けた連絡待ち・日付・手間の目安の表示（なければ空文字）。連絡待ちの相手は、呼び出し側が必要なときだけ示す。 */
-export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort' | 'waiting'>): string {
-  const label = [item.waiting ? waitingLabel(item.waiting) : '', item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : ''].filter(Boolean).join('・');
+export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort' | 'waiting' | 'someday'>): string {
+  const label = [item.someday ? SOMEDAY_LABEL : '', item.waiting ? waitingLabel(item.waiting) : '', item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : ''].filter(Boolean).join('・');
   return label ? `（${label}）` : '';
 }
 /**
@@ -202,8 +206,10 @@ export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort' | 
  * 連絡待ちの行動は、HOMEの「連絡待ち」の欄に載せ、ここでは件数だけを示す（waitingを渡したときだけ。旧来の呼び出しでは数えない）。
  */
 export function unassignedActionsSection(config: HubConfig, built: { actions: UnassignedActions; items: NowItems }, paths: ReadonlyMap<string, string> = new Map(), front: ReadonlySet<string> = new Set(), waiting = false): string {
-  const { actions } = built, all = built.items.items.filter(i => i.action && i.resolution === null), waits = waiting ? all.filter(i => i.waiting).length : 0;
-  const open = waiting ? all.filter(i => !i.waiting) : all, own = open.filter(i => !front.has(i.key));
+  const { actions } = built, all = built.items.items.filter(i => i.action && i.resolution === null), waits = waiting ? all.filter(i => i.waiting && !i.someday).length : 0;
+  // 「いつかやる」へ移した行動は、HOMEの「いつかやる」の欄に載せ、ここでは件数だけを示す（waitingを渡したときだけ）。
+  const somedays = waiting ? all.filter(i => i.someday).length : 0;
+  const open = waiting ? all.filter(i => !i.waiting && !i.someday) : all, own = open.filter(i => !front.has(i.key));
   // 連絡待ちの行動しかないときは、「連絡待ち」の欄にだけ載せる。
   if (!actions.memos.length && !open.length) return '';
   const link = (inputId: string) => { const path = paths.get(inputId); return path ? `[${inputId}](${destination(path)})` : inputId; };
@@ -213,6 +219,7 @@ export function unassignedActionsSection(config: HubConfig, built: { actions: Un
     ...(own.length > UNASSIGNED_HOME_ACTIONS ? [`- ほか本人が追加した行動${own.length - UNASSIGNED_HOME_ACTIONS}件（アプリの「次の一手」で確認）`] : []),
     ...(moved ? [`- 期日が近い行動${moved}件は、「次の一手」の期日の欄で示します`] : []),
     ...(waits ? [`- 連絡待ちの行動${waits}件は、「連絡待ち」の欄で示します`] : []),
+    ...(somedays ? [`- 「いつかやる」へ移した行動${somedays}件は、「いつかやる」の欄で示します`] : []),
   ];
   const rows = actions.memos.slice(0, UNASSIGNED_HOME_MEMOS).flatMap(m => [
     `- ${dateLabel(m.occurred_at, config.timezone).slice(0, 10)} ${m.own_words ? '' : 'AI要約: '}${clip(m.text)} — [${m.input_id}](${destination(m.path)})${m.task ? ' / タスク候補' : ''}`,

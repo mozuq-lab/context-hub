@@ -193,3 +193,34 @@ test('CLIで連絡待ちの印を付けるとHOMEの次の一手から外れて�
  expect(await home()).toContain('  - 利用者に見せる');
  expect(await home()).not.toContain('## 連絡待ち');
 },20000);
+test('CLIで項目を「いつかやる」へ移すとHOMEの次の一手から外れ、そのまま・戻すができ、休止中のプロジェクトも一覧に並ぶ',async()=>{
+ const{root,config}=await setup();await cli(config,['init']);
+ await cli(config,['project','add','hub','--title','集約ツール']);
+ await cli(config,['project','add','old','--title','昔の企画']);
+ await cli(config,['add','--kind','work-summary','--project','hub','--tool','codex','--occurred-at','2026-10-30T00:00:00Z'],'## 次の一手\n- [確認済み] 利用者に見せる\n- [確認済み] 名前を決める\n');
+ expect((await cli(config,['cycle'])).code).toBe(0);
+ const key=(JSON.parse((await cli(config,['item','list','hub'])).out) as {key:string;text:string}[]).find(i=>i.text==='利用者に見せる')!.key;
+ const home=()=>readFile(join(root,'vault/HOME.md'),'utf8');
+ expect((await cli(config,['item','someday','hub',key])).code).not.toBe(0);
+ expect((await cli(config,['item','someday','hub',key,'--keep','--confirm'])).code).not.toBe(0);
+ expect((await cli(config,['item','someday','hub',key,'--keep','--clear','--confirm'])).code).not.toBe(0);
+ const moved=JSON.parse((await cli(config,['item','someday','hub',key,'--confirm'])).out);
+ expect(moved).toMatchObject({deduped:false,someday:{since:expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/)}});
+ // 同じ内容をもう一度送ると、記録後の停止からの回復として同じ受付IDで受け付ける。
+ expect(JSON.parse((await cli(config,['item','someday','hub',key,'--confirm'])).out)).toMatchObject({deduped:true});
+ expect(JSON.parse((await cli(config,['item','list','hub'])).out).find((i:{key:string})=>i.key===key).someday).toMatchObject({since:moved.someday.since});
+ expect(await home()).not.toContain('  - 利用者に見せる');
+ expect(await home()).toContain('## いつかやる（1件）');
+ expect(await readFile(join(root,'vault/10_projects/hub/NOW.md'),'utf8')).toContain('利用者に見せる');
+ expect(JSON.parse((await cli(config,['item','someday','hub',key,'--keep','--confirm'])).out)).toMatchObject({someday:{since:moved.someday.since,reviewed:moved.someday.since}});
+ const hash=JSON.parse((await cli(config,['project','list'])).out).find((p:{id:string})=>p.id==='old').hash;
+ expect((await cli(config,['someday','keep-project','old','--confirm'])).code).not.toBe(0);
+ expect((await cli(config,['project','status','old','--set','paused','--hash',hash,'--confirm'])).code).toBe(0);
+ expect((await cli(config,['someday','keep-project','old','--confirm'])).code).toBe(0);
+ const listed=JSON.parse((await cli(config,['someday','list'])).out) as {kind:string;stale:boolean}[];
+ expect(listed.map(e=>e.kind)).toEqual(['item','project']);
+ expect(listed.every(e=>e.stale===false)).toBe(true);
+ expect((await cli(config,['someday','idea','IDEA-00000000000000000000000000','bogus','--confirm'])).code).not.toBe(0);
+ expect(JSON.parse((await cli(config,['item','someday','hub',key,'--clear','--confirm'])).out)).toMatchObject({someday:null});
+ expect(await home()).toContain('  - 利用者に見せる');
+},30000);

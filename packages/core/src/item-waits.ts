@@ -3,6 +3,7 @@ import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { ItemTargetError, activeResolutions, itemScopeSchema, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection } from './item-resolutions.js';
 import { addDays, assertRecordTarget, effectiveItemRecords, itemRecordScope, scheduleDateSchema, todayIn } from './item-schedules.js';
+import { SomedayError } from './item-somedays.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -119,6 +120,8 @@ export async function setItemWait(config: HubConfig, request: ItemWaitRequest): 
       if (latest) return { projectId: r.projectId, itemKey: r.itemKey, waitId: latest.id, deduped: true };
     }
     if (r.waiting === null && !current) throw new Error('この項目は連絡待ちではありません');
+    // 「いつかやる」へ移した項目は、今は取り組まない項目。待つ相手がいるなら、先に元の欄へ戻してもらう。
+    if (r.waiting !== null && !current && item.someday) throw new SomedayError({ code: 'someday-refused', cause: 'someday' });
     if (unchanged) throw new Error('この項目には既に同じ連絡待ちが付いています');
     // 引き継いだ印を外すときは、引き継ぎ元の記録を外す（項目のキーで外しても引き継ぎ元が残るため）。
     const target = r.waiting === null && current && current.item_key !== r.itemKey ? { key: current.item_key, section: current.section, text: current.text, input_id: current.input_id } : item;
