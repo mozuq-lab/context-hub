@@ -133,12 +133,15 @@ export async function buildSomedayList(config: HubConfig, vault: Vault, now = ne
   return { schema_version: 1, generated_at: now.toISOString(), review_days: SOMEDAY_REVIEW_DAYS, entries: sortSomedayEntries(entries) };
 }
 
-/** Writerロックを持つ呼び出し元から使う。一覧をアプリが読む派生物として書く（内容が変わったときだけ）。 */
-export async function rebuildSomedayLocked(config: HubConfig, vault: Vault, now = new Date(), projects?: Project[]): Promise<SomedayList> {
+/**
+ * Writerロックを持つ呼び出し元から使う。一覧をアプリが読む派生物として書く（内容が変わったときだけ）。
+ * forceは、見直しを記録した直後に、一覧の中身が変わらなくても書き直す（アプリは書いた日時で依頼の反映を確かめるため）。
+ */
+export async function rebuildSomedayLocked(config: HubConfig, vault: Vault, now = new Date(), projects?: Project[], force = false): Promise<SomedayList> {
   const built = await buildSomedayList(config, vault, now, projects), raw = await vault.read(somedayListPath);
   let old: SomedayList | undefined;
   if (raw !== undefined) try { old = somedayListSchema.parse(JSON.parse(raw)); } catch { /* 壊れた一覧は作り直す。 */ }
-  if (old && JSON.stringify({ ...old, generated_at: '' }) === JSON.stringify({ ...somedayListSchema.parse(JSON.parse(JSON.stringify(built))), generated_at: '' })) return old;
+  if (old && !force && JSON.stringify({ ...old, generated_at: '' }) === JSON.stringify({ ...somedayListSchema.parse(JSON.parse(JSON.stringify(built))), generated_at: '' })) return old;
   await vault.write(somedayListPath, JSON.stringify(built, null, 2) + '\n');
   return built;
 }
@@ -185,14 +188,16 @@ export async function setSomedayReview(config: HubConfig, request: SomedayReview
   if (r.on > addDays(todayIn(config.timezone, r.now), 1)) throw new Error('判断した日に先の日付は付けられません');
   const result = (reviewId: string, deduped: boolean): SomedayReviewResult => ({ target: r.target, targetId: r.targetId, action: r.action, reviewId, deduped });
   return vault.withLock(async () => {
+    // 記録を増やさずに受け付けるときは、既にある記録のIDを返す（アプリはその記録の時刻で反映を確かめる）。
+    const deduped = (reviewId: string) => result(reviewId, true);
     const { records } = await readSomedayReviews(vault);
     if (r.sourceEventId) {
       const previous = records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
       if (previous) {
         if (previous.target !== r.target || previous.target_id !== r.targetId || previous.action !== r.action || previous.on !== r.on) throw new Error('同じ受付IDで別の見直しが記録されています');
         // 記録の後、一覧を作り直す前に停止した場合に備えて作り直す。
-        await rebuildSomedayLocked(config, vault);
-        return result(previous.id, true);
+        await rebuildSomedayLocked(config, vault, new Date(), undefined, true);
+        return deduped(previous.id);
       }
     }
     const mine = records.filter(x => x.target === r.target && x.target_id === r.targetId), latest = mine.at(-1);
@@ -201,23 +206,23 @@ export async function setSomedayReview(config: HubConfig, request: SomedayReview
       if (!project) throw new SomedayError({ code: 'someday-refused', cause: 'missing' });
       assertNotMerged(projects, r.targetId);
       if (lifecycleOf(project) !== 'paused') throw new SomedayError({ code: 'someday-refused', cause: 'not-paused' });
-      if (r.sourceEventId && latest?.action === 'keep' && latest.on === r.on) return result(latest.id, true);
+      if (r.sourceEventId && latest?.action === 'keep' && latest.on === r.on) return deduped(latest.id);
     } else {
       if (!(await readIdeas(vault)).some(i => i.id === r.targetId)) throw new SomedayError({ code: 'someday-refused', cause: 'missing' });
       const state = ideaStates(mine).get(r.targetId) ?? null;
       if (r.action === 'add' && state) {
-        if (r.sourceEventId && latest) return result(latest.id, true);
+        if (r.sourceEventId && latest) return deduped(latest.id);
         throw new SomedayError({ code: 'someday-refused', cause: 'listed' });
       }
       if (r.action !== 'add' && !state) {
-        if (r.sourceEventId && latest?.action === r.action) return result(latest.id, true);
+        if (r.sourceEventId && latest?.action === r.action) return deduped(latest.id);
         throw new SomedayError({ code: 'someday-refused', cause: 'not-listed' });
       }
-      if (r.action === 'keep' && state!.reviewed === r.on && r.sourceEventId) return result(latest!.id, true);
+      if (r.action === 'keep' && state!.reviewed === r.on && r.sourceEventId) return deduped(latest!.id);
     }
     const record: SomedayReview = { schema_version: 1, id: `SDR-${ulid()}`, target: r.target, target_id: r.targetId, action: r.action, on: r.on, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString() };
     if (!await vault.create(reviewPath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('「いつかやる」の記録が競合しました');
-    await rebuildSomedayLocked(config, vault);
+    await rebuildSomedayLocked(config, vault, new Date(), undefined, true);
     return result(record.id, false);
   });
 }

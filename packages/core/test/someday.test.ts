@@ -171,8 +171,11 @@ test('休止中のプロジェクトと、置いたアイデアが並び、そ�
   const review = (await vault.read('REVIEW.md'))!;
   expect(review).toMatch(/## いつかやる\n- いつかやる: 2件（項目 0件・休止中のプロジェクト 1件・アイデア 1件。うち30日以上見直していない \d件）/);
 
-  // プロジェクトのそのまま。
+  // プロジェクトのそのまま。休止した日と同じ日の見直しで一覧が変わらなくても、一覧は書き直す（アプリが反映を確かめられるように）。
+  const before = (await list(vault)).generated_at;
+  await new Promise(resolve => setTimeout(resolve, 5));
   await setSomedayReview(config, { target: 'project', targetId: 'old', action: 'keep', on: today, source: 'cli' });
+  expect((await list(vault)).generated_at > before).toBe(true);
   // やめる・始めると一覧から外れ、もう一度置ける。
   await setSomedayReview(config, { target: 'idea', targetId: idea, action: 'drop', on: '2026-11-20', source: 'cli', now: clock });
   entries = (await list(vault)).entries;
