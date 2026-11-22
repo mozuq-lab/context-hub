@@ -15,7 +15,7 @@ import { rebuildDashboard } from './dashboard.js';
 import { rebuildDigest } from './digest.js';
 import { rebuildReferences } from './references.js';
 import { setProjectStatus,projectStatuses,lifecycleOf } from './project-status.js';
-import { setProjectDefinition,editDefinition,normalizeDefinition,definitionLimitMessage } from './project-definition.js';
+import { setProjectDefinition,editDefinition,normalizeDefinition,definitionErrorMessage } from './project-definition.js';
 import { mergeProjects,unmergeProject,readProjectMerges } from './project-merges.js';
 import { readProjectCatalog } from './knowledge-scope.js';
 import { setItemResolution,readNowItems,readItemResolutions,activeResolutions,exclusionReasons,exclusionReasonLabels,itemKey,UNASSIGNED_SCOPE } from './item-resolutions.js';
@@ -57,6 +57,8 @@ async function config(overrides:ConfigOverrides={}): Promise<HubConfig> {
   return loadConfig(opts.config,{...(opts.vault?{vaultPath:opts.vault}:{}),...(opts.state?{statePath:opts.state}:{}),...overrides});
 }
 function positive(value:string): number { const n=Number(value);if(!Number.isSafeInteger(n)||n<1)throw new Error('正の整数を指定してください');return n; }
+/** CLIで書く望む結果。引数の中の「\\n」を改行として読む。 */
+const outcomeArg=(value:string)=>value.replace(/\\n/g,'\n');
 async function inputText(text:string|undefined, file:string|undefined,max:number):Promise<string> {
   if(text!==undefined&&file)throw new Error('本文と --file は同時に指定できません');
   if(text!==undefined)return text;
@@ -78,19 +80,23 @@ program.command('add [text]').description('原文を保存').option('--file <pat
 const project=program.command('project').description('人によるプロジェクト管理');
 program.command('correct <id> [text]').description('元原文を保持して最新入力を訂正').option('--file <path>','訂正文ファイル').option('--event-id <id>','再送判定ID').option('--source <name>','出典名','cli-correction')
   .action(async(id,text,opts)=>{const c=await config();output(await correctInput(c,id,{text:await inputText(text,opts.file,c.capture.maxInputChars),source:opts.source,sourceEventId:opts.eventId,occurredAt:new Date().toISOString()}));});
-project.command('add <id>').requiredOption('--title <text>','プロジェクト名').option('--aliases <csv>','別名、カンマ区切り').option('--keywords <csv>','検索語、カンマ区切り')
-  .action(async(id,opts)=>output(await addProject(await config(),{id,title:opts.title,aliases:opts.aliases?.split(',')??[],keywords:opts.keywords?.split(',')??[]})));
+project.command('add <id>').requiredOption('--title <text>','プロジェクト名').option('--aliases <csv>','別名、カンマ区切り').option('--keywords <csv>','検索語、カンマ区切り').option('--outcome <text>','望む結果（何をもって完了か。改行は\\nで書けます）')
+  .action(async(id,opts)=>output(await addProject(await config(),{id,title:opts.title,aliases:opts.aliases?.split(',')??[],keywords:opts.keywords?.split(',')??[],...(opts.outcome!==undefined?{outcome:outcomeArg(opts.outcome)}:{})})));
 project.command('list').description('定義・状態・確認用ハッシュを一覧').action(async()=>{const c=await config();const projects=await readProjects(c),catalog=await readProjectCatalog(new Vault(c));output(projects.map(p=>({...p,lifecycle:lifecycleOf(p),hash:catalog.find(x=>x.id===p.id)?.hash})));});
 project.command('status <id>').description('本人の判断でプロジェクトを進行中・休止・完了に切り替える').addOption(new Option('--set <status>','新しい状態').choices([...projectStatuses]).makeOptionMandatory()).requiredOption('--hash <sha256>','project listで確認したproject.mdのハッシュ').requiredOption('--confirm','定義を確認した本人による変更').action(async(id,opts)=>{const c=await config();// 同じ確認内容の再実行は、記録後・定義書込前の停止からの回復として扱う。
 const result=await setProjectStatus(c,{projectId:id,status:opts.set,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:${id}:${opts.hash}:${opts.set}`});await rebuildDashboard(c);output(result);});
 const collect=(value:string,previous:string[])=>[...previous,value];
-project.command('edit <id>').description('本人の確認でプロジェクトの名前・別名・キーワードを書き換える（帰属未確定のメモは次のcycleで再関連付けの対象になる）')
-  .option('--title <text>','新しい名前').option('--add-alias <text>','追加する別名（複数指定可）',collect,[]).option('--remove-alias <text>','削除する別名（複数指定可）',collect,[])
+project.command('edit <id>').description('本人の確認でプロジェクトの名前・別名・キーワード・望む結果を書き換える（帰属未確定のメモは次のcycleで再関連付けの対象になる）')
+  .option('--title <text>','新しい名前').option('--outcome <text>','新しい望む結果（何をもって完了か。改行は\\nで書けます）').option('--clear-outcome','望む結果を外す').option('--add-alias <text>','追加する別名（複数指定可）',collect,[]).option('--remove-alias <text>','削除する別名（複数指定可）',collect,[])
   .option('--add-keyword <text>','追加するキーワード（複数指定可）',collect,[]).option('--remove-keyword <text>','削除するキーワード（複数指定可）',collect,[])
   .requiredOption('--hash <sha256>','project listで確認したproject.mdのハッシュ').requiredOption('--confirm','定義を確認した本人による変更')
   .action(async(id,opts)=>{const c=await config(),current=(await readProjects(c)).find(p=>p.id===id);if(!current)throw new Error('プロジェクトが見つかりません');
-   const edited=editDefinition(current,{title:opts.title,addAliases:opts.addAlias,removeAliases:opts.removeAlias,addKeywords:opts.addKeyword,removeKeywords:opts.removeKeyword});
-   let next;try{next=normalizeDefinition(edited);}catch{throw new Error(definitionLimitMessage);}
+   if(opts.outcome!==undefined&&opts.clearOutcome)throw new Error('--outcomeと--clear-outcomeは同時に指定できません');
+   const outcome=opts.clearOutcome?'':opts.outcome!==undefined?outcomeArg(opts.outcome):undefined;
+   const edited=editDefinition({title:current.title,aliases:current.aliases,keywords:current.keywords,...(current.outcome!==undefined?{outcome:current.outcome}:{})},{title:opts.title,addAliases:opts.addAlias,removeAliases:opts.removeAlias,addKeywords:opts.addKeyword,removeKeywords:opts.removeKeyword,...(outcome!==undefined?{outcome}:{})});
+   // 望む結果を指定しないときは送らない（手で書いた望む結果を正規化で書き換えない）。
+   if(outcome===undefined)delete edited.outcome;
+   let next;try{next=normalizeDefinition(edited);}catch(error){throw new Error(definitionErrorMessage(error));}
    // 同じ確認内容の再実行は、記録後・定義書込前の停止からの回復として扱う。
    const result=await setProjectDefinition(c,{projectId:id,expectedHash:opts.hash,...next,source:'cli',sourceEventId:`cli:${id}:${opts.hash}:${hash(JSON.stringify(next))}`});await rebuildDashboard(c);output({...result,definition:next});});
 // 同じ引数での再実行（途中で止まった操作の回復）には、最後の記録と同じ受付IDを使う。
@@ -111,7 +117,10 @@ project.command('unmerge <from>').description('統合を取り消し、統合元
    const into=from.merged_into??(await readProjectMerges(new Vault(c))).filter(m=>m.from_id===id).at(-1)?.into_id;if(!into)throw new Error('このプロジェクトは統合されていません');
    const result=await unmergeProject(c,{fromId:id,intoId:into,fromHash:opts.hash,intoHash:opts.intoHash,source:'cli',sourceEventId:await mergeEventId(c,'unmerge',id,into,opts.hash,opts.intoHash)});await rebuildDashboard(c);output(result);});
 project.command('candidates').action(async()=>output(await listProjectCandidates(await config())));
-for(const action of ['approve','reject'] as const)project.command(`${action} <id>`).requiredOption('--hash <sha256>','確認した候補のハッシュ').requiredOption('--token <token>','候補の確認トークン').requiredOption('--confirm','候補詳細を読んだ人の明示確認').action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`})));
+for(const action of ['approve','reject'] as const){const command=project.command(`${action} <id>`).requiredOption('--hash <sha256>','確認した候補のハッシュ').requiredOption('--token <token>','候補の確認トークン').requiredOption('--confirm','候補詳細を読んだ人の明示確認');
+ // 採用するときは、望む結果を本人が書き添えられる（AIの案には含めない）。
+ if(action==='approve')command.option('--outcome <text>','作るプロジェクトの望む結果（改行は\\nで書けます）');
+ command.action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`,...(opts.outcome!==undefined?{outcome:outcomeArg(opts.outcome)}:{})})));}
 const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決にする、誤りとして外す、または未解決へ戻す');
 item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,repeat:i.schedule?.repeat?repeatLabel(i.schedule.repeat):null,effort:i.effort??null,waiting:i.waiting?{since:i.waiting.since,who:i.waiting.who??null}:null,someday:i.someday?{since:i.someday.since,reviewed:i.someday.reviewed}:null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{}),...(i.action?{added_by_person:true,...(i.action.from?{from:i.action.from}:{})}:{})})));});
 for(const action of ['resolve','reopen'] as const)item.command(`${action} <project> <key>`).description(action==='resolve'?'項目を完了・解決にする':'解決済み、または誤りとして外した項目を未解決へ戻す').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,_opts)=>{const c=await config(),vault=new Vault(c);

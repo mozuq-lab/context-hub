@@ -4,7 +4,7 @@ import { associatedProjects } from './views.js';
 import { readEffectiveInputs, correctionNotice, type EffectiveInput } from './effective-inputs.js';
 import { readInputs } from './capture.js';
 import { readCorrectionChains } from './corrections.js';
-import { readProjects, projectIdSchema, resolveProject } from './projects.js';
+import { OUTCOME_HEADING, outcomeSection, readProjects, projectIdSchema, resolveProject } from './projects.js';
 import { Vault, parseMarkdown, hash } from './storage.js';
 import type { HubConfig, Input } from './types.js';
 import { redactText, secretSettings } from './secrets.js';
@@ -175,6 +175,10 @@ export async function find(config: HubConfig, query: string, options: FindOption
   if (!options.pagingHint) return withBroken(lines.join('\n\n'));
   return withBroken(lines.join('\n\n') + (offset > 0 || more ? `\n\n該当${hits.length}件中 ${offset+1}〜${offset+page.length}件目${more ? `。続きは --offset ${offset+page.length}` : ''}` : ''));
 }
+/** NOWの自動領域の先頭にある望む結果の欄を除く。 */
+function withoutOutcome(auto: string): string {
+  return auto.startsWith(`${OUTCOME_HEADING}\n`) ? auto.replace(/^[^\n]*\n(?:- [^\n]*\n)*\n*/, '') : auto;
+}
 export async function resume(config: HubConfig, project: string): Promise<string> {
   projectIdSchema.parse(project);
   const projects = await readProjects(config), requested = projects.find(p=>p.id===project);
@@ -185,7 +189,9 @@ export async function resume(config: HubConfig, project: string): Promise<string
   const definition = requested;
   const path = `10_projects/${project}/NOW.md`, raw = await new Vault(config).read(path);
   const notices=(await readEffectiveInputs(config)).filter(e=>e.pendingCorrection&&(e.chain.root.project===project||(e.receipt&&associatedProjects(e.chain.root,e.receipt,config).includes(project)))).map(correctionNotice).join('\n');
-  if (!raw) return `# ${definition.title}\n\n# 現在地\n不明（整理済みの根拠なし）\n\n# 次の一手\n不明\n\n# 未解決\n不明\n`;
+  // 望む結果は今の定義から示す（NOWに載せた欄は、手で書き換えた定義をまだ反映していないことがあるため置き換える）。
+  const outcome = outcomeSection(definition.outcome);
+  if (!raw) return `# ${definition.title}\n\n${outcome}# 現在地\n不明（整理済みの根拠なし）\n\n# 次の一手\n不明\n\n# 未解決\n不明\n`;
   let parsed: { meta: Record<string, unknown>; text: string };
   try { parsed = parseMarkdown(raw); } catch { return '不明（NOW.mdを読めません。frontmatterの形式が不正です。doctorで確認してください）'; }
   const {meta,text} = parsed, auto = /<!-- ctx:auto:start -->([\s\S]*?)<!-- ctx:auto:end -->/.exec(text);
@@ -193,7 +199,7 @@ export async function resume(config: HubConfig, project: string): Promise<string
   const storedHash = typeof meta.generated_hash==='string'?meta.generated_hash.replace(/^sha256:/,''):'';
   const intact = [hash(auto[1]),hash(auto[1].trim()),hash(auto[0])].includes(storedHash);
   const conflicts = (await new Vault(config).files('90_system/conflicts')).some(p=>p.includes(`NOW.${project}.`));
-  return `# ${definition.title}\n\n更新: ${displayTime(String(meta.generated_at))} / 最終根拠: ${displayTime(String(meta.last_evidence_at))}\n参照: [NOW.md](${path})\n${notices?notices+'\n':''}${!intact?'注意: 自動領域に手動変更またはハッシュ欠損があります。\n':''}${conflicts?'注意: 自動領域が手で変更されたため、このNOWは更新が止まっています。`ctx conflict list`で差分を確認し、`ctx conflict resolve`で生成版に戻せます（手で変えた行はメモとして残ります）。\n':''}\n${auto[1].trim().replace(/\]\(\.\.\/\.\.\/(00_inbox\/[^)]*)\)/g, ']($1)')}\n`;
+  return `# ${definition.title}\n\n更新: ${displayTime(String(meta.generated_at))} / 最終根拠: ${displayTime(String(meta.last_evidence_at))}\n参照: [NOW.md](${path})\n${notices?notices+'\n':''}${!intact?'注意: 自動領域に手動変更またはハッシュ欠損があります。\n':''}${conflicts?'注意: 自動領域が手で変更されたため、このNOWは更新が止まっています。`ctx conflict list`で差分を確認し、`ctx conflict resolve`で生成版に戻せます（手で変えた行はメモとして残ります）。\n':''}\n${outcome}${withoutOutcome(auto[1].trim()).replace(/\]\(\.\.\/\.\.\/(00_inbox\/[^)]*)\)/g, ']($1)')}\n`;
 }
 export async function context(config: HubConfig, project: string, maxChars = config.retrieve.contextMaxChars): Promise<string> {
   projectIdSchema.parse(project);

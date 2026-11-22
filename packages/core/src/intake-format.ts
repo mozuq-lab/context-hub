@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { inputIdSchema } from './capture.js';
-import { projectIdSchema } from './projects.js';
+import { PROJECT_OUTCOME_CHARS, normalizeOutcome, outcomeLimitMessage, projectIdSchema } from './projects.js';
 import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, PROJECT_TITLE_CHARS } from './project-definition.js';
 import { projectStatusSchema } from './project-status.js';
 import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema, itemScopeSchema, UNASSIGNED_EXCLUSION_REASON, UNASSIGNED_SCOPE } from './item-resolutions.js';
@@ -23,13 +23,15 @@ import { PERSON_ALIASES_MAX, PERSON_NAME_CHARS, personActions, personIdSchema } 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
 const base = { schema_version: z.literal(1), request_id: requestIdSchema, source: z.string().min(1).max(200), occurred_at: intakeTimestamp };
+// 望む結果。上限と使えない文字は正規化した後の文で確かめる（本体が同じ規則で正規化して書く）。
+const outcomeField = z.string().max(PROJECT_OUTCOME_CHARS * 4).refine(s => { try { normalizeOutcome(s); return true; } catch { return false; } }, outcomeLimitMessage);
 // kind: actionは本人が直接追加する次の一手。projectを省くとプロジェクト未定の次の一手に載る。本文は1行・200文字以内（本体のcaptureが検証する）。
 // happened_onは本人が後から記録した出来事の日付。occurred_atは実際に書いた日時のまま送る（actionには付けられない）。
 // continuesは続きとして書いたときの前のメモの入力ID（actionには付けられない）。projectを省くと前のメモで指定したプロジェクトを引き継ぐ。
 const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), continues: inputIdSchema.optional(), text: z.string() }).strict().refine(v => v.kind !== 'action' || v.continues === undefined, '行動には前のメモを指定できません');
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
 // cover_idsは、同じ対象の案として同じ判断にまとめる確認待ちの案。cover_hashesは同じ順で、本人が確認した内容のハッシュ。本体が同じ組の案かを検証する。
-const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), cover_ids: z.array(z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), cover_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), confirmed: z.literal(true), text: z.string() }).strict().refine(v => (v.cover_ids?.length ?? 0) === (v.cover_hashes?.length ?? 0), 'まとめる案のIDとハッシュの数が一致しません');
+const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), cover_ids: z.array(z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), cover_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), outcome: outcomeField.optional(), confirmed: z.literal(true), text: z.string() }).strict().refine(v => v.outcome === undefined || v.operation === 'project-approve', '望む結果は採用のときだけ送ります').refine(v => (v.cover_ids?.length ?? 0) === (v.cover_hashes?.length ?? 0), 'まとめる案のIDとハッシュの数が一致しません');
 const knowledgeBase={...base,candidate_id:z.string().regex(/^CAN-[0-9A-HJKMNP-TV-Z]{26}$/),candidate_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()};
 const knowledgeApprove=z.union([
  z.object({...knowledgeBase,operation:z.literal('knowledge-approve'),scope:z.literal('global')}).strict(),
@@ -59,9 +61,10 @@ const weeklyReview=z.object({...base,operation:z.literal('weekly-review'),on:sch
 const itemHintDismiss=z.object({...base,operation:z.literal('item-hint-dismiss'),project_id:projectIdSchema,item_key:itemKeySchema,input_id:inputIdSchema,confirmed:z.literal(true),text:z.string()}).strict();
 const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss'),draft_id:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),draft_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 名前・別名・キーワードは変更後の全体を送る。上限と重複の整理は本体が検証する。
-const projectDefinition=z.object({...base,operation:z.literal('project-definition'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),title:z.string().max(PROJECT_TITLE_CHARS),aliases:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),keywords:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),confirmed:z.literal(true),text:z.string()}).strict();
+// 望む結果は任意。送らなければ今の望む結果を保ち（対応していない版のアプリの依頼で消さない）、空文字なら外す。
+const projectDefinition=z.object({...base,operation:z.literal('project-definition'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),title:z.string().max(PROJECT_TITLE_CHARS),aliases:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),keywords:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),outcome:outcomeField.optional(),confirmed:z.literal(true),text:z.string()}).strict();
 // 本文は任意の最初のメモ。空なら作成だけを行う。
-const projectCreate=z.object({...base,operation:z.literal('project-create'),project_id:newProjectIdSchema,title:z.string(),aliases:z.array(z.string()),keywords:z.array(z.string()),confirmed:z.literal(true),text:z.string()}).strict().superRefine((value,ctx)=>{const result=projectCreateFieldsSchema.safeParse({title:value.title,aliases:value.aliases,keywords:value.keywords});if(!result.success)ctx.addIssue({code:z.ZodIssueCode.custom,message:'プロジェクトの名前・別名・キーワードが不正です'});});
+const projectCreate=z.object({...base,operation:z.literal('project-create'),project_id:newProjectIdSchema,title:z.string(),aliases:z.array(z.string()),keywords:z.array(z.string()),outcome:outcomeField.optional(),confirmed:z.literal(true),text:z.string()}).strict().superRefine((value,ctx)=>{const result=projectCreateFieldsSchema.safeParse({title:value.title,aliases:value.aliases,keywords:value.keywords});if(!result.success)ctx.addIssue({code:z.ZodIssueCode.custom,message:'プロジェクトの名前・別名・キーワードが不正です'});});
 const conflictResolve=z.object({...base,operation:z.literal('conflict-resolve'),target:resolvableTargetSchema,target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 2件のアイデアを束ねる（link）か、別の話とする（separate）。ハッシュは索引で確認した内容のもので、束ねるときだけ一致を確かめる。
 const ideaLink=z.object({...base,operation:z.literal('idea-link'),idea_ids:z.tuple([ideaIdSchema,ideaIdSchema]).refine(([a,b])=>a!==b,'異なる2件のアイデアを指定してください'),idea_hashes:z.tuple([z.string().regex(/^[a-f0-9]{64}$/),z.string().regex(/^[a-f0-9]{64}$/)]),action:ideaLinkActionSchema,confirmed:z.literal(true),text:z.string()}).strict();

@@ -3,12 +3,15 @@ import { ulid } from 'ulid';
 import { parse, parseDocument, isMap, isScalar, isSeq } from 'yaml';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { frontmatterParts, withFrontmatterBody } from './frontmatter-lines.js';
-import { assertNotMerged, projectIdSchema, projectSchema, readProjects } from './projects.js';
+import { PROJECT_OUTCOME_CHARS, assertNotMerged, normalizeOutcome, outcomeLines, projectIdSchema, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig } from './types.js';
 
-/** 人が手入れするプロジェクト定義の項目。AIの帰属推定と検索に使われる。 */
-export interface ProjectDefinition { title: string; aliases: string[]; keywords: string[] }
+/**
+ * 人が手入れするプロジェクト定義の項目。AIの帰属推定と検索に使われる。
+ * outcomeは望む結果。無い（undefined）ときは今の値を変えない（望む結果に対応していない版のアプリ・CLIの依頼で消さない）。空文字は外す。
+ */
+export interface ProjectDefinition { title: string; aliases: string[]; keywords: string[]; outcome?: string }
 export const PROJECT_TERMS_MAX = 50;
 export const PROJECT_TERM_CHARS = 100;
 export const PROJECT_TITLE_CHARS = 200;
@@ -18,12 +21,15 @@ export const projectDefinitionSchema = z.object({
   title: z.string().min(1).max(PROJECT_TITLE_CHARS),
   aliases: z.array(termSchema).max(PROJECT_TERMS_MAX),
   keywords: z.array(termSchema).max(PROJECT_TERMS_MAX),
+  outcome: z.string().max(PROJECT_OUTCOME_CHARS).optional(),
 }).strict();
 /** 変更前の定義。人が手で書いた値なので、project.mdの読取と同じ範囲（空の語・前後の空白を含む）を記録できる。 */
 const storedDefinitionSchema = z.object({
   title: z.string().min(1).max(PROJECT_TITLE_CHARS),
   aliases: z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),
   keywords: z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),
+  // 望む結果を書いていなかった定義では無い。手で書いた長い文もそのまま記録する。
+  outcome: z.string().optional(),
 }).strict();
 const changeIdSchema = z.string().regex(/^PDEF-[0-9A-HJKMNP-TV-Z]{26}$/);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -35,7 +41,7 @@ export const projectDefinitionChangeSchema = z.object({
 }).strict();
 export type ProjectDefinitionChange = z.infer<typeof projectDefinitionChangeSchema>;
 export interface ProjectDefinitionRequest extends ProjectDefinition { projectId: string; expectedHash: string; source: string; sourceEventId?: string }
-export type ProjectDefinitionField = 'title' | 'aliases' | 'keywords';
+export type ProjectDefinitionField = 'title' | 'aliases' | 'keywords' | 'outcome';
 export interface ProjectDefinitionResult { projectId: string; changeId: string; deduped: boolean; changed: ProjectDefinitionField[] }
 const changeDir = '90_system/project-definitions';
 
@@ -51,12 +57,14 @@ export function normalizeTerms(values: readonly string[]): string[] {
   return result;
 }
 export function normalizeDefinition(value: ProjectDefinition): ProjectDefinition {
-  return projectDefinitionSchema.parse({ title: value.title.replace(/[\r\n\t]+/g, ' ').trim(), aliases: normalizeTerms(value.aliases), keywords: normalizeTerms(value.keywords) });
+  // 望む結果の上限は名前・別名・キーワードと別の文で示す。
+  const outcome = value.outcome === undefined ? undefined : normalizeOutcome(value.outcome);
+  return projectDefinitionSchema.parse({ title: value.title.replace(/[\r\n\t]+/g, ' ').trim(), aliases: normalizeTerms(value.aliases), keywords: normalizeTerms(value.keywords), ...(outcome !== undefined ? { outcome } : {}) });
 }
 const same = (a: ProjectDefinition, b: ProjectDefinition) => JSON.stringify(a) === JSON.stringify(b);
-/** 変わった項目名（title・aliases・keywords）。 */
+/** 変わった項目名（title・aliases・keywords・outcome）。望む結果は、変更後に指定があり、書いていた文と違うときだけ変わったとする。 */
 export function changedFields(before: ProjectDefinition, after: ProjectDefinition): ProjectDefinitionField[] {
-  return (['title', 'aliases', 'keywords'] as const).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+  return [...(['title', 'aliases', 'keywords'] as const).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k])), ...(after.outcome !== undefined && (before.outcome ?? '') !== after.outcome ? ['outcome' as const] : [])];
 }
 
 /** YAMLとして元の値に戻る、なるべく素の書き方。戻らなければJSON（YAMLの二重引用符）で書く。 */
@@ -114,13 +122,41 @@ export function withDefinition(raw: string, definition: ProjectDefinition): stri
   let next = body;
   for (const e of edits.sort((x, y) => y.start - x.start)) next = next.slice(0, e.start) + e.text + next.slice(e.end);
   if (appended.length) next = `${next.replace(/\s*$/, '')}${eol}${appended.join(eol)}`;
+  if (definition.outcome !== undefined) next = withOutcome(next, eol, definition.outcome);
   const result = withFrontmatterBody(parts, next);
   const parsed = projectSchema.parse(parseMarkdown(result).meta);
-  if (!same({ title: parsed.title, aliases: parsed.aliases, keywords: parsed.keywords }, definition)) throw new Error('プロジェクト定義を書き換えられません');
+  if (!same({ title: parsed.title, aliases: parsed.aliases, keywords: parsed.keywords }, { title: definition.title, aliases: definition.aliases, keywords: definition.keywords })) throw new Error('プロジェクト定義を書き換えられません');
+  if (definition.outcome !== undefined && (outcomeLines(parsed.outcome).length ? parsed.outcome : '') !== definition.outcome) throw new Error('プロジェクト定義を書き換えられません');
   return result;
 }
 
+/** 望む結果の書き方。1行ならなるべく素の書き方、複数行なら字下げしたブロック（|-）。元に戻らなければJSON（YAMLの二重引用符）で書く。 */
+function outcomeText(value: string, eol: string): string {
+  if (!value.includes('\n')) return titleText(value);
+  const block = `|-${eol}${value.split('\n').map(l => `  ${l}`).join(eol)}`;
+  try { if ((parse(`k: ${block}`) as Record<string, unknown> | null)?.k === value) return block; } catch { /* 引用符で書く */ }
+  return JSON.stringify(value);
+}
+/**
+ * frontmatterの最上位のoutcomeを、行単位で置き換える（空なら行ごと外す、無ければ末尾に足す）。
+ * 続きの行（字下げした行と、その間の空の行）も同じ項目として扱う。ほかのキーの行とコメントは動かさない。
+ */
+function withOutcome(body: string, eol: string, outcome: string): string {
+  const lines = body.split(/\r?\n/), at = lines.findIndex(l => /^outcome\s*:/.test(l));
+  let end = at + 1;
+  if (at >= 0) {
+    // 字下げした続きの行までを同じ項目とする。途中の空の行は、後ろに字下げした行が続くときだけ含める。
+    for (let i = at + 1; i < lines.length; i++) { if (/^[ \t]+\S/.test(lines[i]!)) end = i + 1; else if (lines[i]!.trim()) break; }
+  }
+  const replacement = outcome ? [`outcome: ${outcomeText(outcome, eol)}`] : [];
+  if (at >= 0) lines.splice(at, end - at, ...replacement);
+  else if (replacement.length) { while (lines.length && !lines.at(-1)!.trim()) lines.pop(); lines.push(...replacement); }
+  return lines.join(eol);
+}
+
 export const definitionLimitMessage = `名前は1〜${PROJECT_TITLE_CHARS}文字、別名・キーワードはそれぞれ${PROJECT_TERMS_MAX}件まで・1件${PROJECT_TERM_CHARS}文字までにしてください`;
+/** 正規化で止まった理由。望む結果の上限・文字は、その文で示す。 */
+export const definitionErrorMessage = (error: unknown): string => error instanceof Error && error.message.startsWith('望む結果') ? error.message : definitionLimitMessage;
 
 export async function readProjectDefinitionChanges(vault: Vault): Promise<ProjectDefinitionChange[]> {
   const result: ProjectDefinitionChange[] = [];
@@ -134,7 +170,7 @@ export async function readProjectDefinitionChanges(vault: Vault): Promise<Projec
 }
 
 const requestSchema = z.object({
-  projectId: projectIdSchema, expectedHash: digest, title: z.string(), aliases: z.array(z.string()), keywords: z.array(z.string()),
+  projectId: projectIdSchema, expectedHash: digest, title: z.string(), aliases: z.array(z.string()), keywords: z.array(z.string()), outcome: z.string().optional(),
   source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
 }).strict();
 
@@ -147,7 +183,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
   const r = requestSchema.parse(request), vault = new Vault(config), path = `10_projects/${r.projectId}/project.md`;
   let after: ProjectDefinition;
   try { after = normalizeDefinition(r); }
-  catch { throw new Error(definitionLimitMessage); }
+  catch (error) { throw new Error(definitionErrorMessage(error)); }
   return vault.withLock(async () => {
     // ほかの定義が壊れているときは書き換えない。登録簿を読めず、方針の更新も止まるため。
     const projects = await readProjects(config);
@@ -155,7 +191,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
     if (raw === undefined) throw new Error('プロジェクトが見つかりません');
     const project = projectSchema.parse(parseMarkdown(raw).meta);
     if (project.id !== r.projectId) throw new Error('プロジェクトIDとパスが一致しません');
-    const current = hash(raw), before: ProjectDefinition = { title: project.title, aliases: project.aliases, keywords: project.keywords };
+    const current = hash(raw), before: ProjectDefinition = { title: project.title, aliases: project.aliases, keywords: project.keywords, ...(typeof project.outcome === 'string' && outcomeLines(project.outcome).length ? { outcome: project.outcome } : {}) };
     if (r.sourceEventId) {
       const previous = (await readProjectDefinitionChanges(vault)).find(c => c.source === r.source && c.source_event_id === r.sourceEventId);
       if (previous) {
@@ -164,6 +200,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
         if (current === previous.after_hash) return result;
         if (current !== previous.before_hash || hash(withDefinition(raw, after)) !== previous.after_hash) throw new Error('プロジェクト定義が変更されています。再確認してください');
         await vault.write(path, withDefinition(raw, after)); await rebuildPoliciesLocked(config, vault);
+        if (result.changed.includes('outcome')) await rebuildOutcomeNowLocked(config, vault, r.projectId);
         return result;
       }
     }
@@ -171,7 +208,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
     assertNotMerged(projects, r.projectId);
     if (current !== r.expectedHash) throw new Error('プロジェクト定義が変更されています。再確認してください');
     const changed = changedFields(before, after);
-    if (!changed.length) throw new Error('名前・別名・キーワードに変更がありません');
+    if (!changed.length) throw new Error('名前・別名・キーワード・望む結果に変更がありません');
     const next = withDefinition(raw, after);
     const change: ProjectDefinitionChange = {
       schema_version: 1, id: `PDEF-${ulid()}`, project_id: r.projectId, before: storedDefinitionSchema.parse(before), after,
@@ -180,17 +217,24 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
     if (!await vault.create(`${changeDir}/${change.id}.json`, JSON.stringify(change, null, 2) + '\n')) throw new Error('定義変更の記録が競合しました');
     await vault.write(path, next);
     await rebuildPoliciesLocked(config, vault);
+    if (changed.includes('outcome')) await rebuildOutcomeNowLocked(config, vault, r.projectId);
     return { projectId: r.projectId, changeId: change.id, deduped: false, changed };
   });
 }
+/** 望む結果はNOWの先頭に載せるので、変えたらNOWを作り直す（まだNOWの無いプロジェクトは、最初の整理で作る）。 */
+async function rebuildOutcomeNowLocked(config: HubConfig, vault: Vault, projectId: string): Promise<void> {
+  if (await vault.read(`10_projects/${projectId}/NOW.md`) === undefined) return;
+  const { rebuildNowLocked, readReceipts } = await import('./views.js'), { readInputs } = await import('./capture.js');
+  await rebuildNowLocked(vault, config, projectId, await readInputs(config), await readReceipts(config));
+}
 
-/** CLIの追加・削除の指定を、今の定義に当てはめた新しい定義。 */
-export function editDefinition(current: ProjectDefinition, edit: { title?: string; addAliases?: string[]; removeAliases?: string[]; addKeywords?: string[]; removeKeywords?: string[] }): ProjectDefinition {
+/** CLIの追加・削除の指定を、今の定義に当てはめた新しい定義。望む結果は指定したときだけ変える（空文字で外す）。 */
+export function editDefinition(current: ProjectDefinition, edit: { title?: string; addAliases?: string[]; removeAliases?: string[]; addKeywords?: string[]; removeKeywords?: string[]; outcome?: string }): ProjectDefinition {
   const key = (s: string) => s.normalize('NFKC').toLocaleLowerCase().trim();
   const apply = (list: string[], add: string[] = [], remove: string[] = []) => {
     const removing = new Set(remove.map(key)), missing = remove.filter(r => !list.some(v => key(v) === key(r)));
     if (missing.length) throw new Error(`削除する語が定義にありません: ${missing.join('、')}`);
     return [...list.filter(v => !removing.has(key(v))), ...add];
   };
-  return { title: edit.title ?? current.title, aliases: apply(current.aliases, edit.addAliases, edit.removeAliases), keywords: apply(current.keywords, edit.addKeywords, edit.removeKeywords) };
+  return { title: edit.title ?? current.title, aliases: apply(current.aliases, edit.addAliases, edit.removeAliases), keywords: apply(current.keywords, edit.addKeywords, edit.removeKeywords), ...(edit.outcome !== undefined ? { outcome: edit.outcome } : {}) };
 }

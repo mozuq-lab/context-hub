@@ -1,7 +1,7 @@
 import { clipText, listText } from './markdown-text.js';
 import { z } from 'zod';
 import { Vault } from './storage.js';
-import { readProjects, mergeTargets } from './projects.js';
+import { readProjects, mergeTargets, outcomeOneLine } from './projects.js';
 import { readReceipts, associatedProjects, dateLabel, generatedMarkdown, writeGeneratedLocked } from './views.js';
 import { groundedResult, readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { buildReviewIndex } from './candidate-review.js';
@@ -67,6 +67,10 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   const since = (c: typeof pending[number]) => [c.generatedAt, ...(c.duplicates ?? []).map(id => review.items.find(i => i.id === id)?.generatedAt)].filter((at): at is string => !!at && Number.isFinite(Date.parse(at))).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
   const lingering = pending.filter(c => { const at = since(c); return at !== undefined && before(at); });
   const unassigned = recent.filter(u => u.unit.receipt?.result && !u.projects.length).length;
+  // 本人が書いた望む結果（1行にまとめて示す）。進行中で書いていないプロジェクトは概要に件数を示す。
+  const outcomeText = (project: typeof projects[number]) => outcomeOneLine(project.outcome);
+  const outcomeLine = (project: typeof projects[number]) => `望む結果: ${outcomeText(project) ? clip(outcomeText(project), 200) : '未記入'}`;
+  const noOutcome = projects.filter(p => !mergeTargets(projects).has(p.id) && lifecycleOf(p) === 'active' && !outcomeText(p)).length;
 
   // 週次の統合の結果（今週の気づき）を、件数の集計より前に置く。設定で有効にしたときだけ出す。記録を読めないときは出さず、HOMEの「失敗と競合」で示す。
   // 続けて、気づきへの本人の反応と答えの件数を出す（ふりかえりだけに出す）。
@@ -86,6 +90,7 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     `- この期間に届いた入力: ${recent.length}件（整理済み ${count('organized')} / 整理待ち ${count('waiting')} / 整理失敗 ${count('failed')}${count('action') ? ` / 本人が追加した行動 ${count('action')}` : ''}）`,
     `- プロジェクト未帰属（整理済みのうち）: ${unassigned}件`,
     `- 確認待ちの候補: ${pending.length}件（うち期間より前から残っているもの ${lingering.length}件）`,
+    ...(noOutcome ? [`- 望む結果が未記入の進行中のプロジェクト: ${noOutcome}件（アプリのプロジェクトの画面か\`ctx project edit <ID> --outcome <文> --hash <hash> --confirm\`で書けます）`] : []),
     '- 失敗・競合の詳細は[HOME](HOME.md)を参照してください。', '',
   ];
 
@@ -97,18 +102,19 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
     const mergedInto = merged.get(project.id);
     if (mergedInto) { inactive.push(`- [${plain(project.title)}](10_projects/${project.id}/project.md) — 統合済み（統合先: ${plain(projects.find(p => p.id === mergedInto)?.title ?? mergedInto)}）`); continue; }
     const head = `[${plain(project.title)}](${target}) — ${projectStatusLabels[lifecycle]}${last ? ` / 最終根拠: ${label(last)}（${daysSince(last, now)}日前）` : ' / 最終根拠なし'}`;
-    if (lifecycle !== 'active') { inactive.push(`- ${head}`); continue; }
+    // 休止・完了のプロジェクトは、望む結果を書いてあるときだけ添える（再開・完了の判断の基準）。
+    if (lifecycle !== 'active') { inactive.push(`- ${head}${outcomeText(project) ? `\n  - ${outcomeLine(project)}` : ''}`); continue; }
     const mine = units.filter(u => u.projects.includes(project.id) && u.unit.receipt?.result);
     const fresh = recent.filter(u => u.projects.includes(project.id));
     // 期間内の本人の完了・解決報告。最後の記録が解決のままのものだけを数える。
     const resolvedNow = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), project.id), inPeriod = [...resolvedNow.values()].filter(r => inWindow(r.created_at)), closed = inPeriod.filter(r => r.action === 'resolve'), excludedNow = inPeriod.filter(r => r.action === 'exclude');
-    if (!fresh.length && !closed.length && !excludedNow.length) { quiet.push(`- ${head}`); continue; }
+    if (!fresh.length && !closed.length && !excludedNow.length) { quiet.push(`- ${head}\n  - ${outcomeLine(project)}`); continue; }
     // NOWと同じ基準で、発生日時の順に最新の作業要約を選ぶ。期間開始時点は、その時点までに届いていた入力だけで決める。
     const byOccurred = (a: Unit, b: Unit) => Date.parse(a.input.occurred_at) - Date.parse(b.input.occurred_at) || a.input.id.localeCompare(b.input.id);
     const summaries = mine.filter(u => u.input.kind === 'work-summary').sort(byOccurred);
     const latestNow = summaries.at(-1), latestThen = summaries.filter(u => resultThen(u)).at(-1), thenResult = latestThen ? resultThen(latestThen) : undefined;
     const added = fresh.filter(u => u.input.kind === 'action' && inWindow(u.input.received_at) && !movedAt.has(u.input.id));
-    const out = [`### ${head}`, `- 新しい入力: ${fresh.length}件（作業要約 ${fresh.filter(u => u.input.kind === 'work-summary').length} / メモ ${fresh.filter(u => u.input.kind === 'memo').length}${added.length ? ` / 行動 ${added.length}` : ''}${fresh.some(corrected) ? ` / うち期間内の訂正 ${fresh.filter(corrected).length}` : ''}）`];
+    const out = [`### ${head}`, `- ${outcomeLine(project)}`, `- 新しい入力: ${fresh.length}件（作業要約 ${fresh.filter(u => u.input.kind === 'work-summary').length} / メモ ${fresh.filter(u => u.input.kind === 'memo').length}${added.length ? ` / 行動 ${added.length}` : ''}${fresh.some(corrected) ? ` / うち期間内の訂正 ${fresh.filter(corrected).length}` : ''}）`];
     for (const [title, key] of [['現在地', 'current'], ['次の一手', 'next']] as const) {
       const then = thenResult ? confirmed(thenResult.extracted[key]) : [], current = latestNow ? confirmed(groundedResult(latestNow.unit.chain, latestNow.unit.receipt!.input_id, latestNow.unit.receipt!.result!).extracted[key]) : [];
       const change = diff(then, current);

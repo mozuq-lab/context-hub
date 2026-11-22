@@ -8,7 +8,7 @@ import { collectGitDrafts,type CollectOutcome } from './git-drafts.js';
 import { rebuildPeople,type PeopleWrite } from './people.js';
 import { nowItemsPath } from './item-resolutions.js';
 import { readProjects,inspectProjects } from './projects.js';
-import { rebuildNow } from './views.js';
+import { nowOutcomeOutdated,rebuildNow } from './views.js';
 import { runSynthesis,type SynthesisOutcome } from './synthesis.js';
 import { answerPending,type AnswerPendingResult } from './ask.js';
 import { userFacingError } from './error-message.js';
@@ -28,7 +28,8 @@ export async function runCycle(config:HubConfig,llm:LlmClient,options:OrganizeOp
  if(options.dryRun)return{intake,organize:organized,dryRun:true};
  // 旧版で生成したNOWには項目一覧がないため、一覧のないプロジェクトだけNOWを作り直す。
  const vault=new Vault(config);
- for(const project of await readProjects(config))if(await vault.read(`10_projects/${project.id}/NOW.md`)!==undefined&&await vault.read(nowItemsPath(project.id))===undefined)await rebuildNow(config,project.id);
+ // 望む結果を手で書き換えたプロジェクトも、NOWの先頭の欄を合わせるために作り直す（モデルは呼ばない）。
+ for(const project of await readProjects(config))if(await vault.read(`10_projects/${project.id}/NOW.md`)!==undefined&&(await vault.read(nowItemsPath(project.id))===undefined||await nowOutcomeOutdated(vault,project)))await rebuildNow(config,project.id);
  // 設定で有効にしたときだけ、間隔ごとに週次の統合を実行する。同じcycleのふりかえりとHOMEに出せるよう、整理の後・生成の前に行う。失敗してもcycleは止めない。
  let synthesis:CycleResult['synthesis'];
  if(config.synthesis.enabled)try{synthesis=await runSynthesis(config,extras.synthesisLlm??llm,{...(extras.now?{now:extras.now}:{}),retryFailed:options.retryFailed===true});}catch(error){synthesis={error:userFacingError(error)};}

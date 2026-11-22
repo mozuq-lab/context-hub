@@ -1,12 +1,49 @@
 import { z } from 'zod';
 import { Vault, markdown, parseMarkdown } from './storage.js';
+import { nowText } from './markdown-text.js';
 import type { HubConfig, Project } from './types.js';
 export const projectIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{1,40}$/);
-export const projectSchema = z.object({ id: projectIdSchema, title: z.string().min(1).max(200), aliases: z.array(z.string().max(100)).max(50), keywords: z.array(z.string().max(100)).max(50), status: z.string().max(100), merged_into: projectIdSchema.optional() });
+// outcomeは本人が書く「望む結果」。書いていない定義（空・null）も有効で、読むときに無いものとして扱う。手で書いた長い文も読み、上限はdoctorで示す。
+export const projectSchema = z.object({ id: projectIdSchema, title: z.string().min(1).max(200), aliases: z.array(z.string().max(100)).max(50), keywords: z.array(z.string().max(100)).max(50), status: z.string().max(100), merged_into: projectIdSchema.optional(), outcome: z.string().nullish() });
+/** 望む結果の上限（正規化した後の文字数・行数）。 */
+export const PROJECT_OUTCOME_CHARS = 500;
+export const PROJECT_OUTCOME_LINES = 10;
+export const outcomeLimitMessage = `望む結果は${PROJECT_OUTCOME_CHARS}文字・${PROJECT_OUTCOME_LINES}行までにしてください`;
+/**
+ * 望む結果の正規化。改行はLFにし、タブは空白にし、各行の前後の空白と空の行を除く。空なら空文字（望む結果を外す）。
+ * 改行とタブのほかの制御文字と、上限を超える文は受け付けない。
+ */
+export function normalizeOutcome(text: string): string {
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(text)) throw new Error('望む結果に使えない文字が含まれています');
+  const lines = text.replace(/\r\n?/g, '\n').replaceAll('\t', ' ').split('\n').map(l => l.trim()).filter(Boolean);
+  const value = lines.join('\n');
+  if (value.length > PROJECT_OUTCOME_CHARS || lines.length > PROJECT_OUTCOME_LINES) throw new Error(outcomeLimitMessage);
+  return value;
+}
+/**
+ * 表示とAIへ渡すための望む結果の行。手で書いた文も読めるよう、制御文字を空白にし、空の行を除き、行頭の箇条書きの印を外す。
+ * アプリが登録簿のハッシュを同じ規則で求めるので、変えるときはアプリの`outcomeLines`もそろえる。
+ */
+export function outcomeLines(outcome: string | null | undefined): string[] {
+  return (outcome ?? '').replace(/\r\n?/g, '\n').split('\n').map(l => l.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().replace(/^(?:[-*+]\s+|・\s*)+/, '').trim()).filter(Boolean);
+}
+/** AIへ渡す・登録簿のハッシュに含める望む結果。書いていなければundefined（書いていない定義のハッシュとAIへ渡す内容を変えない）。 */
+export function outcomeForPrompt(outcome: string | null | undefined): string | undefined {
+  const text = Array.from(outcomeLines(outcome).join('\n')).slice(0, PROJECT_OUTCOME_CHARS).join('');
+  return text || undefined;
+}
+/** NOWとresumeの先頭に置く「望む結果」の欄（本人が書いた文の行。見出しから始まり空の行で終わる）。書いていなければ空文字。 */
+export const OUTCOME_HEADING = '# 望む結果（本人が書いた完了の基準）';
+export function outcomeSection(outcome: string | null | undefined): string {
+  const lines = outcomeLines(outcome);
+  return lines.length ? `${OUTCOME_HEADING}\n${lines.map(l => `- ${nowText(l)}`).join('\n')}\n\n` : '';
+}
+/** 望む結果を1行で（表示の見出しやふりかえりの行に使う）。書いていなければ空文字。 */
+export const outcomeOneLine = (outcome: string | null | undefined): string => outcomeLines(outcome).join(' / ');
 const schema=projectSchema;
 /** 不正なプロジェクト定義のファイルと、不正な項目。 */
 export interface ProjectDefinitionIssue { path: string; fields: string[] }
-const fieldLabels: Record<string, string> = { id: 'ID', title: '名前（title）', aliases: '別名（aliases）', keywords: 'キーワード（keywords）', status: '状態（status）', merged_into: '統合先（merged_into）' };
+const fieldLabels: Record<string, string> = { id: 'ID', title: '名前（title）', aliases: '別名（aliases）', keywords: 'キーワード（keywords）', status: '状態（status）', merged_into: '統合先（merged_into）', outcome: '望む結果（outcome）' };
 export function projectIssueFields(issue: ProjectDefinitionIssue): string {
   return issue.fields.map(f => fieldLabels[f] ?? f).join('・');
 }
@@ -20,7 +57,9 @@ function parseProject(path: string, raw: string): { project?: Project; issue?: P
   const parsed = schema.safeParse(meta);
   if (!parsed.success) return { issue: { path, fields: [...new Set(parsed.error.issues.map(i => String(i.path[0] ?? 'frontmatter')))] } };
   if (path !== `10_projects/${parsed.data.id}/project.md`) return { issue: { path, fields: ['id'] } };
-  return { project: parsed.data };
+  // 空・nullの望む結果は書いていないものとして読む（登録簿のハッシュとAIへ渡す内容を、書いていない定義と同じにする）。
+  const { outcome, ...rest } = parsed.data;
+  return { project: typeof outcome === 'string' && outcomeLines(outcome).length ? { ...rest, outcome } : rest };
 }
 /** 全プロジェクト定義を検査し、正しい定義と不正な定義の一覧を返す。 */
 export async function inspectProjects(config: HubConfig): Promise<{ projects: Project[]; issues: ProjectDefinitionIssue[] }> {
@@ -42,7 +81,8 @@ export async function readProjects(config: HubConfig): Promise<Project[]> {
   return projects;
 }
 export async function addProject(config: HubConfig, value: Pick<Project, 'id' | 'title'> & Partial<Project>): Promise<Project> {
-  const project = schema.parse({ aliases: [], keywords: [], status: 'active', ...value });
+  const { outcome, ...fields } = value, text = outcome === undefined || outcome === null ? '' : normalizeOutcome(outcome);
+  const project = schema.parse({ aliases: [], keywords: [], status: 'active', ...fields, ...(text ? { outcome: text } : {}) }) as Project;
   const vault = new Vault(config);
   return vault.withLock(async () => {
     if (!await vault.create(`10_projects/${project.id}/project.md`, markdown({ ...project }, `# ${project.title}\n\n人が保守するプロジェクト定義です。\n`))) throw new Error('プロジェクトは既に存在します');
