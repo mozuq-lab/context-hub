@@ -20,6 +20,7 @@ import type { HubConfig, Input } from './types.js';
 import { describeFindings, findSecrets, secretSettings, writePrivacyPatternsLocked } from './secrets.js';
 import { rebuildIdeaIndexLocked, ideaSection } from './idea-links.js';
 import { rebuildUnassignedActionsLocked, unassignedActionsSection } from './unassigned-actions.js';
+import { actionSource, sourceRef } from './actions.js';
 import { insightsNotices, insightsSection, rebuildInsightsLocked } from './insights.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readExclusionOverlays, rereadResolutionIds } from './item-rereads.js';
@@ -87,6 +88,9 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 本人が付けた期日・見直す日。期日が7日以内の項目はプロジェクトをまたいで前に出し、見直す日が先の項目はたたむ。
   const today=todayIn(config.timezone,clock),schedules=await readItemSchedules(vault),resolutionRecords=schedules.records.length?await readItemResolutions(vault):[];
   const dated:{bucket:'overdue'|'today'|'week';due:string;id:string;row:string}[]=[],orphaned:string[]=[];let resting=0;
+  // プロジェクトを決めない行動に引き取ったAIの行（根拠の入力IDと本文の組・項目キー）。
+  const unassignedTaken={refs:new Set<string>(),keys:new Set<string>()};
+  for(const unit of effective){const from=unit.chain.root.project===undefined?actionSource(unit.chain.root):undefined;if(from){unassignedTaken.refs.add(sourceRef(from.input_id,from.text));if(from.key)unassignedTaken.keys.add(from.key);}}
   // カレンダーに書き出す、進行中のプロジェクトの日付付きの項目（HOMEの「次の一手」と同じ範囲）。
   const calendarItems:CalendarItem[]=[];
   for(const project of projects){
@@ -118,7 +122,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}`});}
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
-    for(const s of loose)orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
+    // プロジェクトを決めない行動に引き取った行の日付は、付け直す先がない（プロジェクト未定の行に期日は付けない）ため示さない。
+    for(const s of loose)if(!unassignedTaken.refs.has(sourceRef(s.input_id,s.text))&&!unassignedTaken.keys.has(s.item_key))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     const later=(key:string)=>{const s=scheduled.get(key);return s?`（${scheduleLabel(s)}）`:'';};
     if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${later(i.key)}${i.hints?.length?'（片付いたかも・要確認）':''}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
@@ -162,8 +167,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 件数は1行にまとめて先に示す。行の一覧は対応が要るものと直近の分だけにし、全件はアプリの受付状況に任せる。
   const waitingIntake=intakeRows.filter(r=>!r.routine).length,failedInputs=effective.filter(u=>receiptsById.get(u.chain.latest.id)?.status==='failed').length,waitingInputs=inputRows.filter(r=>!r.routine).length-failedInputs;
   const statusSummary=intakeRows.length||inputRows.length?`受付ファイル ${intakeRows.length}件（受付待ち・内容変更 ${waitingIntake}件） / 入力 ${inputRows.length}件（整理待ち ${waitingInputs}件・整理失敗 ${failedInputs}件）。受領済み・断った依頼・整理済みは新しい${STATUS_ROWS}件ずつを並べます。全件はアプリの「受付状況」で確認できます。\n`:'';
-  // どのプロジェクトにも結び付いていないメモから出たタスクの分類とAIの提案。アプリが読む一覧も同時に書く（内容が変わったときだけ）。
-  const unassignedActions=unassignedActionsSection(config,await rebuildUnassignedActionsLocked(config,vault,effective,clock));
+  // プロジェクトを決めずに本人が追加した行動と、どのプロジェクトにも結び付いていないメモから出たタスクの分類とAIの提案。アプリが読む一覧も同時に書く（内容が変わったときだけ）。
+  const unassignedActions=unassignedActionsSection(config,await rebuildUnassignedActionsLocked(config,vault,effective,clock),new Map(effective.map(u=>[u.chain.root.id,u.chain.root.path])));
   // 週次の統合の結果（今週の気づき）。設定で有効にしたときだけ出す。記録を読めなくてもHOMEは作り、「失敗と競合」に示す。
   let insightsText='',insightsLines:string[]=[];
   try{const built=await rebuildInsightsLocked(config,vault,effective,clock);insightsText=insightsSection(config,built.insights,clock);insightsLines=insightsNotices(config,built,clock);}

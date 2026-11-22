@@ -59,6 +59,8 @@ export async function correctInput(config: HubConfig, targetId: string, request:
         if(raw)try{const{meta}=parseMarkdown(raw);referenced=Array.isArray(meta.input_ids)&&meta.input_ids.includes(root.id);}catch{ /* 手動変更はWriterの競合保護で扱う。 */ }
         if(root.project===project.id||referenced)await rebuildNowLocked(vault,config,project.id,current,receipts);
       }
+      // プロジェクトを決めずに追加した行動は、プロジェクト未定の一覧に載る。直した文面をすぐに載せる（循環を避けて遅延読込する）。
+      if(root.kind==='action'&&root.project===undefined){const{rebuildUnassignedLocked}=await import('./unassigned-actions.js');await rebuildUnassignedLocked(config,vault);}
     };
     if (previous) {
       const marker = eventMarker(previous.source,previous.source_event_id), raw = await vault.read(marker);

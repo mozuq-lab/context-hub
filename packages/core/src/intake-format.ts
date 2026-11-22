@@ -19,7 +19,7 @@ import { PERSON_ALIASES_MAX, PERSON_NAME_CHARS, personActions, personIdSchema } 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
 export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(s) && Number.isFinite(Date.parse(s)), 'タイムゾーン付き日時が必要です');
 const base = { schema_version: z.literal(1), request_id: requestIdSchema, source: z.string().min(1).max(200), occurred_at: intakeTimestamp };
-// kind: actionは本人が直接追加する次の一手。projectが必須で、本文は1行・200文字以内（本体のcaptureが検証する）。
+// kind: actionは本人が直接追加する次の一手。projectを省くとプロジェクト未定の次の一手に載る。本文は1行・200文字以内（本体のcaptureが検証する）。
 // happened_onは本人が後から記録した出来事の日付。occurred_atは実際に書いた日時のまま送る（actionには付けられない）。
 const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), text: z.string() }).strict();
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
