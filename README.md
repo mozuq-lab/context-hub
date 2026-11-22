@@ -35,7 +35,7 @@ AIとの作業要約や日々の思いつきをMarkdownに集め、数日後で�
 - 設定したローカルリポジトリのコミット件名から[作業記録の下書き](docs/work-records.md#コミット履歴からの作業記録の下書き)を作り、本人の確認後に入力にする（既定は無効）。
 - 原文を残した訂正と、本人操作によるプロジェクト案・知識候補の承認を扱う。同じ対象を指すプロジェクト案は[1件にまとめて](docs/candidate-review.md#同じ対象を指すプロジェクト案)示す。
 - [採用先付きの知識・方針](docs/policies.md)を共通/プロジェクトへ保存し、有効方針の読取・適用停止・AI接続用の設定差分を用意する。採用から日数が過ぎた方針はHOMEで[見直し](docs/policies.md)に出し、本人が「まだ有効」か適用停止かを決める。
-- Codex・Claude Codeから同期済みVaultを参照し、作業結果をInputへ追加する。
+- Codex・Claude Codeから同期済みVaultを参照し、作業結果をInputへ追加する。[MCPサーバー](docs/prompts/vault-access.md#mcpで読み書きする)を登録すれば、現在地・方針・検索を決まった手順で受け取り、頼んだときだけ作業要約を保存できる。
 - Mac・Androidの[専用アプリ（ContextHub Flutter）](#macandroidアプリ)から、整理結果の閲覧・メモ追加・候補の採用/却下を行う。
 
 全会話の自動収集、専用Webアプリ・iOSアプリ（Mac・Androidアプリは別リポジトリ）、URLの自動取得、音声・画像処理、外部タスクの自動実行は含みません。
@@ -73,6 +73,7 @@ flowchart LR
 | 端末間の入力・返送 | 常時稼働するMac mini、Syncthing互換の同期環境 |
 | モバイル入力 | ObsidianとQuickAdd、共有フォルダーへのアクセス |
 | Mac・Androidアプリでの閲覧・入力（任意） | [ContextHub Flutter](https://github.com/mozuq-lab/context-hub-flutter-client)、同期済みVault。ビルド済みアプリは配布していないため、FlutterとXcode/Android SDKで各自ビルド |
+| Codex・Claude CodeのMCP接続（任意） | Node 24、このリポジトリのビルド（`npm ci && npm run build`）、同期済みVault |
 | CLIバックアップ例 | macOSのsh、tar、BSD stat。暗号化する場合は[age](docs/operations.md#バックアップを暗号化する任意) |
 
 ファイル同期・QuickAdd・再起動・復旧にはMac mini/Mac/Androidでの確認実績があります。OS、同期アプリ、Obsidian/QuickAdd、OpenClawの版や権限が異なる環境では、サンプルから確認してください。ほかのOSでの本番運用を保証するものではありません。

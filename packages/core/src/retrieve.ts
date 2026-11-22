@@ -34,26 +34,28 @@ async function receiptStatus(vault: Vault, input: Input, root?: Input): Promise<
   if (!raw) return '未整理';
   try { const receipt = receiptSchema.parse(JSON.parse(raw)); if (receipt.input_id !== input.id) return '処理記録不正'; return receipt.status === 'organized' ? '整理済み' : '失敗'; } catch { return '処理記録不正'; }
 }
-export async function recent(config: HubConfig, n = 10): Promise<string> {
+/** 別のAIへ渡す一覧の抜粋にかける処理（秘密情報の伏せ字）。抜粋を切る前の本文全体にかける。 */
+export interface ExcerptOptions { hide?: (text: string) => string }
+export async function recent(config: HubConfig, n = 10, options: ExcerptOptions = {}): Promise<string> {
   if (!Number.isSafeInteger(n) || n < 1 || n > 1000) throw new Error('件数は1〜1000にしてください');
   const inputs = (await readInputs(config)).sort((a,b)=>Date.parse(b.received_at)-Date.parse(a.received_at) || b.id.localeCompare(a.id));
-  return inputs.length ? inputs.slice(0,n).map(x=>inputLine(x)).join('\n\n') : '見つかりません';
+  return inputs.length ? inputs.slice(0,n).map(x=>inputLine(x,200,options.hide)).join('\n\n') : '見つかりません';
 }
-export async function pending(config: HubConfig): Promise<string> {
+export async function pending(config: HubConfig, options: ExcerptOptions = {}): Promise<string> {
   const vault = new Vault(config), lines: string[] = [];
   for (const chain of await readCorrectionChains(config)) {
     // 本人が直接追加した行動は整理しないため、未整理として挙げない。
     if (chain.root.kind === 'action') continue;
     const input=chain.latest;
     const status = await receiptStatus(vault,input);
-    if (status !== '整理済み') lines.push(`${inputLine(input)}\n  状態: ${status}`);
+    if (status !== '整理済み') lines.push(`${inputLine(input,200,options.hide)}\n  状態: ${status}`);
   }
   return lines.join('\n\n') || '見つかりません（未整理・失敗なし）';
 }
 /** referenceは種類ではなく絞り込みの条件で、整理でAIが参考資料に分類したメモ・作業要約（訂正を含む）に当たる。 */
 export const findKinds = ['memo','work-summary','action','correction','idea','knowledge','now','reference'] as const;
 export type FindKind = typeof findKinds[number];
-export interface FindOptions {
+export interface FindOptions extends ExcerptOptions {
   /** このContextHubプロジェクトに帰属・関連する記録だけにする。AI推定の関連候補は結果で区別する。 */
   project?: string;
   kinds?: FindKind[];
@@ -160,7 +162,8 @@ export async function find(config: HubConfig, query: string, options: FindOption
   hits.splice(0, hits.length, ...collapsed);
   const page = hits.slice(offset, offset+limit);
   const lines = page.map(doc=>{
-    const normalized = doc.text.normalize('NFKC').toLocaleLowerCase();
+    // 伏せ字は抜粋を切る前の本文全体にかける（切ってから伏せると、秘密の値だけが抜粋に残り検出されない）。
+    const text = options.hide ? options.hide(doc.text) : doc.text, normalized = text.normalize('NFKC').toLocaleLowerCase();
     const start = tokens.length ? Math.max(0, normalized.indexOf(tokens[0])-60) : 0;
     const refs = doc.ids.map(id=>{const input=inputs.find(i=>i.id===id);return input?`[${id}](${input.path})`:id;}).join(', ');
     const notices=effective.filter(e=>[e.chain.root,...e.chain.revisions].some(i=>doc.ids.includes(i.id))).map(correctionNotice).filter(Boolean);
@@ -168,7 +171,7 @@ export async function find(config: HubConfig, query: string, options: FindOption
     const relatedNotice=doc.related==='estimated'?'関連候補（AI推定、帰属未確定）\n  ':'';
     const group=doc.kind==='idea'?groups.get(doc.id):undefined;
     const groupNotice=group?`束ねたアイデア: ${group.ideas.filter(id=>id!==doc.id).map(id=>`[${id}](20_ideas/${id}.md)`).join(', ')}\n  `:'';
-    return `- [${doc.id}](${doc.path}) | ${doc.display ?? displayTime(doc.at)} | ${doc.source}\n  出典: ${refs || '原文参照なし'}\n  ${relatedNotice}${groupNotice}${knowledgeNotice}${notices.join('\n  ')}\n  ${doc.text.slice(start,start+220).replace(/\r?\n/g,' ')}`;
+    return `- [${doc.id}](${doc.path}) | ${doc.display ?? displayTime(doc.at)} | ${doc.source}\n  出典: ${refs || '原文参照なし'}\n  ${relatedNotice}${groupNotice}${knowledgeNotice}${notices.join('\n  ')}\n  ${text.slice(start,start+220).replace(/\r?\n/g,' ')}`;
   });
   if (!lines.length) return withBroken(offset > 0 && hits.length ? `見つかりません（該当${hits.length}件。開始位置が件数を超えています）` : '見つかりません');
   const more = offset + page.length < hits.length;
