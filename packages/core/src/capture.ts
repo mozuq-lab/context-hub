@@ -16,12 +16,15 @@ export const inputSchema = z.object({ schema_version: z.literal(1), id: inputIdS
   origin: z.enum(['user-note', 'ai-self-report']), text: z.string().min(1), path: z.string(),
   // 本人が後から記録した出来事の日付と、実際に書いた日時。両方そろっているときだけ有効（occurred_atはその日の正午）。
   happened_on: calendarDateSchema.optional(), recorded_at: timestamp.optional(),
+  // 本人が「続き」として書いたときの前のメモ（訂正を除いた元の入力のID）。メモと作業要約にだけ付く。
+  continues_input_id: inputIdSchema.optional(),
 }).strict();
 export function parseInput(path: string, content: string): Input {
   const { meta, text } = parseMarkdown(content);
   const input = inputSchema.parse({ ...meta, origin: meta.origin ?? (meta.kind === 'work-summary' ? 'ai-self-report' : 'user-note'), text, path });
   if ((input.kind === 'correction') !== (input.corrects_input_id !== undefined)) throw new Error('訂正の参照と種別が一致しません');
   if ((input.happened_on === undefined) !== (input.recorded_at === undefined) || (input.happened_on !== undefined && input.kind === 'correction')) throw new Error('出来事の日付と記録日時が一致しません');
+  if (input.continues_input_id !== undefined && ((input.kind !== 'memo' && input.kind !== 'work-summary') || input.continues_input_id === input.id)) throw new Error('続きの参照と種別が一致しません');
   if (!path.endsWith(`_${input.id}.md`)) throw new Error('入力IDとファイル名が一致しません');
   return input;
 }
@@ -71,6 +74,25 @@ async function markedInputIds(config: HubConfig, vault: Vault): Promise<Set<stri
   return new Set(Object.values(entries));
 }
 export function eventMarker(source: string, eventId: string): string { return `90_system/receipts/events/${hash(source)}/${hash(eventId)}`; }
+/**
+ * 続きとしてつなぐ前のメモ。訂正を指していれば元の入力へたどる。メモ・作業要約でなければ（行動・見つからない）つながない。
+ */
+/**
+ * 続きがつなぐ前のメモ。訂正を指していれば元の入力までたどり、メモ・作業要約だけを返す。
+ * 全原文は読まず、たどる原文だけを読む。見つからない・読めない原文は、つながないものとして扱う（続きの本文を失わない）。
+ */
+async function continuationTarget(vault: Vault, inbox: string[], id: string): Promise<Input | undefined> {
+  let current: string | undefined = id;
+  for (let guard = 0; current !== undefined && guard < 1000; guard++) {
+    const at = current, path = inbox.find(p => p.endsWith(`_${at}.md`));
+    if (path === undefined) return undefined;
+    let input: Input;
+    try { input = parseInput(path, (await vault.read(path))!); } catch { return undefined; }
+    if (input.kind === 'memo' || input.kind === 'work-summary') return input;
+    current = input.kind === 'correction' ? input.corrects_input_id : undefined;
+  }
+  return undefined;
+}
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
 export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
   if (!request.text?.trim() || request.text.length > config.capture.maxInputChars) throw new Error('本文が空か文字数上限を超えています');
@@ -84,6 +106,10 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     if (request.happenedOn !== undefined) throw new Error('行動には出来事の日付を指定できません');
   }
   if (request.happenedOn !== undefined) calendarDateSchema.parse(request.happenedOn);
+  if (request.continues !== undefined) {
+    inputIdSchema.parse(request.continues);
+    if (request.kind === 'action') throw new Error('行動には前のメモを指定できません');
+  }
   const happenedOn = effectiveHappenedOn(request.happenedOn, request.occurredAt, config.timezone);
   const meta = inputSchema.omit({ text: true, path: true }).parse({ schema_version: 1, id: `IN-${ulid()}`,
     source: request.source, source_event_id: request.sourceEventId ?? ulid(), occurred_at: happenedOn !== undefined ? localNoon(happenedOn, config.timezone) : request.occurredAt,
@@ -120,7 +146,16 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
       const maxDays = config.capture.maxBackdateDays ?? DEFAULT_MAX_BACKDATE_DAYS, cause = happenedOnProblem(request.happenedOn, request.occurredAt, config.timezone, maxDays);
       if (cause) throw new HappenedOnError({ code: 'happened-on-invalid', cause, max_days: maxDays });
     }
-    if (request.project && !(await readProjects(config)).some(p => p.id === request.project)) throw new Error('指定プロジェクトがありません。先にproject addを実行してください');
+    // 続きは前のメモ（訂正を指していれば、その元の入力）につなぐ。前のメモが見つからない・行動のときは、つながない普通のメモとして保存する（本文を失わない）。
+    // 本人がプロジェクトを選ばなかった続きは、前のメモで本人が指定したプロジェクトをそのまま引き継ぐ。
+    // 統合済みのプロジェクトでも統合先に置き換えずに記録し、読むときに統合先へ読み替える（統合を戻せば、前のメモと一緒に元のプロジェクトへ戻る）。
+    const continues = request.continues === undefined ? undefined : await continuationTarget(vault, inbox, request.continues);
+    let project = request.project;
+    if (continues !== undefined) {
+      meta.continues_input_id = continues.id;
+      if (project === undefined && continues.project !== undefined && (await readProjects(config)).some(p => p.id === continues.project)) project = meta.project = continues.project;
+    }
+    if (project && !(await readProjects(config)).some(p => p.id === project)) throw new Error('指定プロジェクトがありません。先にproject addを実行してください');
     // 統合済みのプロジェクトのNOWは統合先にあるため、行動は統合先へ追加してもらう（完了報告・期日の依頼と同じ）。
     if (meta.kind === 'action' && request.project) assertNotMerged(await readProjects(config), request.project);
     const date = new Intl.DateTimeFormat('sv-SE', { timeZone: config.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(meta.occurred_at));

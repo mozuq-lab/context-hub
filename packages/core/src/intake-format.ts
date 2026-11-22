@@ -6,6 +6,7 @@ import { projectStatusSchema } from './project-status.js';
 import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema, itemScopeSchema, UNASSIGNED_EXCLUSION_REASON, UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { occurrenceActionSchema, repeatRuleSchema, scheduleDateSchema } from './item-schedules.js';
 import { calendarDateSchema } from './happened.js';
+import { itemEffortSchema } from './item-efforts.js';
 import { parseMarkdown } from './storage.js';
 import { ASK_QUESTION_CHARS } from './ask.js';
 import { parsePreferencesPayload } from './client-preferences.js';
@@ -21,7 +22,8 @@ export const intakeTimestamp = z.string().refine(s => /T.*(?:Z|[+-]\d{2}:\d{2})$
 const base = { schema_version: z.literal(1), request_id: requestIdSchema, source: z.string().min(1).max(200), occurred_at: intakeTimestamp };
 // kind: actionは本人が直接追加する次の一手。projectを省くとプロジェクト未定の次の一手に載る。本文は1行・200文字以内（本体のcaptureが検証する）。
 // happened_onは本人が後から記録した出来事の日付。occurred_atは実際に書いた日時のまま送る（actionには付けられない）。
-const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), text: z.string() }).strict();
+// continuesは続きとして書いたときの前のメモの入力ID（actionには付けられない）。projectを省くと前のメモで指定したプロジェクトを引き継ぐ。
+const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), continues: inputIdSchema.optional(), text: z.string() }).strict().refine(v => v.kind !== 'action' || v.continues === undefined, '行動には前のメモを指定できません');
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
 // cover_idsは、同じ対象の案として同じ判断にまとめる確認待ちの案。cover_hashesは同じ順で、本人が確認した内容のハッシュ。本体が同じ組の案かを検証する。
 const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), cover_ids: z.array(z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), cover_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), confirmed: z.literal(true), text: z.string() }).strict().refine(v => (v.cover_ids?.length ?? 0) === (v.cover_hashes?.length ?? 0), 'まとめる案のIDとハッシュの数が一致しません');
@@ -40,6 +42,8 @@ const itemResolution=z.object({...base,operation:z.literal('item-resolution'),pr
 const itemSchedule=z.object({...base,operation:z.literal('item-schedule'),project_id:projectIdSchema,item_key:itemKeySchema,due:scheduleDateSchema.nullable(),review_after:scheduleDateSchema.nullable(),repeat:repeatRuleSchema.nullable().optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>!v.repeat||v.due!==null,'繰り返しには期日が必要です');
 // 定例の今回を完了（done）・見送り（skip）。dueは本人が確認した回の期日で、今の期日と違えば受け付けない。
 const itemOccurrence=z.object({...base,operation:z.literal('item-occurrence'),project_id:projectIdSchema,item_key:itemKeySchema,action:occurrenceActionSchema,due:scheduleDateSchema,confirmed:z.literal(true),text:z.string()}).strict();
+// 手間の目安。effortは変更後の目安で、nullは外す依頼。
+const itemEffort=z.object({...base,operation:z.literal('item-effort'),project_id:projectIdSchema,item_key:itemKeySchema,effort:itemEffortSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const itemHintDismiss=z.object({...base,operation:z.literal('item-hint-dismiss'),project_id:projectIdSchema,item_key:itemKeySchema,input_id:inputIdSchema,confirmed:z.literal(true),text:z.string()}).strict();
 const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss'),draft_id:z.string().regex(/^GDR-[0-9A-HJKMNP-TV-Z]{26}$/),draft_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 名前・別名・キーワードは変更後の全体を送る。上限と重複の整理は本体が検証する。
@@ -62,7 +66,7 @@ const askSchema=z.object({...base,operation:z.literal('ask'),project:projectIdSc
 const preferencesSchema=z.object({...base,operation:z.literal('client-preferences'),confirmed:z.literal(true),text:z.string()}).strict();
 // 採用した方針を本人が「まだ有効」と確かめた。ハッシュは確かめた時点の知識のファイルのもの。
 const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
