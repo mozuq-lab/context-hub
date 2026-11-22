@@ -32,8 +32,9 @@ export interface PluginApi {
 export interface HubDependencies {
   loadConfig(path?: string): Promise<HubConfig>;
   capture(config: HubConfig, request: CaptureRequest): Promise<CaptureResult>;
-  find(config: HubConfig, query: string): Promise<string>;
+  /** hideは抜粋を切る前の本文にかける伏せ字。 */
+  find(config: HubConfig, query: string, options?: { hide?: (text: string) => string }): Promise<string>;
   resume(config: HubConfig, project: string): Promise<string>;
-  recent(config: HubConfig, n?: number): Promise<string>;
-  pending(config: HubConfig): Promise<string>;
+  recent(config: HubConfig, n?: number, options?: { hide?: (text: string) => string }): Promise<string>;
+  pending(config: HubConfig, options?: { hide?: (text: string) => string }): Promise<string>;
 }

@@ -1,10 +1,8 @@
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
-import { dirname, isAbsolute } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { RootsListChangedNotificationSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
   DEFAULT_MAX_BACKDATE_DAYS, Vault, calendarDateSchema, context, find, findKinds, formatPolicies, happenedOnMessage, happenedOnProblem,
@@ -28,7 +26,16 @@ export interface ServerOptions {
   now?: () => Date;
 }
 
-type Target = { kind: 'one'; projectId: string; missingRoots: number } | { kind: 'none' | 'ambiguous'; missingRoots: number };
+/**
+ * 作業フォルダーから決めた対象。oneは登録済みのプロジェクト1件。unregisteredは対応付けたプロジェクトが未登録（未作成・未同期など）、
+ * ambiguousは複数のプロジェクトに分かれる、noneは対応がない。
+ */
+type Target = { kind: 'one' | 'unregistered'; projectId: string; missingRoots: number } | { kind: 'none' | 'ambiguous'; missingRoots: number };
+/** 決められなかった理由の文。 */
+const undecided = (target: Exclude<Target, { kind: 'one' }>) => target.kind === 'ambiguous' ? '作業フォルダーが複数のプロジェクトに対応しています'
+  : target.kind === 'unregistered' ? `作業フォルダーに対応付けたプロジェクト（${target.projectId}）が登録されていません` : '作業フォルダーに対応するプロジェクトがありません';
+/** readPoliciesがプロジェクトなしで添える警告。対応がないときだけ正しいので、ほかの理由では差し替える。 */
+const UNMAPPED_POLICY_WARNING = '作業フォルダーはContextHubプロジェクトに未対応付けです。共通方針のみ適用します。';
 
 const text = (value: string, isError = false): CallToolResult => ({ content: [{ type: 'text', text: value }], ...(isError ? { isError: true } : {}) });
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
@@ -54,14 +61,17 @@ export function createServer(config: HubConfig, options: ServerOptions = {}): Mc
     try { return await run(); } catch (error) { return text(`取得できませんでした: ${userFacingError(error)}`, true); }
   };
 
+  // rootsの問い合わせに失敗したクライアントへは、一覧が変わったと知らされるまで問い合わせない（呼び出しのたびに待たせない）。
+  let rootsFailed = false;
+  server.server.setNotificationHandler(RootsListChangedNotificationSchema, async () => { rootsFailed = false; });
   /** クライアントの作業フォルダー。rootsを出すクライアントはその一覧、出さない（失敗した）ときは起動時の作業フォルダー。 */
   async function workFolders(): Promise<string[]> {
-    if (server.server.getClientCapabilities()?.roots) {
+    if (!rootsFailed && server.server.getClientCapabilities()?.roots) {
       try {
         const { roots } = await server.server.listRoots(undefined, { timeout: ROOTS_TIMEOUT_MS });
         const folders = roots.flatMap(root => { try { return root.uri.startsWith('file:') ? [fileURLToPath(root.uri)] : []; } catch { return []; } });
         if (folders.length) return folders;
-      } catch { /* rootsに応答しないクライアントは、起動時の作業フォルダーで決める。 */ }
+      } catch { rootsFailed = true; /* rootsに応答しないクライアントは、起動時の作業フォルダーで決める。 */ }
     }
     return [options.fallbackFolder ?? process.cwd()];
   }
@@ -81,21 +91,27 @@ export function createServer(config: HubConfig, options: ServerOptions = {}): Mc
       missingRoots = Math.max(missingRoots, found.missingRoots);
       if (found.projectId !== undefined) ids.add(found.projectId);
     }
-    if (ids.size === 1) return { kind: 'one', projectId: [...ids][0]!, missingRoots };
-    return { kind: ids.size ? 'ambiguous' : 'none', missingRoots };
+    if (ids.size > 1) return { kind: 'ambiguous', missingRoots };
+    if (ids.size === 0) return { kind: 'none', missingRoots };
+    // 設定の対応だけがあってproject.mdがない（未作成・未同期・改名）プロジェクトは、決めた対象にしない。
+    const projectId = [...ids][0]!, registered = (await readProjects(config)).some(p => p.id === projectId);
+    return { kind: registered ? 'one' : 'unregistered', projectId, missingRoots };
   }
-  /** 対象を決められないときに返す、選べるプロジェクトの一覧。統合済みのプロジェクトは統合先で選ぶため出さない。 */
-  async function projectList(reason: 'none' | 'ambiguous'): Promise<string> {
+  /** 選べるプロジェクトの一覧。統合済みのプロジェクトは統合先で選ぶため出さない。 */
+  async function projectLines(): Promise<string> {
     const projects = await readProjects(config), listed = projects.filter(p => resolveProject(projects, p.id) === p.id);
-    const why = reason === 'ambiguous' ? '作業フォルダーが複数のプロジェクトに対応しています' : '作業フォルダーに対応するプロジェクトがありません';
-    const lines = listed.map(p => `- ${p.id}: ${p.title.replace(/[\r\n]+/g, ' ')}（${projectStatusLabels[lifecycleOf(p)]}）`);
-    return `プロジェクトを決められませんでした（${why}）。対象をproject引数で指定して呼び直してください。対象が分からないときは本人に確認し、推測で選ばないでください。\n\n登録済みのプロジェクト:\n${lines.join('\n') || '（ありません）'}`;
+    const lines = listed.map(p => `- ${p.id}: ${hide(p.title.replace(/[\r\n]+/g, ' '))}（${projectStatusLabels[lifecycleOf(p)]}）`);
+    return `登録済みのプロジェクト:\n${lines.join('\n') || '（ありません）'}`;
+  }
+  /** 対象を決められないときに返す文と一覧。 */
+  async function projectList(target: Exclude<Target, { kind: 'one' }>): Promise<string> {
+    return `プロジェクトを決められませんでした（${undecided(target)}）。対象をproject引数で指定して呼び直してください。対象が分からないときは本人に確認し、推測で選ばないでください。\n\n${await projectLines()}`;
   }
   /** project引数か作業フォルダーの対応で決めた対象。決められなければ一覧の文。 */
   async function projectFor(project: string | undefined): Promise<{ id: string; note: string } | { list: string }> {
     if (project !== undefined) return { id: project, note: '' };
     const target = await folderTarget();
-    if (target.kind !== 'one') return { list: await projectList(target.kind) };
+    if (target.kind !== 'one') return { list: await projectList(target) };
     return { id: target.projectId, note: `対象: ${target.projectId}（作業フォルダーの対応から決めました）\n${target.missingRoots ? missingRootsWarning(target.missingRoots) + '\n' : ''}\n` };
   }
 
@@ -136,7 +152,9 @@ export function createServer(config: HubConfig, options: ServerOptions = {}): Mc
     },
     annotations: { title: '記録を探す', ...readOnly },
   }, async ({ query, project, kinds, since, until, sort, limit, offset }) => guard(async () =>
-    text(hide(await find(config, query ?? '', { project, kinds: kinds as FindKind[] | undefined, since, until, sort, limit, offset, pagingHint: true })))));
+    // 続きの案内はCLIの --offset ではなく、このツールのoffset引数で示す。
+    text(hide(await find(config, query ?? '', { project, kinds: kinds as FindKind[] | undefined, since, until, sort, limit, offset, pagingHint: true, hide }))
+      .replace(/。続きは --offset (\d+)$/, '。続きは offset: $1 で取得'))));
 
   server.registerTool('contexthub_policies', {
     title: '有効方針',
@@ -146,17 +164,18 @@ export function createServer(config: HubConfig, options: ServerOptions = {}): Mc
   }, async ({ project }) => guard(async () => {
     if (project !== undefined) return text(hide(formatPolicies(await readPolicies(config, await policyProjectFor(config, project)))));
     const target = await folderTarget(), read = await readPolicies(config, target.kind === 'one' ? target.projectId : undefined);
-    const warnings = [...read.warnings, ...(target.missingRoots ? [missingRootsWarning(target.missingRoots)] : []),
-      ...(target.kind === 'ambiguous' ? ['作業フォルダーが複数のプロジェクトに対応するため、共通の方針だけを示しています。projectを指定するとプロジェクトの方針も読めます。'] : [])];
+    const unmapped = target.kind === 'ambiguous' || target.kind === 'unregistered';
+    const warnings = [...read.warnings.filter(w => !unmapped || w !== UNMAPPED_POLICY_WARNING), ...(target.missingRoots ? [missingRootsWarning(target.missingRoots)] : []),
+      ...(unmapped ? [`${undecided(target)}。共通方針のみ示しています。projectを指定するとプロジェクトの方針も読めます。`] : [])];
     return text(hide(formatPolicies({ ...read, warnings })));
   }));
 
   server.registerTool('contexthub_pending', {
     title: '未整理と失敗',
-    description: `まだ整理されていない入力と整理に失敗した入力を返す（ctx pendingと同じ）。保存した作業要約が受け付けられたかを確かめるときに使う。${dataNotice}`,
+    description: `Miniが受け付けた入力のうち、まだ整理されていないものと整理に失敗したものを返す（ctx pendingと同じ）。受付前のREQ（同期待ち・受付で断られたもの）は出ない。${dataNotice}`,
     inputSchema: {},
     annotations: { title: '未整理と失敗', ...readOnly },
-  }, async () => guard(async () => text(hide(await pending(config)))));
+  }, async () => guard(async () => text(hide(await pending(config, { hide })))));
 
   server.registerTool('contexthub_save_work_summary', {
     title: '作業要約を保存',
@@ -186,38 +205,36 @@ export function createServer(config: HubConfig, options: ServerOptions = {}): Mc
       }
       let chosen: string | undefined, basis: string;
       if (project !== undefined) {
-        if (!(await readProjects(config)).some(p => p.id === project)) return refuse(`プロジェクト ${project} は登録されていません。\n\n${(await projectList('none')).replace(/^[^\n]*\n\n/, '')}`);
+        if (!(await readProjects(config)).some(p => p.id === project)) return refuse(`プロジェクト ${project} は登録されていません。\n\n${await projectLines()}`);
         chosen = project; basis = '指定';
       } else {
-        const target = await folderTarget();
-        if (target.kind === 'one') { chosen = target.projectId; basis = '作業フォルダーの対応から決定'; }
-        else basis = target.kind === 'ambiguous' ? '作業フォルダーが複数のプロジェクトに対応するため未指定。整理で判断します' : '作業フォルダーに対応がないため未指定。整理で判断します';
+        // プロジェクトは未指定でも保存できるので、作業フォルダーの対応を確かめられないとき（設定の重複・権限など）も保存は断らない。
+        let target: Target | undefined;
+        try { target = await folderTarget(); } catch { target = undefined; }
+        if (target?.kind === 'one') { chosen = target.projectId; basis = '作業フォルダーの対応から決定'; }
+        else basis = `${target ? undecided(target) : '作業フォルダーの対応を確かめられません'}。未指定で保存し、整理で判断します`;
       }
       const toolName = tool ?? clientTool(server.server.getClientVersion()?.name);
       const id = `REQ-${(options.requestToken ?? (() => randomBytes(16).toString('hex')))()}`;
       const meta = { schema_version: 1, request_id: id, operation: 'capture', source: SAVE_SOURCE, occurred_at: now, kind: 'work-summary',
         ...(chosen ? { project: chosen } : {}), ...(toolName ? { tool: toolName } : {}), ...(happened_on ? { happened_on } : {}) };
       const content = `---\n${JSON.stringify(meta)}\n---\n${body}`;
-      // Miniの受付と同じ検証を保存前に通す（形式・上限の誤りでREQを作らない）。
+      // 受付と同じ検証を、この端末の設定（本文の上限など）で保存前に通す（形式・上限の誤りでREQを作らない）。
       parseIntake(`Input/${id}.md`, content, config.capture.maxInputChars);
       request = { id, content, ...(chosen ? { project: chosen } : {}), basis };
     } catch (error) { return refuse(userFacingError(error)); }
-    let attempted = false;
+    const vault = new Vault(config), rel = `Input/${request.id}.md`;
+    // 保存先のパス（symlinkを通らないこと）を先に確かめる。ここで失敗したときは何も作っていない。
+    try { await vault.path(rel, true); } catch (error) { return refuse(userFacingError(error)); }
     try {
-      const path = await new Vault(config).path(`Input/${request.id}.md`, true);
-      attempted = true;
-      const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      try { await handle.writeFile(request.content, 'utf8'); await handle.sync(); } finally { await handle.close(); }
-      const folder = await open(dirname(path), 'r');
-      try { await folder.sync(); } finally { await folder.close(); }
-    } catch (error) {
-      return attempted
-        ? text(`保存の結果が不明です。再実行せず、Input/${request.id}.md があるかを本人と確認してください。`, true)
-        : refuse(userFacingError(error));
+      // 共通の耐久書き込み。一時ファイル（受付が読まない「.」で始まる名前）に書いてから同じ名前がないときだけ置くので、書きかけのREQを残さない。
+      if (!await vault.create(rel, request.content)) return refuse('同じIDの受付ファイルが既にあります。もう一度保存してください');
+    } catch {
+      return text(`保存の結果が不明です。再実行せず、${rel} があるかを本人と確認してください。`, true);
     }
     return text([
       `保存しました: ${request.id}（Input/${request.id}.md）`,
-      '状態: 端末保存済み（Mini未受領）。同期後にMiniが受け付けて整理します。受領と整理の状況は contexthub_pending で確かめられます。',
+      '状態: 端末保存済み（Mini未受領）。同期後にMiniが受け付けて整理します。受け付けた後の整理待ちは contexthub_pending に出所 mac-agent の入力として出ます（REQ IDは出ません）。受付で断られたかどうかは本人がHOMEで確かめます。同じ内容を保存し直さないでください。',
       `プロジェクト: ${request.project ?? '未指定'}（${request.basis}）`,
     ].join('\n'));
   });

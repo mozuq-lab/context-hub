@@ -137,10 +137,12 @@ export function registerHub(api: PluginApi, deps: HubDependencies): void {
             const hubConfig = await deps.loadConfig(config.configPath);
             if (!hubConfig.capture.allowedSenderIds.includes(ctx.requesterSenderId!)) return output('送信者の許可設定を確認してください。', false);
             let text: string;
-            if (name === 'ctx_find' && command) text = await deps.find(hubConfig, command);
+            // 抜粋を切ると秘密の値だけが残って伏せ字の規則に当たらないことがあるため、切る前の本文にも伏せ字をかける。
+            const hide = (value: string) => redactText(value, secretSettings(hubConfig)).text;
+            if (name === 'ctx_find' && command) text = await deps.find(hubConfig, command, { hide });
             else if (name === 'ctx_resume' && /^[a-z0-9][a-z0-9-]{1,40}$/u.test(command)) text = await deps.resume(hubConfig, command);
-            else if (name === 'ctx_recent' && (command === '' || (/^\d{1,2}$/u.test(command) && Number(command) >= 1 && Number(command) <= 50))) text = await deps.recent(hubConfig, command ? Number(command) : undefined);
-            else if (name === 'ctx_pending' && command === '') text = await deps.pending(hubConfig);
+            else if (name === 'ctx_recent' && (command === '' || (/^\d{1,2}$/u.test(command) && Number(command) >= 1 && Number(command) <= 50))) text = await deps.recent(hubConfig, command ? Number(command) : undefined, { hide });
+            else if (name === 'ctx_pending' && command === '') text = await deps.pending(hubConfig, { hide });
             else if (name === 'ctx_help' && command === '') text = help;
             else return output('引数が不正です。/ctx_help を参照してください。', false);
             // 返す本文はDiscordとエージェントのモデルへ渡るため、contextと同じく秘密情報らしい文字列を伏せる（CLIのfindは本人の端末なので伏せない）。
