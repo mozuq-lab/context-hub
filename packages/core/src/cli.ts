@@ -57,8 +57,8 @@ async function config(overrides:ConfigOverrides={}): Promise<HubConfig> {
   return loadConfig(opts.config,{...(opts.vault?{vaultPath:opts.vault}:{}),...(opts.state?{statePath:opts.state}:{}),...overrides});
 }
 function positive(value:string): number { const n=Number(value);if(!Number.isSafeInteger(n)||n<1)throw new Error('正の整数を指定してください');return n; }
-/** CLIで書く望む結果。引数の中の「\\n」を改行として読む。 */
-const outcomeArg=(value:string)=>value.replace(/\\n/g,'\n');
+/** CLIで書く望む結果。引数の中の「\\n」を改行として読み、「\\\\」は「\\」1つとして読む（「C:\\\\new」のように書ける）。 */
+const outcomeArg=(value:string)=>value.replace(/\\([\\n])/g,(_,c:string)=>c==='n'?'\n':'\\');
 async function inputText(text:string|undefined, file:string|undefined,max:number):Promise<string> {
   if(text!==undefined&&file)throw new Error('本文と --file は同時に指定できません');
   if(text!==undefined)return text;

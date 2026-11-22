@@ -6,9 +6,11 @@ import { addProject, readProjects, normalizeOutcome, outcomeLines } from '../src
 import { setProjectDefinition, readProjectDefinitionChanges, withDefinition } from '../src/project-definition.js';
 import { ingest, intakeFeatures, readIntakeReceipts } from '../src/intake.js';
 import { capture } from '../src/capture.js';
+import { readReceipts } from '../src/views.js';
 import { organize } from '../src/organize.js';
 import { runCycle } from '../src/cycle.js';
 import { MockLlm, buildOrganizePrompt } from '../src/llm.js';
+import { PromptTooLargeError } from '../src/infer.js';
 import { doctor } from '../src/doctor.js';
 import { resume, context } from '../src/retrieve.js';
 import { buildDigest } from '../src/digest.js';
@@ -218,4 +220,37 @@ test('プロジェクト案の採用で望む結果を書き添えられ、同�
   expect(await decideProject(config, { ...request, outcome: ' 夏に収穫する ' })).toMatchObject({ deduped: true });
   expect(await decideProject(config, request)).toMatchObject({ deduped: true });
   await expect(decideProject(config, { ...request, outcome: '別の文' })).rejects.toThrow('異なる承認');
+});
+
+test('箇条書きの印だけの文は外す扱いにし、変わらない望む結果は書き方とコメントを保つ', async () => {
+  expect(normalizeOutcome('・\n- ')).toBe('');
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'garden', title: '家庭菜園', outcome: '・' });
+  expect(await read(vault)).not.toContain('outcome');
+  // 手で書いた望む結果（コメント付きのブロック）。
+  await vault.write(path, (await read(vault)).replace('status: active', 'status: active\noutcome: | # 完了の基準\n   夏に収穫する \n\n   家族で食べる'));
+  const before = await read(vault);
+  const result = await setProjectDefinition(config, { projectId: 'garden', title: '家庭菜園', aliases: ['菜園'], keywords: [], outcome: '夏に収穫する\n家族で食べる', expectedHash: hash(before), source: 'app', sourceEventId: 'REQ-1' });
+  expect(result.changed).toEqual(['aliases']);
+  const saved = await read(vault);
+  expect(saved).toContain('outcome: | # 完了の基準\n   夏に収穫する \n\n   家族で食べる');
+  expect((await readProjectDefinitionChanges(vault))[0]!.after.outcome).toBeUndefined();
+  // 同じ受付の再送も同じ変更として受け付ける。
+  expect(await setProjectDefinition(config, { projectId: 'garden', title: '家庭菜園', aliases: ['菜園'], keywords: [], outcome: '夏に収穫する\n家族で食べる', expectedHash: hash(before), source: 'app', sourceEventId: 'REQ-1' })).toMatchObject({ deduped: true });
+  // 箇条書きの印だけを送ると外す。
+  await setProjectDefinition(config, { projectId: 'garden', title: '家庭菜園', aliases: ['菜園'], keywords: [], outcome: '・', expectedHash: hash(saved), source: 'cli' });
+  expect((await readProjects(config))[0]!.outcome).toBeUndefined();
+  expect(await read(vault)).toContain('status: active\n---');
+});
+
+test('望む結果を足して整理のプロンプトが上限を超えるときは、望む結果を渡さずに整理し直す', async () => {
+  const { config, vault } = await workflowSetup(roots);
+  await addProject(config, { id: 'garden', title: '家庭菜園', outcome: '夏に収穫する' });
+  await capture(config, { source: 'cli', occurredAt: '2026-10-01T10:00:00Z', text: '苗を買った' });
+  const prompts: string[] = [], mock = new MockLlm();
+  const llm = { complete: async (prompt: string, options: never) => { prompts.push(prompt); if (prompt.includes('"outcome"')) throw new PromptTooLargeError(); return mock.complete(prompt, options); } };
+  await organize(config, llm as never);
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).not.toContain('夏に収穫する');
+  expect((await readReceipts(config)).map(r => r.status)).toEqual(['organized']);
 });

@@ -3,7 +3,7 @@ import { ulid } from 'ulid';
 import { parse, parseDocument, isMap, isScalar, isSeq } from 'yaml';
 import { Vault, hash, parseMarkdown } from './storage.js';
 import { frontmatterParts, withFrontmatterBody } from './frontmatter-lines.js';
-import { PROJECT_OUTCOME_CHARS, assertNotMerged, normalizeOutcome, outcomeLines, projectIdSchema, projectSchema, readProjects } from './projects.js';
+import { PROJECT_OUTCOME_CHARS, assertNotMerged, cleanOutcome, normalizeOutcome, outcomeLines, projectIdSchema, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
 import type { HubConfig } from './types.js';
 
@@ -62,9 +62,18 @@ export function normalizeDefinition(value: ProjectDefinition): ProjectDefinition
   return projectDefinitionSchema.parse({ title: value.title.replace(/[\r\n\t]+/g, ' ').trim(), aliases: normalizeTerms(value.aliases), keywords: normalizeTerms(value.keywords), ...(outcome !== undefined ? { outcome } : {}) });
 }
 const same = (a: ProjectDefinition, b: ProjectDefinition) => JSON.stringify(a) === JSON.stringify(b);
-/** 変わった項目名（title・aliases・keywords・outcome）。望む結果は、変更後に指定があり、書いていた文と違うときだけ変わったとする。 */
+/**
+ * 変わった項目名（title・aliases・keywords・outcome）。望む結果は、変更後に指定があり、書いていた文を整えたものと違うときだけ変わったとする
+ * （手で書いた文の空白や書き方の違いだけでは書き換えない）。
+ */
 export function changedFields(before: ProjectDefinition, after: ProjectDefinition): ProjectDefinitionField[] {
-  return [...(['title', 'aliases', 'keywords'] as const).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k])), ...(after.outcome !== undefined && (before.outcome ?? '') !== after.outcome ? ['outcome' as const] : [])];
+  return [...(['title', 'aliases', 'keywords'] as const).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k])), ...(after.outcome !== undefined && cleanOutcome(before.outcome) !== after.outcome ? ['outcome' as const] : [])];
+}
+/** 変わらない望む結果は送られなかったものとして扱う（project.mdの書き方とコメントを保ち、記録にも残さない）。 */
+function withoutUnchangedOutcome(before: ProjectDefinition, after: ProjectDefinition): ProjectDefinition {
+  if (after.outcome === undefined || changedFields(before, after).includes('outcome')) return after;
+  const { outcome: _outcome, ...rest } = after;
+  return rest;
 }
 
 /** YAMLとして元の値に戻る、なるべく素の書き方。戻らなければJSON（YAMLの二重引用符）で書く。 */
@@ -195,6 +204,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
     if (r.sourceEventId) {
       const previous = (await readProjectDefinitionChanges(vault)).find(c => c.source === r.source && c.source_event_id === r.sourceEventId);
       if (previous) {
+        after = withoutUnchangedOutcome(previous.before, after);
         if (previous.project_id !== r.projectId || previous.before_hash !== r.expectedHash || !same(previous.after, after)) throw new Error('同じ受付IDで別の定義変更が記録されています');
         const result = { projectId: r.projectId, changeId: previous.id, deduped: true, changed: changedFields(previous.before, previous.after) };
         if (current === previous.after_hash) return result;
@@ -207,6 +217,7 @@ export async function setProjectDefinition(config: HubConfig, request: ProjectDe
     // 統合済みのプロジェクトの名前・別名・キーワードは統合先へ足してある。統合先の定義を変えるか、統合を取り消してから変える。
     assertNotMerged(projects, r.projectId);
     if (current !== r.expectedHash) throw new Error('プロジェクト定義が変更されています。再確認してください');
+    after = withoutUnchangedOutcome(before, after);
     const changed = changedFields(before, after);
     if (!changed.length) throw new Error('名前・別名・キーワード・望む結果に変更がありません');
     const next = withDefinition(raw, after);

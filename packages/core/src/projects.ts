@@ -11,23 +11,31 @@ export const PROJECT_OUTCOME_LINES = 10;
 export const outcomeLimitMessage = `望む結果は${PROJECT_OUTCOME_CHARS}文字・${PROJECT_OUTCOME_LINES}行までにしてください`;
 /**
  * 望む結果の正規化。改行はLFにし、タブは空白にし、各行の前後の空白と空の行を除く。空なら空文字（望む結果を外す）。
- * 改行とタブのほかの制御文字と、上限を超える文は受け付けない。
+ * 表示する行が残らない文（箇条書きの印だけなど）も空文字にする。改行とタブのほかの制御文字と、上限を超える文は受け付けない。
+ * 上限の文字数はUTF-16の単位で数える（アプリの`normalizeProjectOutcome`と同じ）。
  */
 export function normalizeOutcome(text: string): string {
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(text)) throw new Error('望む結果に使えない文字が含まれています');
-  const lines = text.replace(/\r\n?/g, '\n').replaceAll('\t', ' ').split('\n').map(l => l.trim()).filter(Boolean);
-  const value = lines.join('\n');
-  if (value.length > PROJECT_OUTCOME_CHARS || lines.length > PROJECT_OUTCOME_LINES) throw new Error(outcomeLimitMessage);
+  const value = cleanOutcome(text), lines = value ? value.split('\n').length : 0;
+  if (value.length > PROJECT_OUTCOME_CHARS || lines > PROJECT_OUTCOME_LINES) throw new Error(outcomeLimitMessage);
   return value;
+}
+/** 上限を確かめない正規化（手で書いた文と、送られた文が同じかを比べるのに使う）。 */
+export function cleanOutcome(text: string | null | undefined): string {
+  const value = (text ?? '').replace(/\r\n?/g, '\n').replaceAll('\t', ' ').split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+  return outcomeLines(value).length ? value : '';
 }
 /**
  * 表示とAIへ渡すための望む結果の行。手で書いた文も読めるよう、制御文字を空白にし、空の行を除き、行頭の箇条書きの印を外す。
  * アプリが登録簿のハッシュを同じ規則で求めるので、変えるときはアプリの`outcomeLines`もそろえる。
  */
 export function outcomeLines(outcome: string | null | undefined): string[] {
-  return (outcome ?? '').replace(/\r\n?/g, '\n').split('\n').map(l => l.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().replace(/^(?:[-*+]\s+|・\s*)+/, '').trim()).filter(Boolean);
+  return (outcome ?? '').replace(/\r\n?/g, '\n').split('\n').map(l => l.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().replace(/^(?:[-*+](?:\s+|$)|・\s*)+/, '').trim()).filter(Boolean);
 }
-/** AIへ渡す・登録簿のハッシュに含める望む結果。書いていなければundefined（書いていない定義のハッシュとAIへ渡す内容を変えない）。 */
+/**
+ * AIへ渡す・登録簿のハッシュに含める望む結果。書いていなければundefined（書いていない定義のハッシュとAIへ渡す内容を変えない）。
+ * 先頭からコードポイントで500文字に切る（アプリの`projectOutcomeForPrompt`はrunesで同じく切る）。
+ */
 export function outcomeForPrompt(outcome: string | null | undefined): string | undefined {
   const text = Array.from(outcomeLines(outcome).join('\n')).slice(0, PROJECT_OUTCOME_CHARS).join('');
   return text || undefined;
