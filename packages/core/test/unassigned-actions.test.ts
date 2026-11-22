@@ -15,8 +15,10 @@ import { UNASSIGNED_CLOSED_MAX, UNASSIGNED_HOME_MEMOS, UNASSIGNED_MEMOS_MAX, UNA
 import { parseIntake } from '../src/intake-format.js';
 import { ItemTargetError, UNASSIGNED_SCOPE, nowItemsSchema, readItemResolutions, readNowItems, setItemResolution } from '../src/item-resolutions.js';
 import { setItemSchedule } from '../src/item-schedules.js';
-import { ingest } from '../src/intake.js';
+import { ingest, readIntakeReceipts } from '../src/intake.js';
+import { readInputs } from '../src/capture.js';
 import { packet } from './workflow-fixtures.js';
+import type { LlmClient } from '../src/types.js';
 import type { HubConfig, OrganizeResult } from '../src/types.js';
 
 const roots: string[] = [];
@@ -251,5 +253,110 @@ describe('プロジェクト未定の次の一手', () => {
     expect(items).toHaveLength(UNASSIGNED_CLOSED_MAX);
     expect(items.every(i => i.resolution !== null)).toBe(true);
     expect(items[0]!.input_id).toBe(ids[3]);
+  });
+});
+
+describe('プロジェクトを決めずに追加した行動', () => {
+  const noModel: LlmClient = { complete: async () => { throw new Error('モデルは呼ばない'); } };
+  const home = async (vault: Vault) => (await vault.read('HOME.md'))!.split('## プロジェクト未定の次の一手')[1]?.split('\n## ')[0];
+
+  test('受付ファイルからプロジェクトなしで追加した行動は、モデルを呼ばずにプロジェクト未定の項目一覧の先頭とHOMEに載る', async () => {
+    const { config, vault } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    const id = await memo(config, '講習の申込をする', '2026-11-01T09:00:00+09:00', result({ category: 'task' }));
+    await packet(config, { kind: 'action', source: 'flutter-mac' }, '牛乳を買う');
+    expect(await ingest(config)).toMatchObject({ accepted: 1 });
+    const [action] = (await readInputs(config)).filter(i => i.kind === 'action');
+    expect(action).toMatchObject({ kind: 'action', text: '牛乳を買う' });
+    expect(action!.project).toBeUndefined();
+    expect((await readIntakeReceipts(config))[0]!.result).toMatchObject({ inputId: action!.id });
+    // 保存した時点で（HOMEの作り直しを待たずに）項目一覧の先頭に載る。メモの一覧（旧版のアプリが読む形）には載せない。
+    const items = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items;
+    const key = unassignedItemKey(action!.id, '牛乳を買う');
+    expect(items[0]).toEqual({ key, section: 'next', label: '本人が追加: ', text: '牛乳を買う', input_id: action!.id, resolution: null, action: {} });
+    expect(items[1]).toMatchObject({ input_id: id, text: '講習の申込をする' });
+    expect(JSON.parse((await vault.read(unassignedActionsPath))!).memos.map((m: { input_id: string }) => m.input_id)).toEqual([id]);
+    // どのプロジェクトのNOWにも載らない。モデルは呼ばない。
+    await organize(config, noModel);
+    expect((await vault.read('10_projects/hub/NOW.md')) ?? '').not.toContain('牛乳を買う');
+    await rebuildDashboard(config);
+    const section = (await home(vault))!;
+    expect(section).toMatch(/^（本人が追加した行動1件・メモ1件）/);
+    expect(section).toContain(`- 本人が追加: 牛乳を買う — [${action!.id}](${action!.path})`);
+    expect(section.indexOf('牛乳を買う')).toBeLessThan(section.indexOf('講習の申込をする'));
+    expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).action_scopes).toEqual([UNASSIGNED_SCOPE]);
+  });
+
+  test('完了・却下（もう古い）・未解決へ戻すが使え、片付けるとHOMEから外れる。期日は付けられない', async () => {
+    const { config, vault } = await setup();
+    const saved = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-01T00:00:00Z', text: '歯医者を予約する' });
+    const key = unassignedItemKey(saved.inputId, '歯医者を予約する');
+    await rebuildDashboard(config);
+    expect(await home(vault)).toContain('本人が追加: 歯医者を予約する');
+    await expect(setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, action: 'exclude', reason: 'misread', source: 'cli' })).rejects.toThrow('もう古い');
+    await expect(setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, due: '2026-11-20', reviewAfter: null, source: 'cli' })).rejects.toThrow();
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, action: 'resolve', source: 'cli' });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items).toEqual([expect.objectContaining({ key, action: {}, resolution: expect.objectContaining({ source: 'cli' }) })]);
+    await rebuildDashboard(config);
+    expect(await home(vault)).toBeUndefined();
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, action: 'reopen', source: 'cli' });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items).toEqual([expect.objectContaining({ key, resolution: null })]);
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, action: 'exclude', reason: 'outdated', source: 'cli' });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items[0]!.resolution).toMatchObject({ action: 'exclude', reason: 'outdated' });
+  });
+
+  test('文面を直すとすぐに一覧へ反映し、完了の報告は引き継がない', async () => {
+    const { config, vault } = await setup();
+    const saved = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-01T00:00:00Z', text: '牛乳を買う' });
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: unassignedItemKey(saved.inputId, '牛乳を買う'), action: 'resolve', source: 'cli' });
+    await correctInput(config, saved.inputId, { source: 'cli', occurredAt: '2026-11-02T00:00:00Z', text: '牛乳と卵を買う\n' });
+    const items = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items;
+    expect(items.map(i => [i.text, i.resolution === null])).toEqual([['牛乳と卵を買う', true]]);
+    expect(items[0]!.key).toBe(unassignedItemKey(saved.inputId, '牛乳と卵を買う'));
+  });
+
+  test('多くのメモが届いても、本人が追加した行動は項目一覧から押し出さない', async () => {
+    const { config } = await setup();
+    const saved = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-10-01T00:00:00Z', text: '古い行動' });
+    const units = await readEffectiveInputs(config);
+    // 整理済みのメモを上限より多く並べたものと同じ入力を作る（モデルは使わない）。
+    const memoUnit = units[0]!;
+    const many = Array.from({ length: 120 }, (_, i) => {
+      const id = `IN-${String(i).padStart(26, '0')}`;
+      const root = { ...memoUnit.chain.root, id, kind: 'memo' as const, project: undefined, text: `メモ${i}`, path: `00_inbox/2026-11-01_${id}.md`, occurred_at: '2026-11-01T00:00:00Z' };
+      return { chain: { root, revisions: [], latest: root, evidenceHash: '' }, receipt: { input_id: id, status: 'organized', result: result({ category: 'task' }) } as never, pendingCorrection: false };
+    });
+    const { items } = (await import('../src/unassigned-actions.js')).buildUnassigned(config, [...units, ...many], new Date('2026-11-10T00:00:00Z'));
+    expect(items.items[0]).toMatchObject({ input_id: saved.inputId, text: '古い行動', action: {} });
+    expect(items.items).toHaveLength(101);
+  });
+
+  test('プロジェクト未定のAIの行を行動にすると一覧から外し、プロジェクトのNOWの行もプロジェクトを決めない行動にできる', async () => {
+    const { config, vault } = await setup();
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    const id = await memo(config, '講習の申込をする', '2026-11-01T09:00:00+09:00', result({ category: 'task', next_action_suggestions: ['日程を調べる', '費用を確かめる'] }));
+    await rebuildDashboard(config);
+    const taskKey = unassignedItemKey(id, '講習の申込をする');
+    // メモの行は項目キー付きで、提案は直した文面でプロジェクトの行動にする。
+    const own = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-02T00:00:00Z', text: '講習の申込をする', meta: { action_from_input: id, action_from_text: '講習の申込をする', action_from_key: taskKey } });
+    await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-02T01:00:00Z', text: '費用を確かめて予算に入れる', meta: { action_from_input: id, action_from_text: '費用を確かめる' } });
+    const items = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items;
+    expect(items.map(i => [i.label, i.text])).toEqual([['本人が追加: ', '講習の申込をする'], ['AI提案: ', '日程を調べる']]);
+    expect(items[0]!.action).toEqual({ from: { input_id: id, text: '講習の申込をする', key: taskKey } });
+    expect(items[0]!.input_id).toBe(own.inputId);
+    expect(JSON.parse((await vault.read(unassignedActionsPath))!).memos).toEqual([expect.objectContaining({ input_id: id, task: false, suggestions: ['日程を調べる'] })]);
+    expect((await vault.read('10_projects/hub/NOW.md'))!).toContain('本人が追加: 費用を確かめて予算に入れる');
+
+    // プロジェクトのNOWの提案を、プロジェクトを決めない行動にする。元の行はプロジェクトのNOWから外れる。
+    const hubMemo = await memo(config, '集約ツールの画面を直す', '2026-11-03T09:00:00+09:00', result({ category: 'idea', next_action_suggestions: ['色を決める'] }), { project: 'hub' });
+    expect((await vault.read('10_projects/hub/NOW.md'))!).toContain('AI提案: 色を決める');
+    await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-04T00:00:00Z', text: '色を決める', meta: { action_from_input: hubMemo, action_from_text: '色を決める' } });
+    expect((await vault.read('10_projects/hub/NOW.md'))!).not.toContain('色を決める');
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.map(i => i.text)).toContain('色を決める');
+    // 同じ受付IDの再送では保存せず、一覧の作り直しだけを行う。
+    const again = { source: 'cli', sourceEventId: 'ev-1', kind: 'action' as const, occurredAt: '2026-11-05T00:00:00Z', text: '電池を買う' };
+    const first = await capture(config, again);
+    expect(await capture(config, again)).toMatchObject({ inputId: first.inputId, deduped: true });
+    expect((await readInputs(config)).filter(i => i.kind === 'action')).toHaveLength(4);
   });
 });

@@ -155,7 +155,6 @@ test('行動の文面を直すと元の文面は残り、NOWは直した文面�
 test('行動の文面・プロジェクト・元の行の参照を検証し、統合済みのプロジェクトには追加しない', async () => {
   const { config } = await fixture();
   const base = { source: 'cli', kind: 'action' as const, occurredAt: '2026-11-01T00:00:00Z' };
-  await expect(capture(config, { ...base, text: '請求書を送る' })).rejects.toThrow('プロジェクトの指定');
   await expect(capture(config, { ...base, project: 'hub', text: 'あ'.repeat(201) })).rejects.toThrow('200文字以内');
   await expect(capture(config, { ...base, project: 'hub', text: '一行目\n二行目' })).rejects.toThrow('1行');
   await expect(capture(config, { ...base, project: 'hub', text: ' 前に空白' })).rejects.toThrow('空白');
@@ -173,7 +172,7 @@ test('行動の文面・プロジェクト・元の行の参照を検証し、�
   await mergeProjects(config, { fromId: 'old', intoId: 'hub', fromHash: await projectHash('old'), intoHash: await projectHash('hub'), source: 'cli' });
   await expect(capture(config, { ...base, project: 'old', text: '送る' })).rejects.toThrow('統合');
   // 受付ファイルの不正な行動は、受け付けずに理由を記録する。
-  await packet(config, { kind: 'action' }, '請求書を送る');
+  await packet(config, { kind: 'action', project: 'hub' }, '請求書を送る\n領収書も');
   expect((await ingest(config)).accepted).toBe(0);
 });
 
