@@ -2,7 +2,7 @@ import { clipText, listText } from './markdown-text.js';
 import {rebuildPoliciesLocked,readPolicies} from './policies.js';
 import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
-import { readNowItems,readItemResolutions,activeResolutions } from './item-resolutions.js';
+import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { effortLabel,type ItemEffort } from './item-efforts.js';
 import { effectiveSchedules,readItemOccurrences,readItemSchedules,repeatLabel,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
 import { readAskRecords } from './ask.js';
@@ -16,12 +16,12 @@ import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel,lastEvide
 import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage,writeIntakeFeaturesLocked,isIntakeRefusal,refusalNoticeVisible,REFUSAL_NOTICE_DAYS } from './intake.js';
 import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
+import { actionSource } from './actions.js';
 import { referencesStopped,referencesPath,unassignedReferenceSection } from './references.js';
 import type { HubConfig, Input } from './types.js';
 import { describeFindings, findSecrets, secretSettings, writePrivacyPatternsLocked } from './secrets.js';
 import { rebuildIdeaIndexLocked, ideaSection } from './idea-links.js';
-import { rebuildUnassignedActionsLocked, unassignedActionsSection } from './unassigned-actions.js';
-import { actionSource, sourceRef } from './actions.js';
+import { UNASSIGNED_TITLE, rebuildUnassignedActionsLocked, unassignedActionsSection } from './unassigned-actions.js';
 import { insightsNotices, insightsSection, rebuildInsightsLocked } from './insights.js';
 import { isDeepStrictEqual } from 'node:util';
 import { readExclusionOverlays, rereadResolutionIds } from './item-rereads.js';
@@ -89,9 +89,9 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 本人が付けた期日・見直す日。期日が7日以内の項目はプロジェクトをまたいで前に出し、見直す日が先の項目はたたむ。
   const today=todayIn(config.timezone,clock),schedules=await readItemSchedules(vault),resolutionRecords=schedules.records.length?await readItemResolutions(vault):[];
   const dated:{bucket:'overdue'|'today'|'week';due:string;id:string;row:string}[]=[],orphaned:string[]=[];let resting=0;
-  // プロジェクトを決めない行動に引き取ったAIの行（根拠の入力IDと本文の組・項目キー）。
-  const unassignedTaken={refs:new Set<string>(),keys:new Set<string>()};
-  for(const unit of effective){const from=unit.chain.root.project===undefined?actionSource(unit.chain.root):undefined;if(from){unassignedTaken.refs.add(sourceRef(from.input_id,from.text));if(from.key)unassignedTaken.keys.add(from.key);}}
+  // 行動に引き取った行の項目キー。その行の日付は行動へ引き継ぐ（置き場が違っても）ため、元の置き場で付け直しを求めない。
+  const takenKeys=new Set<string>();
+  for(const unit of effective){const key=actionSource(unit.chain.root)?.key;if(key)takenKeys.add(key);}
   // カレンダーに書き出す、進行中のプロジェクトの日付付きの項目（HOMEの「次の一手」と同じ範囲）。
   const calendarItems:CalendarItem[]=[];
   for(const project of projects){
@@ -123,13 +123,23 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
-    // プロジェクトを決めない行動に引き取った行の日付は、付け直す先がない（プロジェクト未定の行に期日は付けない）ため示さない。
-    for(const s of loose)if(!unassignedTaken.refs.has(sourceRef(s.input_id,s.text))&&!unassignedTaken.keys.has(s.item_key))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
+    for(const s of loose)if(!takenKeys.has(s.item_key))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     // 本人が付けた手間の目安も、日付と並べて行末に示す（NOWの項目一覧に載っている）。
     const later=(i:{key:string;effort?:ItemEffort})=>{const s=scheduled.get(i.key),label=[s?scheduleLabel(s):'',i.effort?effortLabel(i.effort):''].filter(Boolean).join('・');return label?`（${label}）`:'';};
     if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${later(i)}${i.hints?.length?'（片付いたかも・要確認）':''}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
    }catch{nextUnread.push(project.title);nextProblems.push(`- [NOW項目の記録が不正です](90_system/now-items/${project.id}.json)`);}
+  }
+  // プロジェクトを決めずに本人が追加した行動と、どのプロジェクトにも結び付いていないメモから出たタスクの分類とAIの提案。アプリが読む一覧も同時に書く（内容が変わったときだけ）。
+  const unassignedBuilt=await rebuildUnassignedActionsLocked(config,vault,effective,clock),unassignedFront=new Set<string>();
+  // プロジェクト未定の行動に本人が付けた期日も、プロジェクトの項目と一緒に期日順で前に出し、見直す日が先の行動はたたむ。
+  for(const i of unassignedBuilt.items.items){
+   if(!i.action||i.resolution!==null||!i.schedule)continue;
+   const schedule={due:i.schedule.due,review_after:i.schedule.review_after},repeat=i.schedule.repeat;
+   calendarItems.push({projectId:UNASSIGNED_SCOPE,projectTitle:UNASSIGNED_TITLE,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedules.records.find(r=>r.id===i.schedule!.id)?.created_at??clock.toISOString()});
+   const {bucket,hidden}=scheduleBucket(schedule,today);
+   if(hidden)resting++;
+   else if(bucket==='overdue'||bucket==='today'||bucket==='week'){unassignedFront.add(i.key);dated.push({bucket,due:schedule.due!,id:UNASSIGNED_SCOPE,row:`- 期日 ${schedule.due}${repeat?`（${repeatLabel(repeat)}）`:''} — ${UNASSIGNED_TITLE} 次の一手: ${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
   }
   // 進行中は最近動いた順、停滞は長く止まっている順に並べる。
   const group=(name:'active'|'stale'|'inactive'|'merged')=>listed.filter(x=>x.group===name).sort((a,b)=>name==='stale'?a.at-b.at:b.at-a.at).map(x=>x.row);
@@ -140,8 +150,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const order={overdue:0,today:1,week:2} as const,datedRows=dated.sort((a,b)=>order[a.bucket]-order[b.bucket]||a.due.localeCompare(b.due)||a.id.localeCompare(b.id));
   const usesDates=dated.length>0||resting>0||orphaned.length>0;
   const datedPart=!usesDates?'':`期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
-  const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOWとアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
-  const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
+  const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOW・プロジェクト未定の一覧とアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
+  const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
   const projectSections=`## プロジェクト一覧\n${rows.join('\n')||(listed.length?'進行中で最近動いたプロジェクトはありません。':'プロジェクトはまだありません。')}${staleRows.length?`\n\n## 停滞しているプロジェクト（${staleRows.length}件）\n最終根拠から${config.retrieve.staleDays}日を超えて新しい入力がない進行中のプロジェクトです。再開するか、休止・完了にするかを判断してください。\n${staleRows.join('\n')}`:''}${inactiveRows.length?`\n\n## 休止・完了（${inactiveRows.length}件）\n${inactiveRows.join('\n')}`:''}${mergedRows.length?`\n\n## 統合済み（${mergedRows.length}件）\n本人が別のプロジェクトへまとめたプロジェクトです。統合元の入力・完了報告・日付は統合先のものとして読み替えており、原文と記録は動かしていません。取り消すにはアプリのプロジェクト画面か\`ctx project unmerge\`を使います。\n${mergedRows.join('\n')}`:''}`;
   // 本人が設定したリポジトリのコミットから作った下書きのうち、未確認のもの。
   const draftRecords=await readGitDraftRecords(config),drafts=draftRecords.drafts.filter(d=>d.status==='pending'),gitProblems=await readGitCollectProblems(vault);
@@ -169,8 +179,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 件数は1行にまとめて先に示す。行の一覧は対応が要るものと直近の分だけにし、全件はアプリの受付状況に任せる。
   const waitingIntake=intakeRows.filter(r=>!r.routine).length,failedInputs=effective.filter(u=>receiptsById.get(u.chain.latest.id)?.status==='failed').length,waitingInputs=inputRows.filter(r=>!r.routine).length-failedInputs;
   const statusSummary=intakeRows.length||inputRows.length?`受付ファイル ${intakeRows.length}件（受付待ち・内容変更 ${waitingIntake}件） / 入力 ${inputRows.length}件（整理待ち ${waitingInputs}件・整理失敗 ${failedInputs}件）。受領済み・断った依頼・整理済みは新しい${STATUS_ROWS}件ずつを並べます。全件はアプリの「受付状況」で確認できます。\n`:'';
-  // プロジェクトを決めずに本人が追加した行動と、どのプロジェクトにも結び付いていないメモから出たタスクの分類とAIの提案。アプリが読む一覧も同時に書く（内容が変わったときだけ）。
-  const unassignedActions=unassignedActionsSection(config,await rebuildUnassignedActionsLocked(config,vault,effective,clock),new Map(effective.map(u=>[u.chain.root.id,u.chain.root.path])));
+  // 期日の欄に載せた（またはたたんだ）行動は、プロジェクト未定の欄では件数だけを示す。
+  const unassignedActions=unassignedActionsSection(config,unassignedBuilt,new Map(effective.map(u=>[u.chain.root.id,u.chain.root.path])),nextSection?unassignedFront:new Set());
   // 週次の統合の結果（今週の気づき）。設定で有効にしたときだけ出す。記録を読めなくてもHOMEは作り、「失敗と競合」に示す。
   let insightsText='',insightsLines:string[]=[];
   try{const built=await rebuildInsightsLocked(config,vault,effective,clock);insightsText=insightsSection(config,built.insights,clock);insightsLines=insightsNotices(config,built,clock);}

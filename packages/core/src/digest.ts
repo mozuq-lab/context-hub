@@ -9,7 +9,7 @@ import { lifecycleOf, projectStatusLabels } from './project-status.js';
 import { daysSince } from './dashboard.js';
 import { lastEvidenceAt } from './views.js';
 import { insightFeedbackSection, insightsSection, readInsights } from './insights.js';
-import { activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions } from './item-resolutions.js';
+import { UNASSIGNED_SCOPE, activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions } from './item-resolutions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
 import { inputWhen } from './happened.js';
 
@@ -137,6 +137,20 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   lines.push('## 動きのあったプロジェクト', active.join('\n\n') || 'この期間に新しい入力のあったプロジェクトはありません。', '');
   if (quiet.length) lines.push('## 動きのなかった進行中のプロジェクト', ...quiet, '');
   if (inactive.length) lines.push(merged.size ? '## 休止・完了・統合済み' : '## 休止・完了', ...inactive, '');
+  // プロジェクトを決めずに本人が追加した行動。残っている件数と、期間内に追加・完了・却下した件数を示す（項目キーは最新の文面で決まる）。
+  const own = units.filter(u => u.input.kind === 'action' && u.input.project === undefined && Date.parse(u.input.received_at) <= now.getTime());
+  if (own.length) {
+    const closedNow = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), UNASSIGNED_SCOPE);
+    const text = (u: Unit) => u.unit.chain.latest.text, state = (u: Unit) => closedNow.get(itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u)));
+    const remaining = own.filter(u => !state(u)), added = own.filter(u => inWindow(u.input.received_at));
+    const closedIn = (action: 'resolve' | 'exclude') => own.filter(u => { const r = state(u); return r?.action === action && inWindow(r.created_at); });
+    const done = closedIn('resolve'), dropped = closedIn('exclude');
+    const oldest = [...remaining].sort((a, b) => Date.parse(a.input.received_at) - Date.parse(b.input.received_at) || a.input.id.localeCompare(b.input.id));
+    lines.push('## プロジェクト未定の行動', `- 残っている行動: ${remaining.length}件 / 期間内に追加 ${added.length}件・完了 ${done.length}件・却下 ${dropped.length}件`);
+    for (const u of [...done].sort((a, b) => state(b)!.id.localeCompare(state(a)!.id)).slice(0, 5)) lines.push(`  - 完了: ${clip(text(u))} ${ref(u.input)}`);
+    if (oldest.length) lines.push(`- 残っている行動（追加した順に最大5件）:`, ...oldest.slice(0, 5).map(u => `  - ${clip(text(u))} ${ref(u.input)}（${daysSince(u.input.received_at, now)}日前に追加）`));
+    lines.push('');
+  }
   lines.push('## 確認待ちの候補');
   if (!pending.length) lines.push('確認待ちの候補はありません。');
   for (const c of [...pending].sort((a, b) => (Date.parse(since(a) ?? '') || 0) - (Date.parse(since(b) ?? '') || 0))) {

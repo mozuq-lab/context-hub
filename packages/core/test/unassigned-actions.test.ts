@@ -14,7 +14,10 @@ import { rebuildDashboard } from '../src/dashboard.js';
 import { UNASSIGNED_CLOSED_MAX, UNASSIGNED_HOME_MEMOS, UNASSIGNED_MEMOS_MAX, UNASSIGNED_SUGGESTIONS_PER_MEMO, buildUnassignedActions, unassignedActionsPath, unassignedActionsSchema, unassignedItemKey, unassignedItemsPath } from '../src/unassigned-actions.js';
 import { parseIntake } from '../src/intake-format.js';
 import { ItemTargetError, UNASSIGNED_SCOPE, nowItemsSchema, readItemResolutions, readNowItems, setItemResolution } from '../src/item-resolutions.js';
-import { setItemSchedule } from '../src/item-schedules.js';
+import { addDays, completeOccurrence, readItemSchedules, setItemSchedule, todayIn } from '../src/item-schedules.js';
+import { setItemEffort } from '../src/item-efforts.js';
+import { buildDigest } from '../src/digest.js';
+import { CALENDAR_PATH } from '../src/calendar.js';
 import { ingest, readIntakeReceipts } from '../src/intake.js';
 import { readInputs } from '../src/capture.js';
 import { packet } from './workflow-fixtures.js';
@@ -287,14 +290,13 @@ describe('プロジェクトを決めずに追加した行動', () => {
     expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).action_scopes).toEqual([UNASSIGNED_SCOPE]);
   });
 
-  test('完了・却下（もう古い）・未解決へ戻すが使え、片付けるとHOMEから外れる。期日は付けられない', async () => {
+  test('完了・却下（もう古い）・未解決へ戻すが使え、片付けるとHOMEから外れる', async () => {
     const { config, vault } = await setup();
     const saved = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-01T00:00:00Z', text: '歯医者を予約する' });
     const key = unassignedItemKey(saved.inputId, '歯医者を予約する');
     await rebuildDashboard(config);
     expect(await home(vault)).toContain('本人が追加: 歯医者を予約する');
     await expect(setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, action: 'exclude', reason: 'misread', source: 'cli' })).rejects.toThrow('もう古い');
-    await expect(setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, due: '2026-11-20', reviewAfter: null, source: 'cli' })).rejects.toThrow();
     await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: key, action: 'resolve', source: 'cli' });
     expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items).toEqual([expect.objectContaining({ key, action: {}, resolution: expect.objectContaining({ source: 'cli' }) })]);
     await rebuildDashboard(config);
@@ -376,5 +378,130 @@ describe('プロジェクトを決めずに追加した行動', () => {
     const first = await capture(config, again);
     expect(await capture(config, again)).toMatchObject({ inputId: first.inputId, deduped: true });
     expect((await readInputs(config)).filter(i => i.kind === 'action')).toHaveLength(4);
+  });
+});
+
+describe('プロジェクト未定の行動の期日と手間の目安', () => {
+  const home = async (vault: Vault) => (await vault.read('HOME.md'))!;
+  const unassignedSection = (text: string) => text.split('## プロジェクト未定の次の一手')[1]?.split('\n## ')[0];
+  const action = async (config: HubConfig, text: string, at = '2026-11-01T00:00:00Z') => {
+    const saved = await capture(config, { source: 'cli', kind: 'action', occurredAt: at, text });
+    return { id: saved.inputId, key: unassignedItemKey(saved.inputId, text) };
+  };
+
+  test('本人が追加した行動に期日・見直す日・手間の目安を付けると、項目一覧に載り、期日が近いものはプロジェクトの項目と一緒にHOMEの期日の欄へ出る', async () => {
+    const { config, vault } = await setup();
+    const today = todayIn(config.timezone);
+    await addProject(config, { id: 'hub', title: '集約ツール' });
+    const soon = await action(config, '歯医者を予約する'), later = await action(config, '本を返す'), resting = await action(config, '棚を片付ける'), plain = await action(config, '牛乳を買う');
+    const work = await capture(config, { source: 'cli', kind: 'work-summary', project: 'hub', tool: 'codex', occurredAt: '2026-11-01T00:00:00Z', text: '## 次の一手\n- [確認済み] 説明を書く' });
+    await organize(config, new MockLlm());
+    const projectKey = (await readNowItems(vault, 'hub'))!.items.find(i => i.input_id === work.inputId)!.key;
+    await setItemSchedule(config, { projectId: 'hub', itemKey: projectKey, due: addDays(today, 3), reviewAfter: null, source: 'cli' });
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: soon.key, due: addDays(today, 1), reviewAfter: null, source: 'cli' });
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: later.key, due: addDays(today, 30), reviewAfter: null, source: 'cli' });
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: resting.key, due: null, reviewAfter: addDays(today, 10), source: 'cli' });
+    await setItemEffort(config, { projectId: UNASSIGNED_SCOPE, itemKey: soon.key, effort: 'quick', source: 'cli' });
+    const items = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items;
+    expect(items.find(i => i.key === soon.key)).toMatchObject({ schedule: { due: addDays(today, 1), review_after: null }, effort: 'quick' });
+    expect(items.find(i => i.key === plain.key)!.schedule).toBeUndefined();
+    await rebuildDashboard(config);
+    const text = await home(vault), dated = text.split('### 7日以内')[1]!.split('### プロジェクトごと')[0]!;
+    // 期日順に、プロジェクトの項目と並ぶ。
+    expect(dated.indexOf('歯医者を予約する')).toBeGreaterThan(-1);
+    expect(dated.indexOf('歯医者を予約する')).toBeLessThan(dated.indexOf('説明を書く'));
+    expect(dated).toContain(`- 期日 ${addDays(today, 1)} — プロジェクト未定 次の一手: 本人が追加: 歯医者を予約する（手間 15分ほど）`);
+    expect(text).toContain('見直す日まで休ませている項目: 1件');
+    // プロジェクト未定の欄には、期日の欄へ出した行動を件数だけで示し、ほか（休ませている行動を含む）は日付付きで載せる。
+    const section = unassignedSection(text)!;
+    expect(section).toMatch(/^（本人が追加した行動4件）/);
+    expect(section).not.toContain('歯医者を予約する');
+    expect(section).toContain(`- 本人が追加: 棚を片付ける（見直す日 ${addDays(today, 10)}） — `);
+    expect(section).toContain(`- 本人が追加: 本を返す（期日 ${addDays(today, 30)}） — `);
+    expect(section).toContain('- 本人が追加: 牛乳を買う — ');
+    expect(section).toContain('期日が近い行動1件は、「次の一手」の期日の欄で示します');
+    expect(JSON.parse((await vault.read('90_system/intake-features.json'))!).item_record_scopes).toEqual([UNASSIGNED_SCOPE]);
+    // 日付の付いた行があっても、内容が変わらなければ作り直しで書き換えない（端末は作成時刻で反映を判断する）。
+    const before = await vault.read(unassignedItemsPath);
+    await rebuildDashboard(config, { now: new Date('2030-01-01T00:00:00Z') });
+    expect(await vault.read(unassignedItemsPath)).toBe(before);
+  });
+
+  test('進行中のプロジェクトがなくても、期日が近い行動はHOMEの期日の欄に出る', async () => {
+    const { config, vault } = await setup();
+    const today = todayIn(config.timezone), own = await action(config, '書類を出す');
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, due: today, reviewAfter: null, source: 'cli' });
+    await rebuildDashboard(config);
+    const text = await home(vault);
+    expect(text.split('### 今日（1件）')[1]).toContain('プロジェクト未定 次の一手: 本人が追加: 書類を出す');
+  });
+
+  test('AIの行には付けられない。文面を直しても日付と手間の目安は同じ行動に残り、片付けると期日の欄から外れる', async () => {
+    const { config, vault } = await setup();
+    const id = await memo(config, '講習の申込をする', '2026-11-01T09:00:00+09:00', result({ category: 'task' }));
+    await rebuildDashboard(config);
+    const aiKey = unassignedItemKey(id, '講習の申込をする');
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.map(i => i.key)).toContain(aiKey);
+    await expect(setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: aiKey, due: '2026-12-01', reviewAfter: null, source: 'cli' })).rejects.toThrow('本人が追加した行動だけ');
+    await expect(setItemEffort(config, { projectId: UNASSIGNED_SCOPE, itemKey: aiKey, effort: 'hour', source: 'cli' })).rejects.toThrow('本人が追加した行動だけ');
+    const own = await action(config, '牛乳を買う');
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+    await setItemEffort(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, effort: 'hour', source: 'cli' });
+    await correctInput(config, own.id, { source: 'cli', occurredAt: '2026-11-02T00:00:00Z', text: '牛乳と卵を買う' });
+    const edited = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.input_id === own.id)!;
+    expect(edited).toMatchObject({ text: '牛乳と卵を買う', schedule: { due: '2026-12-01' }, effort: 'hour' });
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: edited.key, action: 'resolve', source: 'cli' });
+    const closed = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.input_id === own.id)!;
+    expect(closed.schedule).toBeUndefined();
+    await expect(setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: edited.key, due: '2026-12-02', reviewAfter: null, source: 'cli' })).rejects.toThrow('解決済み');
+  });
+
+  test('定例の繰り返しを付けた行動は、今回を完了にすると期日が次の回へ進む', async () => {
+    const { config, vault } = await setup();
+    const own = await action(config, 'ゴミを出す');
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, due: '2026-11-20', reviewAfter: null, repeat: { unit: 'week', every: 1 }, source: 'cli' });
+    const result = await completeOccurrence(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, action: 'done', due: '2026-11-20', source: 'cli', now: new Date('2026-11-21T00:00:00Z') });
+    expect(result).toMatchObject({ projectId: UNASSIGNED_SCOPE, nextDue: '2026-11-27' });
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items[0]).toMatchObject({ resolution: null, schedule: { due: '2026-11-27', repeat: { unit: 'week', every: 1 } } });
+  });
+
+  test('受付ファイルからプロジェクト未定の行動へ期日・手間の目安・定例の回を依頼できる', async () => {
+    const { config, vault } = await setup();
+    const own = await action(config, 'ゴミを出す'), base = { source: 'flutter', project_id: UNASSIGNED_SCOPE, item_key: own.key, confirmed: true };
+    await packet(config, { ...base, request_id: `REQ-${'1'.repeat(32)}`, operation: 'item-schedule', due: '2026-11-20', review_after: null, repeat: { unit: 'week', every: 1 } }, '');
+    await packet(config, { ...base, request_id: `REQ-${'2'.repeat(32)}`, operation: 'item-effort', effort: 'quick' }, '');
+    expect(await ingest(config)).toMatchObject({ accepted: 2 });
+    await packet(config, { ...base, request_id: `REQ-${'3'.repeat(32)}`, operation: 'item-occurrence', action: 'skip', due: '2026-11-20' }, '');
+    expect(await ingest(config)).toMatchObject({ accepted: 1 });
+    expect((await readIntakeReceipts(config)).map(r => r.result)).toEqual(expect.arrayContaining([expect.objectContaining({ projectId: UNASSIGNED_SCOPE, scheduleId: expect.any(String) }), expect.objectContaining({ projectId: UNASSIGNED_SCOPE, effortId: expect.any(String) }), expect.objectContaining({ projectId: UNASSIGNED_SCOPE, occurrenceId: expect.any(String) })]));
+    expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items[0]).toMatchObject({ effort: 'quick', schedule: { repeat: { unit: 'week', every: 1 } } });
+    expect((await readItemSchedules(vault)).records.every(r => r.project_id === UNASSIGNED_SCOPE)).toBe(true);
+  });
+
+  test('カレンダーの書き出しを有効にすると、プロジェクト未定の行動の期日も予定になる', async () => {
+    const { config, vault } = await setup();
+    config.calendar = { enabled: true, reviewDates: false, titles: 'item' };
+    const own = await action(config, '書類を出す');
+    await setItemSchedule(config, { projectId: UNASSIGNED_SCOPE, itemKey: own.key, due: '2026-12-01', reviewAfter: null, source: 'cli' });
+    await rebuildDashboard(config);
+    const ics = (await vault.read(CALENDAR_PATH))!;
+    expect(ics).toContain('SUMMARY:[期日] プロジェクト未定: 本人が追加: 書類を出す');
+    expect(ics).toContain('DTSTART;VALUE=DATE:20261201');
+    expect(ics).toContain('プロジェクト: 未定');
+  });
+
+  test('ふりかえりに、残っている行動と期間内に追加・完了・却下した件数を載せる', async () => {
+    const { config } = await setup();
+    const now = new Date();
+    const done = await action(config, '書類を出す', new Date(now.getTime() - 2 * 86_400_000).toISOString());
+    const dropped = await action(config, '古い用事', new Date(now.getTime() - 2 * 86_400_000).toISOString());
+    await action(config, '本を返す', new Date(now.getTime() - 86_400_000).toISOString());
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: done.key, action: 'resolve', source: 'cli' });
+    await setItemResolution(config, { projectId: UNASSIGNED_SCOPE, itemKey: dropped.key, action: 'exclude', reason: 'outdated', source: 'cli' });
+    const digest = await buildDigest(config);
+    const section = digest.split('## プロジェクト未定の行動')[1]!.split('\n## ')[0]!;
+    expect(section).toContain('- 残っている行動: 1件 / 期間内に追加 3件・完了 1件・却下 1件');
+    expect(section).toContain('  - 完了: 書類を出す');
+    expect(section).toMatch(/- 残っている行動（追加した順に最大5件）:\n {2}- 本を返す \[IN-/);
   });
 });

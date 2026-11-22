@@ -2,8 +2,8 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { readInputs } from './capture.js';
-import { assertNotMerged, projectIdSchema, readProjects } from './projects.js';
-import { ItemTargetError, activeResolutions, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection } from './item-resolutions.js';
+import { assertNotMerged, readProjects } from './projects.js';
+import { ItemTargetError, UNASSIGNED_SCOPE, activeResolutions, itemScopeSchema, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection, type NowItem } from './item-resolutions.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -36,9 +36,12 @@ export type RepeatRule = z.infer<typeof repeatRuleSchema>;
 export const scheduleRepeatSchema = z.object({ unit: z.enum(repeatUnits), every: z.number().int().min(1).max(REPEAT_EVERY_MAX), day: z.number().int().min(1).max(31).optional() }).strict()
   .refine(r => r.unit === 'month' ? r.day !== undefined : r.day === undefined, '日は毎月の繰り返しにだけ付けます');
 export type ScheduleRepeat = z.infer<typeof scheduleRepeatSchema>;
-/** 1件の記録は項目の日付の全体（期日と見直す日、繰り返し）を表す。期日と見直す日が両方nullは日付を外した記録。 */
+/**
+ * 1件の記録は項目の日付の全体（期日と見直す日、繰り返し）を表す。期日と見直す日が両方nullは日付を外した記録。
+ * project_idは項目の置き場。プロジェクトIDか、プロジェクト未定（_unassigned）の本人が追加した行動。
+ */
 export const itemScheduleSchema = z.object({
-  schema_version: z.literal(1), id: scheduleIdSchema, project_id: projectIdSchema, item_key: digest, section: z.enum(itemSections),
+  schema_version: z.literal(1), id: scheduleIdSchema, project_id: itemScopeSchema, item_key: digest, section: z.enum(itemSections),
   text: z.string().max(4000), input_id: inputIdSchema, due: scheduleDateSchema.nullable(), review_after: scheduleDateSchema.nullable(),
   // 繰り返しのない記録（旧版を含む）にはない。
   repeat: scheduleRepeatSchema.nullable().optional(),
@@ -70,8 +73,19 @@ export async function readItemSchedules(vault: Vault, options: { raw?: boolean }
   records.sort((a, b) => a.id.localeCompare(b.id));
   return { records: options.raw ? records : await settleItemRecords(vault, records), problems };
 }
-/** 項目に結び付けた本人の記録（日付・手間の目安など）に共通する欄。 */
-export interface ItemRecordLike { project_id: string; item_key: string; section: string; text: string; input_id: string }
+/** 項目に結び付けた本人の記録（日付・手間の目安など）に共通する欄。idは種類ごとの接頭辞とULIDで、同じ種類では作った順に並ぶ。 */
+export interface ItemRecordLike { id: string; project_id: string; item_key: string; section: string; text: string; input_id: string; source_event_id?: string }
+/** 「自分の行動にする」で元の行の記録を行動へ写した記録の受付ID（行動の入力IDと、写した元の記録のID）。take-over-records.tsが書く。 */
+export const takeOverEvent = (inputId: string, recordId: string) => `take-over:${inputId}:${recordId}`;
+const takeOverPattern = /^take-over:IN-[0-9A-HJKMNP-TV-Z]{26}:((?:SCH|EFF)-[0-9A-HJKMNP-TV-Z]{26})$/;
+/** 行動へ写された（引き取られた）元の記録のID。元の置き場では、外した記録と同じに扱う。 */
+export function takenOverRecordIds(records: Pick<ItemRecordLike, 'source_event_id'>[]): Set<string> {
+  const ids = new Set<string>();
+  for (const r of records) { const m = r.source_event_id ? takeOverPattern.exec(r.source_event_id) : null; if (m) ids.add(m[1]!); }
+  return ids;
+}
+/** 同じ種類の記録の作った順。接頭辞を除いたULIDで比べる。 */
+const recordOrder = (r: Pick<ItemRecordLike, 'id'>) => r.id.slice(r.id.indexOf('-') + 1);
 /** 日付の記録が、日付を外した記録か。 */
 const scheduleCleared = (r: Pick<ItemSchedule, 'due' | 'review_after'>) => r.due === null && r.review_after === null;
 /** 項目ごとに最後の記録だけを有効にする。最後の記録が外した記録（clearedが真）なら含めない。 */
@@ -99,7 +113,9 @@ export function effectiveSchedules(records: ItemSchedule[], projectId: string, i
 /**
  * effectiveSchedulesと同じ引き継ぎの規則を、項目に結び付けたほかの本人の記録（手間の目安など）にも使う。clearedは「外した記録」の判定。
  */
-export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], projectId: string, items: EffectiveItem[], resolvedKeys: { has(key: string): boolean }, cleared: (r: T) => boolean): { byKey: Map<string, T>; orphaned: T[] } {
+export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], projectId: string, items: EffectiveItem[], resolvedKeys: { has(key: string): boolean }, clearedRecord: (r: T) => boolean): { byKey: Map<string, T>; orphaned: T[] } {
+  // 行動へ写された元の記録は、元の行が引き取られたので、外した記録と同じに扱う（同じ本文の行が出直しても引き継がず、付け直しも求めない）。
+  const taken = takenOverRecordIds(records), cleared = (r: T) => clearedRecord(r) || taken.has(r.id);
   const active = activeItemRecords(records, cleared, projectId), keys = new Set(items.map(i => i.key)), byKey = new Map<string, T>();
   // 項目自身のキーで記録があれば（日付を外した記録を含む）、それが本人の最新の判断なので引き継ぎより優先する。
   const own = new Set(records.filter(r => r.project_id === projectId).map(r => r.item_key));
@@ -119,7 +135,10 @@ export function effectiveItemRecords<T extends ItemRecordLike>(records: T[], pro
     if (item.resolution) continue;
     // 行動は、同じ行動の記録（直す前の文面・引き取った元の行を含む）のうち最新のものが効く。文面を前の形へ戻しても、古いキーの古い日付に戻らない。
     if (item.action !== undefined) {
-      const mine = [...latestPerKey.values()].filter(r => r.section === item.section && lineage(r, item) && (r.item_key === item.key || (!keys.has(r.item_key) && !resolvedKeys.has(r.item_key)))).at(-1);
+      // 引き取った元の行に効いていた記録は、引き取ったときに行動の記録として写してある（take-over-records.ts。別の置き場の行でも）。
+      const mine = [...latestPerKey.values()]
+        .filter(r => r.section === item.section && lineage(r, item) && (r.item_key === item.key || (!keys.has(r.item_key) && !resolvedKeys.has(r.item_key))))
+        .sort((a, b) => recordOrder(a).localeCompare(recordOrder(b))).at(-1);
       if (mine && !isCleared(mine)) byKey.set(item.key, mine);
       continue;
     }
@@ -189,13 +208,34 @@ export function scheduleRepeatFor(rule: RepeatRule, due: string): ScheduleRepeat
 }
 
 /**
+ * 項目に本人の記録（日付・定例の回・手間の目安）を付けるときの、置き場の確かめと一覧の作り直し。Writerロック内で使う。
+ * プロジェクト未定（_unassigned）は、プロジェクトの定義を見ず、その一覧（unassigned-actions）だけを作り直す。
+ * プロジェクトは、存在を確かめ、そのNOWを作り直す。統合済みかどうかは呼び出し側が、再送の照合の後に確かめる。
+ */
+export async function itemRecordScope(config: HubConfig, vault: Vault, projectId: string): Promise<{ unassigned: boolean; rebuild: () => Promise<void>; assertOpen: () => void }> {
+  if (projectId === UNASSIGNED_SCOPE) {
+    const { rebuildUnassignedLocked } = await import('./unassigned-actions.js');
+    return { unassigned: true, rebuild: () => rebuildUnassignedLocked(config, vault), assertOpen: () => {} };
+  }
+  // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
+  const { rebuildNowLocked, readReceipts } = await import('./views.js');
+  const projects = await readProjects(config);
+  if (!projects.some(p => p.id === projectId)) throw new Error('プロジェクトが見つかりません');
+  return { unassigned: false, rebuild: async () => { await rebuildNowLocked(vault, config, projectId, await readInputs(config), await readReceipts(config)); }, assertOpen: () => assertNotMerged(projects, projectId) };
+}
+/** プロジェクト未定の行のうち、本人の記録を付けられるのは本人が追加した行動だけ（AIの行は、先に行動にしてもらう）。 */
+export function assertRecordTarget(unassigned: boolean, item: Pick<NowItem, 'action'>): void {
+  if (unassigned && item.action === undefined) throw new Error('プロジェクト未定の行に期日・手間の目安を付けられるのは、本人が追加した行動だけです。先に「自分の行動にする」で行動にしてください');
+}
+
+/**
  * repeatは繰り返しの全体。nullで外し、省略すると今の繰り返しを保つ（期日を外すと繰り返しも外れる）。
  * 繰り返しを知らない版のアプリが期日だけを送っても、定例が外れないようにするため。
  */
 export interface ItemScheduleRequest { projectId: string; itemKey: string; due: string | null; reviewAfter: string | null; repeat?: RepeatRule | null; source: string; sourceEventId?: string }
 export interface ItemScheduleResult { projectId: string; itemKey: string; scheduleId: string; deduped: boolean }
 const requestSchema = z.object({
-  projectId: projectIdSchema, itemKey: digest, due: scheduleDateSchema.nullable(), reviewAfter: scheduleDateSchema.nullable(), repeat: repeatRuleSchema.nullable().optional(),
+  projectId: itemScopeSchema, itemKey: digest, due: scheduleDateSchema.nullable(), reviewAfter: scheduleDateSchema.nullable(), repeat: repeatRuleSchema.nullable().optional(),
   source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
 }).strict().refine(r => !r.repeat || r.due !== null, '繰り返しには期日が必要です');
 
@@ -205,13 +245,9 @@ const requestSchema = z.object({
  */
 export async function setItemSchedule(config: HubConfig, request: ItemScheduleRequest): Promise<ItemScheduleResult> {
   const r = requestSchema.parse(request), vault = new Vault(config);
-  // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。
-  const { rebuildNowLocked, readReceipts } = await import('./views.js');
   return vault.withLock(async () => {
-    const projects = await readProjects(config);
-    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
+    const { unassigned, rebuild, assertOpen } = await itemRecordScope(config, vault, r.projectId);
     const { records } = await readItemSchedules(vault);
-    const rebuild = async () => { await rebuildNowLocked(vault, config, r.projectId, await readInputs(config), await readReceipts(config)); };
     if (r.sourceEventId) {
       // 再送の照合は記録のままで行う（受け付けた後にプロジェクトが統合されても、同じ依頼として扱う）。
       const previous = (await readItemSchedules(vault, { raw: true })).records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
@@ -225,12 +261,13 @@ export async function setItemSchedule(config: HubConfig, request: ItemScheduleRe
       }
     }
     // 統合済みのプロジェクトの項目は統合先のNOWにある（キーも統合先のものになる）。
-    assertNotMerged(projects, r.projectId);
+    assertOpen();
     const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
     const clearing = r.due === null && r.reviewAfter === null, { byKey, orphaned } = effectiveSchedules(records, r.projectId, list, resolved);
     const item = list.find(i => i.key === r.itemKey), orphan = orphaned.find(o => o.item_key === r.itemKey);
     // NOWから外れて付け直しを促している日付は、外すことだけを受け付ける。
     if (!item && !(clearing && orphan)) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
+    if (item) assertRecordTarget(unassigned, item);
     const current = item ? byKey.get(r.itemKey) : orphan;
     if (!clearing && resolved.has(r.itemKey)) throw new Error('解決済み・完了の項目には日付を付けられません');
     if (clearing && !current) throw new Error('この項目に外す日付はありません');
@@ -261,7 +298,7 @@ export type OccurrenceAction = typeof occurrenceActions[number];
 export const occurrenceActionSchema = z.enum(occurrenceActions);
 export const occurrenceIdSchema = z.string().regex(/^OCC-[0-9A-HJKMNP-TV-Z]{26}$/);
 export const itemOccurrenceSchema = z.object({
-  schema_version: z.literal(1), id: occurrenceIdSchema, project_id: projectIdSchema, item_key: digest, section: z.enum(itemSections),
+  schema_version: z.literal(1), id: occurrenceIdSchema, project_id: itemScopeSchema, item_key: digest, section: z.enum(itemSections),
   text: z.string().max(4000), input_id: inputIdSchema, action: occurrenceActionSchema, due: scheduleDateSchema, next_due: scheduleDateSchema, schedule_id: scheduleIdSchema, repeat: scheduleRepeatSchema,
   source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(200).optional(), created_at: z.string().datetime({ offset: true }),
 }).strict();
@@ -304,7 +341,7 @@ export function occurrenceMessage(reason: OccurrenceReason): string {
 export interface OccurrenceRequest { projectId: string; itemKey: string; action: OccurrenceAction; /** 本人が確認した回の期日。今の期日と違えば受け付けない。 */ due: string; source: string; sourceEventId?: string; /** 今日（検証用）。 */ now?: Date }
 export interface OccurrenceResult { projectId: string; itemKey: string; action: OccurrenceAction; occurrenceId: string; nextDue: string; deduped: boolean }
 const occurrenceRequestSchema = z.object({
-  projectId: projectIdSchema, itemKey: digest, action: occurrenceActionSchema, due: scheduleDateSchema,
+  projectId: itemScopeSchema, itemKey: digest, action: occurrenceActionSchema, due: scheduleDateSchema,
   source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(), now: z.date().optional(),
 }).strict();
 
@@ -315,11 +352,8 @@ const occurrenceRequestSchema = z.object({
  */
 export async function completeOccurrence(config: HubConfig, request: OccurrenceRequest): Promise<OccurrenceResult> {
   const r = occurrenceRequestSchema.parse(request), vault = new Vault(config);
-  const { rebuildNowLocked, readReceipts } = await import('./views.js');
   return vault.withLock(async () => {
-    const projects = await readProjects(config);
-    if (!projects.some(p => p.id === r.projectId)) throw new Error('プロジェクトが見つかりません');
-    const rebuild = async () => { await rebuildNowLocked(vault, config, r.projectId, await readInputs(config), await readReceipts(config)); };
+    const { unassigned, rebuild, assertOpen } = await itemRecordScope(config, vault, r.projectId);
     // 次の回の日付の記録がなければ作る（回の記録の直後に停止した場合の続き）。
     const ensureNext = async (occurrence: ItemOccurrence) => {
       if (await vault.read(schedulePath(occurrence.schedule_id)) !== undefined) return;
@@ -338,10 +372,11 @@ export async function completeOccurrence(config: HubConfig, request: OccurrenceR
         return { projectId: r.projectId, itemKey: r.itemKey, action: r.action, occurrenceId: previous.id, nextDue: previous.next_due, deduped: true };
       }
     }
-    assertNotMerged(projects, r.projectId);
+    assertOpen();
     const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
     const item = list.find(i => i.key === r.itemKey);
     if (!item) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
+    assertRecordTarget(unassigned, item);
     const closed = resolved.get(r.itemKey);
     if (closed) throw new ItemTargetError({ code: 'item-closed', state: closed.action === 'exclude' ? 'excluded' : 'resolved' }, 'この項目は既に解決済みか、誤りとして外しています');
     const { records } = await readItemSchedules(vault), current = effectiveSchedules(records, r.projectId, list, resolved).byKey.get(r.itemKey);

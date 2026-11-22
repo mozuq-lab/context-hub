@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
 import { Vault } from './storage.js';
 import { redactText, secretSettings } from './secrets.js';
+import { UNASSIGNED_SCOPE } from './item-resolutions.js';
 import type { HubConfig } from './types.js';
 
 /**
  * 本人が付けた期日（と、設定で選んだときは次に見直す日）を、カレンダーに読み込めるiCalendar（RFC 5545）のファイルにする。
+ * 進行中のプロジェクトの項目と、プロジェクト未定の本人が追加した行動（projectIdは_unassigned）が対象。
  * 予定は終日で、UIDは項目のキーから決めるため、読み込み直すと重複せずに置き換わる。日付はAIが推測したものを含まない。
  * カレンダーはクラウドへ同期されることが多いため、件名と説明には伏せ字の規則を当て、設定で件名をプロジェクト名だけにできる。
  */
@@ -73,7 +75,7 @@ export function calendarEvents(config: Pick<HubConfig, 'calendar' | 'privacy'>, 
         ...(settings.titles === 'item' ? [clip(body, DESCRIPTION_CHARS)] : []),
         ...(kind === 'due' && item.reviewAfter ? [`見直す日: ${item.reviewAfter}`] : []),
         ...(kind === 'review' && item.due ? [`期日: ${item.due}`] : []),
-        `プロジェクト: ${item.projectId}`,
+        item.projectId === UNASSIGNED_SCOPE ? `プロジェクト: 未定` : `プロジェクト: ${item.projectId}`,
       ].join('\n');
       const uid = createHash('sha256').update(`${item.projectId}\n${item.itemKey}\n${kind}`).digest('hex').slice(0, 32);
       events.push({ uid: `${uid}-${kind}@context-hub`, date, stamp: stamp(item.scheduledAt), summary: hide(summary), description: hide(description) });
