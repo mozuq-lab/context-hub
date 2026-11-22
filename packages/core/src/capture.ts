@@ -184,7 +184,9 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
       // AIの読み取りを行動にしたときは、元の行が載っているほかのプロジェクトのNOWと、プロジェクト未定の一覧からも外す。
       const from = actionSource({ kind: 'action', meta: request.meta });
       // 元の行に効いていた期日・手間の目安は、元の行が一覧から外れる前に行動の記録へ写す（再送では写した記録があれば何もしない）。
-      const action = inputs.find(i => i.id === saved.inputId);
+      // 同じ出典・受付IDで別の入力が保存済みだった（受付IDの使い回し）ときは、その入力に記録を付けない。
+      const found = inputs.find(i => i.id === saved.inputId);
+      const action = found && found.kind === 'action' && (!saved.deduped || (found.text.trim() === request.text.trim() && found.project === request.project)) ? found : undefined;
       const fromKey = movedKey ?? from?.key;
       if (fromKey && action) {
         const { carryTakenOverRecordsLocked } = await import('./take-over-records.js');

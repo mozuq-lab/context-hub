@@ -133,7 +133,7 @@ const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.ite
 // 本人が決めた行動を、モデルを通さずにNOWの次の一手へ載せる。AIが読み取った行を行動にするときは、元の行を--from-key（キー付きの項目）か--fromと--from-text（提案）で示す。
 item.command('add <project> [text]').description(`本人が決めた行動を次の一手に追加する（1行・${ACTION_TEXT_CHARS}文字以内。モデルを使わない）。projectを${UNASSIGNED_SCOPE}にすると、プロジェクト未定の次の一手に追加する。AIが読み取った行を行動にするときは元の行を指定し、textを省くと元の本文のまま追加する`)
   .option('--from-key <key>','行動にするNOWの項目のキー（item listで確認）').option('--from <input-id>','行動にする提案の根拠の入力ID').option('--from-text <text>','行動にする提案の本文（ラベルを除く）')
-  .addOption(new Option('--effort <effort>','一緒に付ける手間の目安').choices([...itemEfforts])).option('--context <tag...>',`一緒に付ける場所・道具の札（複数可・${CONTEXT_TAGS_MAX}個まで）`)
+  .addOption(new Option('--effort <effort>','一緒に付ける手間の目安').choices([...itemEfforts])).option('--context <tag>',`一緒に付ける場所・道具の札（1つずつ指定。繰り返して複数可・${CONTEXT_TAGS_MAX}個まで。同じ受付IDの再送では最初の札のまま）`,(v:string,p:string[]|undefined)=>[...(p??[]),v])
   .option('--event-id <id>','再送判定用ID（付けると、途中で止まった追加を同じIDで再送しても重複しない）').requiredOption('--confirm','文面を確認した本人による追加').action(async(id,text,opts)=>{const c=await config(),vault=new Vault(c);
   if(opts.fromKey!==undefined&&(opts.from!==undefined||opts.fromText!==undefined))throw new Error('--from-keyと--from・--from-textは同時に指定できません');
   if((opts.from===undefined)!==(opts.fromText===undefined))throw new Error('--fromと--from-textは組で指定してください');

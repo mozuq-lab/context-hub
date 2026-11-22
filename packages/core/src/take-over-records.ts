@@ -56,20 +56,22 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
 
 /** 行動の追加に添えて付ける手間の目安と場所・道具の札（どちらも任意）。 */
 export const actionTagsSchema = z.object({ effort: itemEffortSchema.optional(), contexts: contextTagsSchema.optional() }).strict();
-/** 行動の追加に添えた手間の目安・札の記録の受付ID（行動の入力ID）。同じ行動の再送では、書いた記録があれば何もしない。 */
+/** 行動の追加に添えた手間の目安・札の記録の受付ID（行動の入力ID）。 */
 const actionTagEvent = (inputId: string) => `action-add:${inputId}`;
 /**
  * 行動の追加に添えて本人が選んだ手間の目安と場所・道具の札を、追加した行動の記録として書く（Writerロック内。NOWの再生成の前に呼ぶ）。
  * 行動の項目キーは置き場・入力ID・本文で決まるので、NOWの再生成を待たずに書ける。
+ * 同じ行動の再送では、元の行から写した記録を除き、その種類の記録が行動に1件でもあれば何もしない（先に書いた値や、その後に本人が付け直した値を、再送で戻さない）。
+ * 元の行から写した記録は先に書かれていて、この記録が後から効く（写した記録は、元の行の記録を引き取った印として残す）。
  */
 export async function writeActionTagsLocked(vault: Vault, action: { inputId: string; scope?: string; text: string; source: string; effort?: ItemEffort; contexts?: string[] }): Promise<void> {
   const scope = action.scope ?? UNASSIGNED_SCOPE, event = actionTagEvent(action.inputId), now = new Date().toISOString();
   const base = { schema_version: 1 as const, project_id: scope, item_key: itemKey(scope, 'next', action.inputId, action.text), section: 'next' as const, text: action.text, input_id: action.inputId, source: action.source, source_event_id: event, created_at: now };
-  if (action.effort !== undefined && !(await readItemEfforts(vault, { raw: true })).records.some(r => r.source_event_id === event && r.input_id === action.inputId)) {
+  if (action.effort !== undefined && !(await readItemEfforts(vault, { raw: true })).records.some(r => r.input_id === action.inputId && !r.source_event_id?.startsWith('take-over:'))) {
     const record: ItemEffortRecord = { ...base, id: `EFF-${ulid()}`, effort: action.effort };
     if (!await vault.create(`90_system/item-efforts/${record.id}.json`, JSON.stringify(sorted(record, effortOrder), null, 2) + '\n')) throw new Error('手間の目安の記録が競合しました');
   }
-  if (action.contexts !== undefined && !(await readItemContexts(vault, { raw: true })).records.some(r => r.source_event_id === event && r.input_id === action.inputId)) {
+  if (action.contexts !== undefined && !(await readItemContexts(vault, { raw: true })).records.some(r => r.input_id === action.inputId && !r.source_event_id?.startsWith('take-over:'))) {
     const record: ItemContextRecord = { ...base, id: `CTX-${ulid()}`, contexts: action.contexts };
     if (!await vault.create(contextPath(record.id), JSON.stringify(sorted(record, contextOrder), null, 2) + '\n')) throw new Error('札の記録が競合しました');
   }

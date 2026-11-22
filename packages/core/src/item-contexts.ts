@@ -15,10 +15,12 @@ import type { HubConfig } from './types.js';
 export const CONTEXT_TAG_CHARS = 20;
 export const CONTEXT_TAGS_MAX = 8;
 /**
- * 札1つ。空白・制御文字と、NOWの行末の表示（「@家 @PC」）や表示の区切りと紛れる文字（@・、,・括弧）を含めない。
+ * 札1つ。空白・制御文字・書式文字（ゼロ幅など）と、NOWの行末の表示（「@家 @PC」）や表示の区切り、Markdownと紛れる文字（@・、,・括弧・<>`）を含めない。
+ * 端末と本体で同じ札を同じ文字列として比べるため、NFCに正規化した文字列だけを受け付ける。
  */
 export const contextTagSchema = z.string().min(1, '札が空です').max(CONTEXT_TAG_CHARS, `札は${CONTEXT_TAG_CHARS}文字以内にしてください`)
-  .regex(/^[^\p{Cc}\p{Z}\s@＠、,，・()（）[\]［］]+$/u, '札に空白や「@・、,」・括弧は使えません');
+  .regex(/^[^\p{Cc}\p{Cf}\p{Z}\s@＠、,，・()（）[\]［］<>`]+$/u, '札に空白や「@・、,<>`」・括弧は使えません')
+  .refine(t => t.normalize('NFC') === t, '札の文字を正規化（NFC）してください');
 /** 項目の札の全体。付けた順（アプリは語彙の順）で、同じ札を重ねない。 */
 export const contextTagsSchema = z.array(contextTagSchema).min(1, '札を1つ以上指定してください').max(CONTEXT_TAGS_MAX, `札は1つの項目に${CONTEXT_TAGS_MAX}個までです`)
   .refine(tags => new Set(tags).size === tags.length, '同じ札を重ねて指定できません');

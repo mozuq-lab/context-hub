@@ -53,7 +53,7 @@ test('札を付けるとNOWの行末と項目一覧に出て、HOMEは変えず�
 
   await expect(setItemContexts(config, { projectId: 'hub', itemKey: show.key, contexts: ['PC', '家'], source: 'cli' })).rejects.toThrow('同じ札');
   await expect(setItemContexts(config, { projectId: 'hub', itemKey: '0'.repeat(64), contexts: ['PC'], source: 'cli' })).rejects.toThrow('該当する項目がありません');
-  for (const bad of [[], ['外 出'], ['@家'], ['家', '家'], ['a・b'], ['x'.repeat(21)], Array.from({ length: 9 }, (_, i) => `t${i}`)]) {
+  for (const bad of [[], ['外 出'], ['@家'], ['家', '家'], ['a・b'], ['x'.repeat(21)], Array.from({ length: 9 }, (_, i) => `t${i}`), ['<b>'], ['`x`'], ['P\u200bC'], ['\u30ab\u3099']]) {
     await expect(setItemContexts(config, { projectId: 'hub', itemKey: show.key, contexts: bad, source: 'cli' })).rejects.toThrow();
   }
   // 置き換えると最後の記録が効く（順番の違いも別の札として記録する）。
@@ -144,6 +144,18 @@ test('行動の追加と一緒に手間の目安と札を付けられ、再送�
   await expect(capture(config, { source: 'cli', kind: 'memo', occurredAt: '2026-11-02T00:00:00Z', text: 'メモ', contexts: ['家'] })).rejects.toThrow('行動にだけ');
   await expect(capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-02T00:00:00Z', text: '鍵を返す', contexts: ['家 外'] })).rejects.toThrow();
   expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.some(i => i.text === '鍵を返す')).toBe(false);
+  // 追加した後に本人が付け直した札は、同じ受付の再送で戻さない。
+  const later = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.input_id === own.inputId)!;
+  await setItemContexts(config, { projectId: UNASSIGNED_SCOPE, itemKey: later.key, contexts: ['家'], source: 'cli' });
+  const resent = await capture(config, { source: 'flutter-mac', sourceEventId: 'again-1', kind: 'action', occurredAt: '2026-11-02T00:00:00Z', text: '傘を返す', contexts: ['外出先'] });
+  await setItemContexts(config, { projectId: UNASSIGNED_SCOPE, itemKey: (await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.input_id === resent.inputId)!.key, contexts: ['PC'], source: 'cli' });
+  await capture(config, { source: 'flutter-mac', sourceEventId: 'again-1', kind: 'action', occurredAt: '2026-11-02T00:00:00Z', text: '傘を返す', contexts: ['外出先'] });
+  expect((await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => i.input_id === resent.inputId)!.contexts).toEqual(['PC']);
+  // 同じ受付IDで別の入力（メモ）が保存済みなら、その入力に札を付けない。
+  const memo = await capture(config, { source: 'flutter-mac', sourceEventId: 'reused-1', kind: 'memo', occurredAt: '2026-11-02T00:00:00Z', text: '覚え書き' });
+  const reused = await capture(config, { source: 'flutter-mac', sourceEventId: 'reused-1', kind: 'action', occurredAt: '2026-11-02T00:00:00Z', text: '別の行動', contexts: ['家'] }).catch(() => undefined);
+  expect(reused?.inputId).toBe(memo.inputId);
+  expect((await readItemContexts(vault, { raw: true })).records.some(r => r.input_id === memo.inputId)).toBe(false);
 });
 
 test('AIの行を行動にしたとき・行動を移したとき、札を行動へ写し、追加で選んだ札が優先する', async () => {
@@ -159,6 +171,10 @@ test('AIの行を行動にしたとき・行動を移したとき、札を行動
   expect(list.find(i => i.input_id === picked.inputId)!.contexts).toEqual(['電話']);
   // 元の行の札は引き取られたので、元の行が出直しても重ねて付かない。
   expect(list.filter(i => i.contexts).length).toBe(2);
+  // 追加で選んだ札は、元の行から写した記録（引き取った印）より後に書く。
+  const raw = (await readItemContexts(vault, { raw: true })).records.filter(r => r.input_id === picked.inputId);
+  expect(raw.map(r => r.contexts)).toEqual([['家'], ['電話']]);
+  expect(raw[0]!.source_event_id).toMatch(/^take-over:/);
   // プロジェクト未定へ移すと、札も移した先の行動に写る。
   const { moveAction } = await import('../src/action-moves.js');
   const moved = list.find(i => i.input_id === taken.inputId)!;
