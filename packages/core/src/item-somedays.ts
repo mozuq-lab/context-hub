@@ -38,7 +38,7 @@ export interface NowItemSomeday { id: string; since: string; reviewed: string }
  * not-someday: 「いつかやる」にない項目は見直し・戻しができない / missing: アイデア・プロジェクトが見つからない /
  * not-listed: 「いつかやる」に置いていないアイデア / listed: 既に「いつかやる」に置いたアイデア / not-paused: 休止中でないプロジェクト。
  */
-export const somedayRefusalCauses = ['waiting', 'someday', 'not-someday', 'missing', 'not-listed', 'listed', 'not-paused'] as const;
+export const somedayRefusalCauses = ['waiting', 'someday', 'not-someday', 'missing', 'not-listed', 'listed', 'not-paused', 'changed'] as const;
 export type SomedayReason = { code: 'someday-refused'; cause: typeof somedayRefusalCauses[number] };
 export class SomedayError extends Error {
   constructor(readonly reason: SomedayReason) {
@@ -55,6 +55,7 @@ export function somedayMessage(reason: SomedayReason): string {
     'not-listed': 'このアイデアは「いつかやる」に置いていません。同期して一覧を確認し直してください。',
     listed: 'このアイデアは既に「いつかやる」に置いています。',
     'not-paused': 'このプロジェクトは休止中ではありません。同期して一覧を確認し直してください。',
+    changed: 'この項目は別の日に「いつかやる」へ移し直されています。同期して表示を確認し直してください。',
   }[reason.cause];
 }
 
@@ -83,6 +84,14 @@ export async function readItemSomedays(vault: Vault, options: { raw?: boolean } 
 export function effectiveSomedays(records: ItemSomedayRecord[], projectId: string, items: Parameters<typeof effectiveItemRecords>[2], resolvedKeys: { has(key: string): boolean }): Map<string, NowItemSomeday> {
   const { byKey } = effectiveItemRecords(records, projectId, items, resolvedKeys, somedayCleared);
   return new Map([...byKey].flatMap(([key, r]) => r.someday ? [[key, { id: r.id, since: r.someday.since, reviewed: r.someday.reviewed ?? r.someday.since }] as const] : []));
+}
+
+/**
+ * NOWから外れ、同じ欄・同じ本文の項目もないため、どの項目にも効いていない「いつかやる」の記録（移したままのもの）。
+ * AIが書いた行は次の作業要約で言い回しが変わることがあるため、黙って消さずにHOMEで示し、移し直すか外すかを本人に任せる。
+ */
+export function orphanedSomedays(records: ItemSomedayRecord[], projectId: string, items: Parameters<typeof effectiveItemRecords>[2], resolvedKeys: { has(key: string): boolean }): ItemSomedayRecord[] {
+  return effectiveItemRecords(records, projectId, items, resolvedKeys, somedayCleared).orphaned.filter(r => r.someday !== null);
 }
 
 /** 項目一覧を作り直した後に、「いつかやる」の一覧も作り直す（Writerロック内）。someday.tsはこのファイルを読むため、循環を避けて遅延読込する。 */
@@ -129,7 +138,17 @@ export async function setItemSomeday(config: HubConfig, request: ItemSomedayRequ
     assertOpen();
     const list = (await readNowItems(vault, r.projectId))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), r.projectId);
     const item = list.find(i => i.key === r.itemKey);
-    if (!item) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
+    if (!item) {
+      // NOWから外れた「いつかやる」の記録は、外すことだけを受け付ける（HOMEで付け直しを促している記録）。
+      const { records } = await readItemSomedays(vault);
+      const orphan = r.someday === null ? orphanedSomedays(records, r.projectId, list, resolved).find(o => o.item_key === r.itemKey) : undefined;
+      if (!orphan) throw new ItemTargetError({ code: 'item-missing' }, 'NOWに該当する項目がありません。最新のNOWで確認してください');
+      const record: ItemSomedayRecord = { schema_version: 1, id: `SMD-${ulid()}`, project_id: r.projectId, item_key: orphan.item_key, section: orphan.section, text: orphan.text, input_id: orphan.input_id, someday: null, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString() };
+      if (!await vault.create(somedayPath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('「いつかやる」の記録が競合しました');
+      await rebuild();
+      await rebuildSomedayList(config, vault);
+      return { projectId: r.projectId, itemKey: r.itemKey, somedayId: record.id, deduped: false };
+    }
     assertRecordTarget(unassigned, item);
     // 片付いた項目は移しも戻しもしない（未解決へ戻したときは、片付ける前の状態のまま戻る）。
     const closed = resolved.get(r.itemKey);
@@ -146,7 +165,11 @@ export async function setItemSomeday(config: HubConfig, request: ItemSomedayRequ
     // 連絡待ちの項目は、自分では進められないが待つ相手がいる。「いつかやる」とは別の扱いなので、先に印を外してもらう。
     if (r.someday !== null && !current && item.waiting) throw new SomedayError({ code: 'someday-refused', cause: 'waiting' });
     // 見直した記録（移した日を変えない）は、今「いつかやる」にある項目にだけ付ける。
-    if (r.someday !== null && current?.someday && r.someday.since !== current.someday.since) throw new Error('移した日は変えられません。見直した日だけを送ってください');
+    // 別の端末が先に戻して移し直した、または別の日に移した後に届いた依頼は、今の状態と食い違うので理由を付けて断る。
+    if (r.someday !== null && current?.someday && r.someday.since !== current.someday.since) {
+      if (r.sourceEventId) throw new SomedayError({ code: 'someday-refused', cause: 'changed' });
+      throw new Error('移した日は変えられません。見直した日だけを送ってください');
+    }
     // 引き継いだ記録を戻すときは、引き継ぎ元の記録を戻す（項目のキーで戻しても引き継ぎ元が残るため）。
     const target = r.someday === null && current && current.item_key !== r.itemKey ? { key: current.item_key, section: current.section, text: current.text, input_id: current.input_id } : item;
     const record: ItemSomedayRecord = {

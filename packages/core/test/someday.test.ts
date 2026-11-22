@@ -278,3 +278,22 @@ test('プロジェクト未定の行動も移せて、HOMEでは件数だけを�
   const ai = (await readNowItems(vault, UNASSIGNED_SCOPE))!.items.find(i => !i.action);
   if (ai) await expect(setItemSomeday(config, { projectId: UNASSIGNED_SCOPE, itemKey: ai.key, someday: { since: '2026-11-10' }, source: 'cli', now: clock })).rejects.toThrow('本人が追加した行動だけ');
 });
+
+test('NOWから外れた「いつかやる」の項目は黙って消さずにHOMEで示し、外せる。食い違う日付の依頼は理由を付けて断る', async () => {
+  const { config, vault, items } = await fixture();
+  const write = find(items, '説明を書く'), show = find(items, '利用者に見せる');
+  await setItemSomeday(config, { projectId: 'hub', itemKey: write.key, someday: { since: '2026-11-10' }, source: 'cli', now: clock });
+  // 別の日に移された後に届いた「そのまま」（移した日が食い違う）は、端末の依頼なら理由付きで断る。
+  await setItemSomeday(config, { projectId: 'hub', itemKey: show.key, someday: { since: '2026-11-12' }, source: 'flutter', sourceEventId: 'e1', now: clock });
+  await expect(setItemSomeday(config, { projectId: 'hub', itemKey: show.key, someday: { since: '2026-11-10', reviewed: '2026-11-15' }, source: 'flutter', sourceEventId: 'e2', now: clock })).rejects.toMatchObject({ reason: { code: 'someday-refused', cause: 'changed' } });
+  // 次の作業要約で言い回しが変わり、移した項目がNOWから外れる。
+  await capture(config, { source: 'file', kind: 'work-summary', project: 'hub', occurredAt: '2026-11-01T00:00:00Z', receivedAt: '2026-11-01T00:00:00Z', text: '## 次の一手\n- [確認済み] 利用者に見せる\n- [確認済み] 説明書を整える' });
+  await organize(config, new MockLlm());
+  await rebuildDashboard(config, { now: clock });
+  expect(await home(vault)).toContain('「いつかやる」から外れた項目（本文が変わったかNOWから外れたため、移したままにできませんでした。1件。');
+  expect(await home(vault)).toContain(`説明を書く（移した日 2026-11-10） / hub ${write.key}`);
+  await expect(setItemSomeday(config, { projectId: 'hub', itemKey: write.key, someday: { since: '2026-11-20' }, source: 'cli', now: clock })).rejects.toThrow('NOWに該当する項目がありません');
+  await setItemSomeday(config, { projectId: 'hub', itemKey: write.key, someday: null, source: 'cli' });
+  await rebuildDashboard(config, { now: clock });
+  expect(await home(vault)).not.toContain('「いつかやる」から外れた項目');
+});

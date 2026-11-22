@@ -5,7 +5,7 @@ import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { effortLabel,type ItemEffort } from './item-efforts.js';
 import { readItemWaits,waitingDays } from './item-waits.js';
-import { readItemSomedays } from './item-somedays.js';
+import { readItemSomedays,orphanedSomedays } from './item-somedays.js';
 import { readSomedayReviews,rebuildSomedayLocked,somedaySection } from './someday.js';
 import { effectiveSchedules,readItemOccurrences,readItemSchedules,repeatLabel,scheduleBucket,scheduleBucketLabels,scheduleLabel,todayIn } from './item-schedules.js';
 import { readAskRecords } from './ask.js';
@@ -103,6 +103,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const unit of effective){const key=actionSource(unit.chain.root)?.key;if(key)takenKeys.add(key);}
   // カレンダーに書き出す、進行中のプロジェクトの日付付きの項目（HOMEの「次の一手」と同じ範囲）。
   const calendarItems:CalendarItem[]=[];
+  const somedayRecords=(await readItemSomedays(vault)).records,somedayOrphans:string[]=[];
   for(const project of projects){
    const now=`10_projects/${project.id}/NOW.md`,target=await vault.read(now)!==undefined?now:`10_projects/${project.id}/project.md`;
    const mergeTarget=projects.find(p=>p.id===mergedInto.get(project.id));
@@ -139,6 +140,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
     for(const s of loose)if(!takenKeys.has(s.item_key))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
+    // 「いつかやる」へ移した項目がNOWから外れたときも、黙って消さずに示す（AIの行は言い回しが変わることがある）。
+    for(const s of orphanedSomedays(somedayRecords,project.id,list.items,activeResolutions(resolutionRecords,project.id)))if(!takenKeys.has(s.item_key))somedayOrphans.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（移した日 ${s.someday!.since}） / ${project.id} ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     // 本人が付けた手間の目安も、日付と並べて行末に示す（NOWの項目一覧に載っている）。
     const later=(i:{key:string;effort?:ItemEffort})=>{const s=scheduled.get(i.key),label=[s?scheduleLabel(s):'',i.effort?effortLabel(i.effort):''].filter(Boolean).join('・');return label?`（${label}）`:'';};
@@ -214,6 +217,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 「いつかやる」の一覧（アプリが読む派生物）と欄。移した項目・休止中のプロジェクト・置いたアイデアを、最後に見直した日の古い順に並べる。
   let somedayText='';
   try{somedayText=somedaySection(await rebuildSomedayLocked(config,vault,clock,projects),today);}catch{/* 一覧を作れなくてもHOMEは作る。記録の不正は「失敗と競合」に示す。 */}
+  if(somedayOrphans.length)somedayText=`${somedayText||'## いつかやる'}\n\n「いつかやる」から外れた項目（本文が変わったかNOWから外れたため、移したままにできませんでした。${somedayOrphans.length}件。新しい項目をアプリの「…」から移し直し、この記録は\`ctx item someday <project> <key> --clear --confirm\`で外してください）:\n${somedayOrphans.join('\n')}`;
   const lead=[insightsText,nextSection,unassignedActions,waitingSection,somedayText].filter(Boolean).map(x=>x+'\n\n').join('');
   // 秘密情報らしい文字列を含むメモ。原文は変えずモデルへ渡す前に伏せているが、同期先の端末には原文のまま残る。
   const secretRows=secretInputRows(config,effective.flatMap(u=>[u.chain.root,...u.chain.revisions]));
