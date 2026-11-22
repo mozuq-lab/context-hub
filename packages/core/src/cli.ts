@@ -21,7 +21,7 @@ import { readProjectCatalog } from './knowledge-scope.js';
 import { setItemResolution,readNowItems,readItemResolutions,activeResolutions,exclusionReasons,exclusionReasonLabels,itemKey,UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { ACTION_TEXT_CHARS } from './actions.js';
 import { setItemEffort,readItemEfforts,itemEfforts,itemEffortLabels,type ItemEffort } from './item-efforts.js';
-import { setItemWait,readItemWaits,WAIT_WHO_CHARS,type ItemWaiting } from './item-waits.js';
+import { setItemWait,readItemWaits,effectiveWaits,WAIT_WHO_CHARS,type ItemWaiting } from './item-waits.js';
 import { setItemSchedule,readItemSchedules,activeSchedules,effectiveSchedules,completeOccurrence,readItemOccurrences,repeatLabel,todayIn,REPEAT_EVERY_MAX,type RepeatRule } from './item-schedules.js';
 import { rebuildHistories } from './history.js';
 import { dismissResolutionHint } from './resolution-hints.js';
@@ -158,12 +158,16 @@ item.command('effort <project> <key>').description(`項目に手間の目安を�
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemEfforts(vault)).records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.effort===effort&&last.source_event_id?last.source_event_id:`cli:${key}:effort:${effort??'none'}:${last?.id??'none'}`;
 const result=await setItemEffort(c,{projectId:id,itemKey:key,effort,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,effort});});
-item.command('wait <project> <key>').description(`項目に「連絡待ち」の印を付ける（人に頼んだこと・返事を待っていること）。印を付けた項目はHOMEの「次の一手」から外れ、「連絡待ち」にまとまる。見直す日（schedule --review）が来ると「次の一手」の先頭に確認として出る。AIは付けない`).option('--who <name>',`待っている相手（任意・${WAIT_WHO_CHARS}文字以内。HOMEとアプリにだけ示し、NOWとモデルへ渡す資料には載せない）`).option('--since <date>','頼んだ日（YYYY-MM-DD。既定は今日）').option('--clear','印を外して元の欄へ戻す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
+item.command('wait <project> <key>').description(`項目に「連絡待ち」の印を付ける（人に頼んだこと・返事を待っていること）。印を付けた項目はHOMEの「次の一手」から外れ、「連絡待ち」にまとまる。見直す日（schedule --review）が来ると「次の一手」の先頭に確認として出る。AIは付けない`).option('--who <name>',`待っている相手（任意・${WAIT_WHO_CHARS}文字以内。HOMEとアプリにだけ示し、NOWとモデルへ渡す資料には載せない）`).option('--no-who','相手を外す').option('--since <date>','頼んだ日（YYYY-MM-DD。既定は、印が付いていれば今の頼んだ日、なければ今日）').option('--clear','印を外して元の欄へ戻す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
 if(opts.clear&&(opts.who!==undefined||opts.since!==undefined))throw new Error('--clearと--who・--sinceは同時に指定できません');
-const c=await config(),vault=new Vault(c);const waiting:ItemWaiting|null=opts.clear?null:{...(opts.who!==undefined?{who:String(opts.who)}:{}),since:opts.since??todayIn(c.timezone)};
-// 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する（相手の名前は受付IDに入れない）。
+const c=await config(),vault=new Vault(c),records=(await readItemWaits(vault)).records;
+// 既に印が付いている項目では、省いた相手・頼んだ日は今の印のままにする（相手だけ変えても待った日数を数え直さない）。
+const list=(await readNowItems(vault,id))?.items??[],current=list.some(i=>i.key===key)?effectiveWaits(records,id,list,activeResolutions(await readItemResolutions(vault),id)).get(key):undefined;
+const who=opts.who===false?undefined:opts.who!==undefined?String(opts.who):current?.who;
+const waiting:ItemWaiting|null=opts.clear?null:{...(who!==undefined?{who}:{}),since:opts.since??current?.since??todayIn(c.timezone)};
+// 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する（受付IDには相手の名前ではなく、内容の短いハッシュを入れる）。
 const tag=waiting?hash(JSON.stringify(waiting)).slice(0,16):'none';
-const last=(await readItemWaits(vault)).records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.source_event_id?.startsWith(`cli:${key}:wait:${tag}:`)?last.source_event_id:`cli:${key}:wait:${tag}:${last?.id??'none'}`;
+const last=records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.source_event_id?.startsWith(`cli:${key}:wait:${tag}:`)?last.source_event_id:`cli:${key}:wait:${tag}:${last?.id??'none'}`;
 const result=await setItemWait(c,{projectId:id,itemKey:key,waiting,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,waiting});});
 for(const action of ['done','skip'] as const)item.command(`${action}-round <project> <key>`).description(action==='done'?'定例の項目の今回を完了にし、期日を次の回へ進める（項目は残る）':'定例の項目の今回だけを見送り、期日を次の回へ進める').requiredOption('--confirm','項目と期日を確認した本人による報告').action(async(id,key)=>{const c=await config(),vault=new Vault(c),list=(await readNowItems(vault,id))?.items??[];
 // 今の回はNOWではなく日付の記録から決める（次の回の記録を作った後、NOWの再生成の前に停止しても、記録どおりの回を示す）。

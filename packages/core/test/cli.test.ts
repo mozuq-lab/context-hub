@@ -182,6 +182,10 @@ test('CLIで連絡待ちの印を付けるとHOMEの次の一手から外れて�
  // 同じ内容をもう一度送ると、記録後の停止からの回復として同じ受付IDで受け付ける。
  expect(JSON.parse((await cli(config,['item','wait','hub',key,'--who','山田さん','--since','2026-11-01','--confirm'])).out)).toMatchObject({deduped:true});
  expect(JSON.parse((await cli(config,['item','list','hub'])).out).find((i:{key:string})=>i.key===key).waiting).toMatchObject({who:'山田さん',since:'2026-11-01'});
+ // 相手だけ変えても頼んだ日は今のまま（待った日数を数え直さない）。--no-whoで相手だけ外せる。
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--who','佐藤さん','--confirm'])).out)).toMatchObject({waiting:{who:'佐藤さん',since:'2026-11-01'},deduped:false});
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--no-who','--confirm'])).out).waiting).toEqual({since:'2026-11-01'});
+ expect(JSON.parse((await cli(config,['item','wait','hub',key,'--who','山田さん','--confirm'])).out)).toMatchObject({waiting:{who:'山田さん',since:'2026-11-01'},deduped:false});
  expect(await home()).not.toContain('  - 利用者に見せる');
  expect(await home()).toContain('次の一手: 利用者に見せる（相手: 山田さん・2026-11-01から');
  expect(await readFile(join(root,'vault/10_projects/hub/NOW.md'),'utf8')).not.toContain('山田');

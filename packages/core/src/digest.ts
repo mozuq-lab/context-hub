@@ -145,11 +145,15 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   if (own.length) {
     const closedNow = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), UNASSIGNED_SCOPE);
     const text = (u: Unit) => u.unit.chain.latest.text, state = (u: Unit) => closedNow.get(itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u)));
-    const remaining = own.filter(u => !state(u)), added = own.filter(u => inWindow(u.input.received_at));
+    // 連絡待ちの印を付けた行動は「残っている行動」に数えず、下の「連絡待ち」に示す（HOMEとアプリの件数と同じ）。
+    let waitingKeys = new Set<string>();
+    try { waitingKeys = new Set(((await readNowItems(vault, UNASSIGNED_SCOPE))?.items ?? []).filter(i => i.resolution === null && i.waiting).map(i => i.key)); } catch { /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
+    const waitingOwn = (u: Unit) => !state(u) && waitingKeys.has(itemKey(UNASSIGNED_SCOPE, 'next', u.input.id, text(u)));
+    const remaining = own.filter(u => !state(u) && !waitingOwn(u)), parked = own.filter(waitingOwn).length, added = own.filter(u => inWindow(u.input.received_at));
     const closedIn = (action: 'resolve' | 'exclude') => own.filter(u => { const r = state(u); return r?.action === action && inWindow(r.created_at); });
     const done = closedIn('resolve'), dropped = closedIn('exclude');
     const oldest = [...remaining].sort((a, b) => Date.parse(a.input.received_at) - Date.parse(b.input.received_at) || a.input.id.localeCompare(b.input.id));
-    lines.push('## プロジェクト未定の行動', `- 残っている行動: ${remaining.length}件 / 期間内に追加 ${added.length}件・完了 ${done.length}件・却下 ${dropped.length}件`);
+    lines.push('## プロジェクト未定の行動', `- 残っている行動: ${remaining.length}件${parked ? `（ほかに連絡待ち ${parked}件）` : ''} / 期間内に追加 ${added.length}件・完了 ${done.length}件・却下 ${dropped.length}件`);
     for (const u of [...done].sort((a, b) => state(b)!.id.localeCompare(state(a)!.id)).slice(0, 5)) lines.push(`  - 完了: ${clip(text(u))} ${ref(u.input)}`);
     if (oldest.length) lines.push(`- 残っている行動（追加した順に最大5件）:`, ...oldest.slice(0, 5).map(u => `  - ${clip(text(u))} ${ref(u.input)}（${daysSince(u.input.received_at, now)}日前に追加）`));
     lines.push('');

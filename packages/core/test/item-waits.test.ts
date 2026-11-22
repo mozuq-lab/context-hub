@@ -103,7 +103,11 @@ test('見直す日が来た連絡待ちは、次の一手の先頭に確認と�
   expect(shown).toContain('### 連絡待ちの確認（1件）');
   const next = shown.slice(shown.indexOf('## 次の一手'), shown.indexOf('### プロジェクトごと'));
   expect(next).toContain('- [集約ツール](10_projects/hub/NOW.md) 連絡待ちの確認: 次の一手: 利用者に見せる（相手: 山田さん・2026-11-10から15日・期日 2026-11-21・見直す日 2026-11-25）');
-  expect(shown).toContain('・見直す日が来ました）');
+  // 確認に出したものは、下の「連絡待ち」の欄には重ねず、件数と案内だけを示す。
+  const waitingPart = shown.slice(shown.indexOf('## 連絡待ち（'));
+  expect(waitingPart).toContain('## 連絡待ち（1件）');
+  expect(waitingPart).not.toContain('利用者に見せる');
+  expect(waitingPart).toContain('- 見直す日が来た1件は、「次の一手」の先頭の「連絡待ちの確認」に示します。');
   // 期日のない連絡待ちでも、見直す日が来れば確認として出る（日付を使っていない間の見出しも付く）。
   await setItemSchedule(config, { projectId: 'hub', itemKey: show.key, due: null, reviewAfter: null, source: 'cli' });
   await setItemWait(config, { projectId: 'hub', itemKey: name.key, waiting: { since: '2026-11-19' }, source: 'cli', now: clock });
@@ -201,6 +205,12 @@ test('プロジェクト未定の行動にも付けられ、HOMEでは連絡待�
   expect(unassigned).toContain('- 連絡待ちの行動1件は、「連絡待ち」の欄で示します');
   expect(unassigned).not.toContain('見積もりの返事を待つ');
   expect(intakeFeatures(config).item_record_scopes).toEqual([UNASSIGNED_SCOPE]);
+  // ふりかえりでも、連絡待ちの行動は「残っている行動」に数えず、連絡待ちの欄に示す。
+  await rebuildDigest(config, { now: clock });
+  const review = (await vault.read('REVIEW.md'))!;
+  expect(review).toContain('- 残っている行動: 1件（ほかに連絡待ち 1件）');
+  expect(review.slice(review.indexOf('## プロジェクト未定の行動'), review.indexOf('## 連絡待ち'))).not.toContain('見積もりの返事を待つ');
+  expect(review).toContain('  - プロジェクト未定 次の一手: 本人が追加: 見積もりの返事を待つ（相手: 工務店・頼んでから5日）');
 });
 
 test('ふりかえりに件数と長く待っている項目が出て、人ごとの見返しには相手にした人の項目が載る', async () => {

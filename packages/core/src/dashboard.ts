@@ -95,7 +95,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 本人が連絡待ちの印を付けた項目。「次の一手」の一覧・期日の欄・休ませている件数から外し、「連絡待ち」の欄にまとめる。
   // 見直す日が来た連絡待ちは、「次の一手」の先頭に連絡待ちの確認として出す。相手の名前はHOMEとアプリにだけ示す（NOWには載せない）。
   const waiting:{since:string;id:string;place:string;text:string;who?:string;dates:string;check:boolean}[]=[];
-  const waitLabel=(w:{since:string;who?:string},check:boolean,dates:string)=>`${w.who?`相手: ${plain(w.who)}・`:''}${w.since}から${waitingDays(w.since,today)}日${dates?`・${dates}`:''}${check?'・見直す日が来ました':''}`;
+  const waitLabel=(w:{since:string;who?:string},dates:string)=>`${w.who?`相手: ${plain(w.who)}・`:''}${w.since}から${waitingDays(w.since,today)}日${dates?`・${dates}`:''}`;
   // 行動に引き取った行の項目キー。その行の日付は行動へ引き継ぐ（置き場が違っても）ため、元の置き場で付け直しを求めない。
   const takenKeys=new Set<string>();
   for(const unit of effective){const key=actionSource(unit.chain.root)?.key;if(key)takenKeys.add(key);}
@@ -165,7 +165,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const usesDates=dated.length>0||resting>0||orphaned.length>0;
   // 頼んだ日の古い順（同じ日は置き場の順）。
   const waitingRows=waiting.sort((a,b)=>a.since.localeCompare(b.since)||a.id.localeCompare(b.id)),checks=waitingRows.filter(w=>w.check);
-  const checkPart=checks.length?`### 連絡待ちの確認（${checks.length}件）\n見直す日が来た連絡待ちです。返事が来ていれば印を外すか完了にし、まだなら催促して見直す日を付け直してください。\n${checks.map(w=>`- ${w.place} 連絡待ちの確認: ${w.text}（${waitLabel(w,false,w.dates)}）`).join('\n')}\n`:'';
+  const checkPart=checks.length?`### 連絡待ちの確認（${checks.length}件）\n見直す日が来た連絡待ちです。返事が来ていれば印を外すか完了にし、まだなら催促して見直す日を付け直してください。\n${checks.map(w=>`- ${w.place} 連絡待ちの確認: ${w.text}（${waitLabel(w,w.dates)}）`).join('\n')}\n`:'';
   const datedPart=!usesDates?(checkPart?`${checkPart}\n### プロジェクトごと\n`:''):`${checkPart?checkPart+'\n':''}期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
   const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOW・プロジェクト未定の一覧とアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
   const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size&&!checks.length?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates||checks.length?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
@@ -199,7 +199,9 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 期日の欄に載せた（またはたたんだ）行動は、プロジェクト未定の欄では件数だけを示す。
   const unassignedActions=unassignedActionsSection(config,unassignedBuilt,new Map(effective.map(u=>[u.chain.root.id,u.chain.root.path])),nextSection?unassignedFront:new Set(),true);
   // 連絡待ちの欄。印を付けた項目がなければ出さない。
-  const waitingSection=waitingRows.length?`## 連絡待ち（${waitingRows.length}件）\n人に頼んだこと・返事を待っていることとして、本人が印を付けた項目です。「次の一手」の一覧には入れていません。頼んだ日の古い順に${waitingRows.length>WAITING_ROWS?`${WAITING_ROWS}件を`:''}並べます。返事が来たら、アプリで印を外して元の欄へ戻すか、完了にしてください。CLIでは\`ctx item wait\`を使います。\n${waitingRows.slice(0,WAITING_ROWS).map(w=>`- ${w.place} ${w.text}（${waitLabel(w,w.check,w.dates)}）`).join('\n')}${waitingRows.length>WAITING_ROWS?`\n- ほか${waitingRows.length-WAITING_ROWS}件（アプリの「次の一手」の「連絡待ち」で確認）`:''}`:'';
+  // 見直す日が来たものは「次の一手」の先頭の「連絡待ちの確認」に示し、ここには重ねない（アプリと同じ）。
+  const waitingListed=waitingRows.filter(w=>!w.check),waitingChecked=waitingRows.length-waitingListed.length;
+  const waitingSection=waitingRows.length?`## 連絡待ち（${waitingRows.length}件）\n人に頼んだこと・返事を待っていることとして、本人が印を付けた項目です。「次の一手」の一覧には入れていません。頼んだ日の古い順に${waitingListed.length>WAITING_ROWS?`${WAITING_ROWS}件を`:''}並べます。返事が来たら、アプリで印を外して元の欄へ戻すか、完了にしてください。CLIでは\`ctx item wait\`を使います。${waitingListed.length?'\n':''}${waitingListed.slice(0,WAITING_ROWS).map(w=>`- ${w.place} ${w.text}（${waitLabel(w,w.dates)}）`).join('\n')}${waitingListed.length>WAITING_ROWS?`\n- ほか${waitingListed.length-WAITING_ROWS}件（アプリの「次の一手」の「連絡待ち」で確認）`:''}${waitingChecked?`\n- 見直す日が来た${waitingChecked}件は、「次の一手」の先頭の「連絡待ちの確認」に示します。`:''}`:'';
   // 週次の統合の結果（今週の気づき）。設定で有効にしたときだけ出す。記録を読めなくてもHOMEは作り、「失敗と競合」に示す。
   let insightsText='',insightsLines:string[]=[];
   try{const built=await rebuildInsightsLocked(config,vault,effective,clock);insightsText=insightsSection(config,built.insights,clock);insightsLines=insightsNotices(config,built,clock);}
