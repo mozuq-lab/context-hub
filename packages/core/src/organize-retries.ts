@@ -84,6 +84,9 @@ export async function requestOrganizeRetry(config: HubConfig, request: OrganizeR
         return { inputId: r.inputId, retryId: previous.id, deduped: true };
       }
     }
+    // 同じ失敗（試行回数）へのやり直しが既に記録されていれば、使い終えていても受け付ける（受付の再送が、やり直した後に届いた場合）。
+    const same = records.find(x => x.input_id === r.inputId && x.attempts === r.attempts);
+    if (same) return { inputId: r.inputId, retryId: same.id, deduped: true };
     const chains = await readCorrectionChains(config), refuse = (cause: OrganizeRetryReason['cause']) => new OrganizeRetryError({ code: 'organize-retry-refused', cause });
     const chain = chains.find(c => c.root.id === r.inputId || c.revisions.some(i => i.id === r.inputId));
     if (!chain) throw refuse('missing');
@@ -92,8 +95,6 @@ export async function requestOrganizeRetry(config: HubConfig, request: OrganizeR
     const receipt = (await readReceipts(config)).find(x => x.input_id === r.inputId);
     if (receipt?.status !== 'failed') throw refuse('not-failed');
     if (receipt.attempts !== r.attempts) throw refuse('changed');
-    const waiting = records.find(x => x.input_id === r.inputId && x.attempts === receipt.attempts);
-    if (waiting) return { inputId: r.inputId, retryId: waiting.id, deduped: true };
     const record: OrganizeRetryRecord = { schema_version: 1, id: `ORT-${ulid()}`, input_id: r.inputId, attempts: r.attempts, source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString() };
     if (!await vault.create(retryPath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('やり直しの記録が競合しました');
     return { inputId: r.inputId, retryId: record.id, deduped: false };

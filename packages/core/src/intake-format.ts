@@ -59,7 +59,7 @@ const itemEffort=z.object({...base,operation:z.literal('item-effort'),project_id
 // 場所・道具の札。contextsは変更後の全体（付けた順）で、nullはすべて外す依頼。
 const itemContexts=z.object({...base,operation:z.literal('item-contexts'),project_id:itemScopeSchema,item_key:itemKeySchema,contexts:contextTagsSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 // 次の一手の手順。stepsは変更後の全体（手順と終えた数）で、nullは手順を外す依頼。進める・戻すのも全体を送る。
-const itemSteps=z.object({...base,operation:z.literal('item-steps'),project_id:itemScopeSchema,item_key:itemKeySchema,steps:itemStepsValueSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
+const itemSteps=z.object({...base,operation:z.literal('item-steps'),project_id:itemScopeSchema,item_key:itemKeySchema,steps:itemStepsValueSchema.nullable(),expected:itemStepsValueSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const itemWait=z.object({...base,operation:z.literal('item-wait'),project_id:itemScopeSchema,item_key:itemKeySchema,waiting:itemWaitingSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 // 「いつかやる」。somedayは変更後の全体（移した日と、最後に見直した日）で、nullは元の欄へ戻す依頼。
 const itemSomeday=z.object({...base,operation:z.literal('item-someday'),project_id:itemScopeSchema,item_key:itemKeySchema,someday:itemSomedaySchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();

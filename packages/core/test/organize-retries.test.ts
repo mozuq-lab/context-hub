@@ -85,8 +85,14 @@ test('受付の依頼で頼め、同じ受付IDの再送は記録を増やさず
   expect(await vault.read('HOME.md')).not.toContain('(undefined)');
   expect((await organize(config, new MockLlm())).processed).toBe(1);
   expect((await receipt()).status).toBe('organized');
-  // 整理済みのメモへのやり直しは、理由を付けて断る。
-  const late = await packet(config, { operation: 'organize-retry', input_id: saved.inputId, attempts: 1, confirmed: true }, '');
+  // 同じ失敗へのやり直しが、やり直した後に（別の端末や受付の再送で）届いても、既に頼んだものとして受け付ける。
+  await packet(config, { operation: 'organize-retry', input_id: saved.inputId, attempts: 1, confirmed: true }, '');
+  expect((await ingest(config)).accepted).toBe(1);
+  expect((await readOrganizeRetries(vault)).records).toHaveLength(1);
+  // 頼んでいない、整理済みのメモへのやり直しは、理由を付けて断る。
+  const other = await capture(config, { source: 'cli', text: '別のメモ', occurredAt: '2026-11-21T00:00:00Z' });
+  await organize(config, new MockLlm());
+  const late = await packet(config, { operation: 'organize-retry', input_id: other.inputId, attempts: 1, confirmed: true }, '');
   expect((await ingest(config)).rejected).toBe(1);
   const error = intakeErrorSchema.parse(JSON.parse((await vault.read(`90_system/intake-errors/${hash(late.path)}.json`))!));
   expect(error.reason).toEqual({ code: 'organize-retry-refused', cause: 'not-failed' });

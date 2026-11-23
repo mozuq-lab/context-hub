@@ -74,19 +74,24 @@ export function effectiveSteps(records: ItemStepsRecord[], projectId: string, it
 /**
  * 受け付けられない理由。同じ内容の依頼は何度送っても同じ結果になるため、受付は再試行しない。
  * not-next: 「次の一手」でない項目（未解決）には手順を付けない。
+ * changed: 本人が見た手順（expected）と今の手順が違う（別の端末で進めた・直した）。古い表示から送った依頼で進み具合を巻き戻さない。
  */
-export type ItemStepsReason = { code: 'steps-refused'; cause: 'not-next' };
+export const itemStepsRefusalCauses = ['not-next', 'changed'] as const;
+export type ItemStepsReason = { code: 'steps-refused'; cause: typeof itemStepsRefusalCauses[number] };
 export class ItemStepsError extends Error {
   constructor(readonly reason: ItemStepsReason) { super(itemStepsMessage(reason)); this.name = 'ItemStepsError'; }
 }
-export function itemStepsMessage(_reason: ItemStepsReason): string {
-  return '手順を付けられるのは「次の一手」の項目だけです。未解決は、次の一手を足してから手順に分けてください。';
+export function itemStepsMessage(reason: ItemStepsReason): string {
+  return reason.cause === 'changed'
+    ? 'この項目の手順は、確かめた後に別の端末などで変わっています。同期して今の手順を確かめてから、もう一度操作してください。'
+    : '手順を付けられるのは「次の一手」の項目だけです。未解決は、次の一手を足してから手順に分けてください。';
 }
 
-export interface ItemStepsRequest { projectId: string; itemKey: string; steps: ItemStepsValue | null; source: string; sourceEventId?: string }
+/** expectedは本人が見た今の手順（なければnull）。指定すると、今の手順と違うときは断る（省くと確かめない）。 */
+export interface ItemStepsRequest { projectId: string; itemKey: string; steps: ItemStepsValue | null; expected?: ItemStepsValue | null; source: string; sourceEventId?: string }
 export interface ItemStepsResult { projectId: string; itemKey: string; stepsId: string; deduped: boolean }
 const requestSchema = z.object({
-  projectId: itemScopeSchema, itemKey: digest, steps: itemStepsValueSchema.nullable(),
+  projectId: itemScopeSchema, itemKey: digest, steps: itemStepsValueSchema.nullable(), expected: itemStepsValueSchema.nullable().optional(),
   source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
 }).strict();
 
@@ -125,6 +130,7 @@ export async function setItemSteps(config: HubConfig, request: ItemStepsRequest)
       const latest = current ?? records.filter(x => x.project_id === r.projectId && x.item_key === r.itemKey).at(-1);
       if (latest) return { projectId: r.projectId, itemKey: r.itemKey, stepsId: latest.id, deduped: true };
     }
+    if (r.expected !== undefined && !sameSteps(current?.steps ?? null, r.expected)) throw new ItemStepsError({ code: 'steps-refused', cause: 'changed' });
     if (r.steps === null && !current) throw new Error('この項目に外す手順はありません');
     if (unchanged) throw new Error('この項目には既に同じ手順が付いています');
     // 引き継いだ手順を外すときは、引き継ぎ元の記録を外す（項目のキーで外しても引き継ぎ元が残るため）。
@@ -151,12 +157,14 @@ const occurrenceEvent = (occurrenceId: string) => `occurrence:${occurrenceId}`;
  * 定例の今回を完了・見送りにしたとき、項目に手順があり1つでも終えていれば、手順を最初に戻す記録を書く（Writerロック内。NOWの再生成の前に呼ぶ）。
  * 同じ回の記録で既に戻していれば何もしない。手順の記録を読めないときは戻さない（doctorで示す）。
  */
-export async function resetStepsForOccurrenceLocked(vault: Vault, occurrence: { id: string; project_id: string; item_key: string; section: ItemSection; text: string; input_id: string; source: string }): Promise<void> {
+export async function resetStepsForOccurrenceLocked(vault: Vault, occurrence: { id: string; project_id: string; item_key: string; section: ItemSection; text: string; input_id: string; source: string; created_at: string }): Promise<void> {
   let records: ItemStepsRecord[];
   try { records = (await readItemSteps(vault)).records; } catch { return; }
   if (records.some(r => r.source_event_id === occurrenceEvent(occurrence.id))) return;
   const list = (await readNowItems(vault, occurrence.project_id))?.items ?? [], resolved = activeResolutions(await readItemResolutions(vault), occurrence.project_id);
   const current = effectiveItemRecords(records, occurrence.project_id, list, resolved, stepsCleared).byKey.get(occurrence.item_key);
   if (!current?.steps || current.steps.done === 0) return;
+  // 回を片付けた後に手順を付け直した・進めた（回の依頼の再送が遅れて届いた）ときは、その後の進み具合を戻さない。
+  if (Date.parse(current.created_at) > Date.parse(occurrence.created_at)) return;
   await writeStepsRecordLocked(vault, { projectId: occurrence.project_id, key: occurrence.item_key, section: occurrence.section, text: occurrence.text, inputId: occurrence.input_id, steps: { items: current.steps.items, done: 0 }, source: occurrence.source, sourceEventId: occurrenceEvent(occurrence.id) });
 }

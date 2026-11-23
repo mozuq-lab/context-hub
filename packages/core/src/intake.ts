@@ -36,7 +36,7 @@ import { keepPolicy,PolicyReviewError,policyReviewMessage,policyReviewIdSchema }
 import { requestOrganizeRetry,OrganizeRetryError,organizeRetryMessage,organizeRetryIdSchema,organizeRetryRefusalCauses } from './organize-retries.js';
 import { setProjectArea } from './project-areas.js';
 import { ACTION_TEXT_CHARS } from './actions.js';
-import { setItemSteps,stepsIdSchema,ItemStepsError,itemStepsMessage,ITEM_STEPS_MIN,ITEM_STEPS_MAX } from './item-steps.js';
+import { setItemSteps,stepsIdSchema,ItemStepsError,itemStepsMessage,itemStepsRefusalCauses,ITEM_STEPS_MIN,ITEM_STEPS_MAX } from './item-steps.js';
 import { areaSchema,AREA_CHARS,AREA_VOCABULARY_MAX } from './areas.js';
 import type { HubConfig } from './types.js';
 export interface IntakeRunResult { accepted:number; rejected:number; deferred:number; deduped:number; conflicts:string[]; requestIds:string[]; dryRun:boolean }
@@ -89,7 +89,7 @@ const intakeReasonSchema=z.discriminatedUnion('code',[
  z.object({code:z.literal('policy-review-refused'),cause:z.enum(['missing','changed','inactive'])}).strict(),
  z.object({code:z.literal('happened-on-invalid'),cause:z.enum(['future','too-old']),max_days:z.number().int().min(1)}).strict(),
  z.object({code:z.literal('someday-refused'),cause:z.enum(somedayRefusalCauses)}).strict(),
- z.object({code:z.literal('steps-refused'),cause:z.literal('not-next')}).strict(),
+ z.object({code:z.literal('steps-refused'),cause:z.enum(itemStepsRefusalCauses)}).strict(),
  z.object({code:z.literal('organize-retry-refused'),cause:z.enum(organizeRetryRefusalCauses)}).strict(),
  z.object({code:z.literal('project-merge-refused'),cause:z.enum(['missing','same','already-merged','target-merged','has-sources','not-merged','target-mismatch']),project_id:projectIdSchema.optional()}).strict(),
 ]);
@@ -251,7 +251,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    else if(packet.operation==='ask')result=await requestAnswer(config,{question:packet.text,...(packet.project?{project:packet.project}:{}),source:packet.source,sourceEventId:id,askedAt:new Date(packet.occurred_at).toISOString()});
    else if(packet.operation==='policy-keep')result=await keepPolicy(config,{knowledgeId:packet.knowledge_id,expectedHash:packet.knowledge_hash,source:packet.source,sourceEventId:id,reviewedAt:new Date(packet.occurred_at).toISOString()});
    else if(packet.operation==='project-area'){const changed=await setProjectArea(config,{projectId:packet.project_id,area:packet.area,expectedHash:packet.project_hash,source:packet.source,sourceEventId:id});result={projectId:changed.projectId,area:changed.area,areaChangeId:changed.changeId,deduped:changed.deduped};}
-   else if(packet.operation==='item-steps')result=await setItemSteps(config,{projectId:packet.project_id,itemKey:packet.item_key,steps:packet.steps,source:packet.source,sourceEventId:id});
+   else if(packet.operation==='item-steps')result=await setItemSteps(config,{projectId:packet.project_id,itemKey:packet.item_key,steps:packet.steps,expected:packet.expected,source:packet.source,sourceEventId:id});
    else if(packet.operation==='organize-retry')result=await requestOrganizeRetry(config,{inputId:packet.input_id,attempts:packet.attempts,source:packet.source,sourceEventId:id});
    else if(packet.operation==='knowledge-reject')result=await reject(config,packet.candidate_id,packet.candidate_hash);
    else if('confirmation_token'in packet)result=await decideProject(config,{candidateId:packet.candidate_id,expectedHash:packet.candidate_hash,confirmationToken:packet.confirmation_token,confirmed:packet.confirmed,action:packet.operation==='project-approve'?'approve':'reject',source:packet.source,sourceEventId:id,...(packet.cover_ids?{covers:packet.cover_ids.map((candidateId,i)=>({candidateId,expectedHash:packet.cover_hashes![i]!}))}:{}),...(packet.outcome!==undefined?{outcome:packet.outcome}:{})});

@@ -56,6 +56,11 @@ test('手で書いた不正な領域は領域なしとして読み、doctorで�
   await vault.write('10_projects/garden/project.md', (await raw(vault, 'garden')).replace('status: active', 'status: active\narea: [仕事, 家]'));
   expect((await readProjects(config))[0]!.area).toBeUndefined();
   expect((await doctor(config)).issues.some(i => i.startsWith('領域（area）が読めません') && i.includes('10_projects/garden/project.md'))).toBe(true);
+  // 複数行に書いた領域は、1行だけ外すとほかの欄に混ざるため、外さない。
+  const multi = (await raw(vault, 'garden')).replace('area: [仕事, 家]', 'area: 仕事\n  と家');
+  await vault.write('10_projects/garden/project.md', multi);
+  expect(() => withArea(multi, null)).toThrow('1行に直して');
+  await vault.write('10_projects/garden/project.md', (await raw(vault, 'garden')).replace('area: 仕事\n  と家', 'area: [仕事, 家]'));
   // 不正な値は、正しい領域で書き直せる。
   const fixed = await setProjectArea(config, { projectId: 'garden', area: '家', expectedHash: hash(await raw(vault, 'garden')), source: 'cli' });
   expect(fixed.deduped).toBe(false);

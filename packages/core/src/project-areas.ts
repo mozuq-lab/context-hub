@@ -44,6 +44,9 @@ export function withArea(raw: string, area: string | null): string {
   const result = withFrontmatterBody(parts, next.join(parts.eol));
   const parsed = projectSchema.parse(parseMarkdown(result).meta);
   if ((readArea(parsed.area) ?? null) !== area) throw new Error('領域を書き換えられません');
+  // 手で複数行に書いた領域（続きの行・ブロック）を1行だけ外すと、残った行がほかの欄に混ざる。領域以外の欄が変わるなら書かない。
+  const others = (meta: Record<string, unknown>) => JSON.stringify(Object.entries(meta).filter(([k]) => k !== 'area'));
+  if (others(parseMarkdown(raw).meta) !== others(parseMarkdown(result).meta)) throw new Error('領域の行を書き換えられません。project.mdの領域（area）を1行に直してから、もう一度操作してください');
   return result;
 }
 

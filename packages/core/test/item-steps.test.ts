@@ -12,6 +12,7 @@ import { doctor } from '../src/doctor.js';
 import { UNASSIGNED_SCOPE, readNowItems, setItemResolution } from '../src/item-resolutions.js';
 import { completeOccurrence, setItemSchedule } from '../src/item-schedules.js';
 import { readItemSteps, setItemSteps, stepsLabel } from '../src/item-steps.js';
+import { setItemEffort } from '../src/item-efforts.js';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
 const summary = '## 現在地\n- [確認済み] 試作が動いた\n## 次の一手\n- [確認済み] 確定申告を進める\n- [確認済み] 名前を決める\n## 未解決\n- 配布方法が決まっていない';
@@ -92,13 +93,13 @@ test('受付の依頼で付けられ、別の端末からの同じ全体は記�
   const { config, vault, tax, open } = await fixture();
   expect(intakeFeatures(config).operations).toContain('item-steps');
   expect(intakeFeatures(config).item_steps).toEqual({ min: 2, max: 10, max_chars: 200 });
-  await packet(config, { operation: 'item-steps', project_id: 'hub', item_key: tax.key, steps: { items: plan, done: 1 }, confirmed: true }, '');
-  await packet(config, { operation: 'item-steps', project_id: 'hub', item_key: tax.key, steps: { items: plan, done: 1 }, confirmed: true }, '');
+  await packet(config, { operation: 'item-steps', project_id: 'hub', item_key: tax.key, steps: { items: plan, done: 1 }, expected: null, confirmed: true }, '');
+  await packet(config, { operation: 'item-steps', project_id: 'hub', item_key: tax.key, steps: { items: plan, done: 1 }, expected: null, confirmed: true }, '');
   expect((await ingest(config)).accepted).toBe(2);
   expect((await readItemSteps(vault)).records).toHaveLength(1);
   expect((await readIntakeReceipts(config)).filter(r => r.operation === 'item-steps').map(r => 'stepsId' in r.result)).toEqual([true, true]);
   // 未解決への依頼は理由を付けて断り、再試行しない。
-  const refused = await packet(config, { operation: 'item-steps', project_id: 'hub', item_key: open.key, steps: { items: plan, done: 0 }, confirmed: true }, '');
+  const refused = await packet(config, { operation: 'item-steps', project_id: 'hub', item_key: open.key, steps: { items: plan, done: 0 }, expected: null, confirmed: true }, '');
   expect((await ingest(config)).rejected).toBe(1);
   const error = intakeErrorSchema.parse(JSON.parse((await vault.read(`90_system/intake-errors/${hash(refused.path)}.json`))!));
   expect(error.reason).toEqual({ code: 'steps-refused', cause: 'not-next' });
@@ -113,4 +114,32 @@ test('受付の依頼で付けられ、別の端末からの同じ全体は記�
   await rebuildDashboard(config, { now: new Date('2026-11-15T03:00:00Z') });
   expect(await vault.read('HOME.md')).toContain('引っ越しの準備をする（手順 1/2: 業者を比べる）');
   expect((await doctor(config)).issues.filter(i => i.includes('手順'))).toEqual([]);
+});
+
+test('古い表示から送った手順は断り（進み具合を巻き戻さない）、自分の行動にした元の行が出直しても手順を重ねて付けない', async () => {
+  const { config, vault, tax } = await fixture();
+  await setItemSteps(config, { projectId: 'hub', itemKey: tax.key, steps: { items: plan, done: 1 }, expected: null, source: 'cli' });
+  await setItemSteps(config, { projectId: 'hub', itemKey: tax.key, steps: { items: plan, done: 2 }, expected: { items: plan, done: 1 }, source: 'cli' });
+  // 別の端末は1つ済みのまま見ていて「進める」を押した。
+  await expect(setItemSteps(config, { projectId: 'hub', itemKey: tax.key, steps: { items: plan, done: 2 }, expected: { items: plan, done: 1 }, source: 'app', sourceEventId: 'REQ-stale' })).resolves.toMatchObject({ deduped: true });
+  await expect(setItemSteps(config, { projectId: 'hub', itemKey: tax.key, steps: { items: plan, done: 3 }, expected: { items: plan, done: 1 }, source: 'cli' })).rejects.toMatchObject({ reason: { code: 'steps-refused', cause: 'changed' } });
+  expect((await steps(vault, tax.key))!.done).toBe(2);
+  // 自分の行動にする。元の行の手順は行動へ写り、元の行が作業要約で出直しても付かない。
+  await setItemEffort(config, { projectId: 'hub', itemKey: tax.key, effort: 'quick', source: 'cli' });
+  await capture(config, { source: 'cli', kind: 'action', project: 'hub', occurredAt: '2026-11-02T00:00:00Z', text: '確定申告を進める', meta: { action_from_input: tax.input_id, action_from_text: tax.text, action_from_key: tax.key } });
+  await capture(config, { source: 'file', kind: 'work-summary', tool: 'codex', project: 'hub', occurredAt: '2026-11-03T00:00:00Z', receivedAt: '2026-11-03T00:00:00Z', text: '## 次の一手\n- [確認済み] 確定申告を進める' });
+  await organize(config, new MockLlm());
+  const list = (await readNowItems(vault, 'hub'))!.items.filter(i => i.text === '確定申告を進める' && !i.resolution);
+  expect(list.find(i => i.action)!.steps).toMatchObject({ items: plan, done: 2 });
+  expect(list.filter(i => !i.action).every(i => i.steps === undefined)).toBe(true);
+});
+
+test('定例の回の依頼の再送が、手順を進めた後に届いても、手順を最初に戻さない', async () => {
+  const { config, vault, tax } = await fixture();
+  await setItemSchedule(config, { projectId: 'hub', itemKey: tax.key, due: '2026-11-16', reviewAfter: null, repeat: { unit: 'month', every: 1 }, source: 'cli' });
+  await completeOccurrence(config, { projectId: 'hub', itemKey: tax.key, action: 'done', due: '2026-11-16', source: 'app', sourceEventId: 'REQ-round', now: new Date('2026-11-17T00:00:00Z') });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await setItemSteps(config, { projectId: 'hub', itemKey: tax.key, steps: { items: plan, done: 2 }, source: 'cli' });
+  await completeOccurrence(config, { projectId: 'hub', itemKey: tax.key, action: 'done', due: '2026-11-16', source: 'app', sourceEventId: 'REQ-round', now: new Date('2026-11-17T00:00:00Z') });
+  expect((await steps(vault, tax.key))!.done).toBe(2);
 });
