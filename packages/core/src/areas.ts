@@ -33,12 +33,13 @@ export function invalidArea(value: unknown): boolean {
 }
 
 /**
- * 領域の並び。語彙にある領域は語彙の順、語彙にない領域は名前の順で後ろに置き、領域なしは最後。
+ * 領域の並び。語彙にある領域は語彙の順、語彙にない領域は名前の順（文字コードの順。アプリも同じ順に並べられるよう、言語ごとの照合は使わない）で後ろに置き、領域なしは最後。
+ * 並びを決めたいときは、本人が語彙で順を決める。
  * 返すのは実際にプロジェクトに付いている領域だけ（語彙にあっても使われていない領域は含めない）。
  */
 export function orderAreas(areas: Iterable<string | undefined>, vocabulary: readonly string[] = []): (string | undefined)[] {
   const used = new Set(areas), named = [...used].filter((a): a is string => a !== undefined);
-  const known = vocabulary.filter(a => used.has(a)), rest = named.filter(a => !vocabulary.includes(a)).sort((a, b) => a.localeCompare(b, 'ja'));
+  const known = vocabulary.filter(a => used.has(a)), rest = named.filter(a => !vocabulary.includes(a)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   return [...known, ...rest, ...(used.has(undefined) ? [undefined] : [])];
 }
 /** 領域を使っているか（1つでもプロジェクトに付いていれば、HOMEと週次レビューで領域ごとにまとめる）。 */
