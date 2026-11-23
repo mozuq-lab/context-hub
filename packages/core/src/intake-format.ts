@@ -3,11 +3,13 @@ import { inputIdSchema } from './capture.js';
 import { PROJECT_OUTCOME_CHARS, normalizeOutcome, outcomeLimitMessage, projectIdSchema } from './projects.js';
 import { PROJECT_TERMS_MAX, PROJECT_TERM_CHARS, PROJECT_TITLE_CHARS } from './project-definition.js';
 import { projectStatusSchema } from './project-status.js';
+import { areaSchema } from './areas.js';
 import { exclusionNoteSchema, exclusionReasonSchema, itemActionSchema, itemKeySchema, itemScopeSchema, UNASSIGNED_EXCLUSION_REASON, UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { occurrenceActionSchema, repeatRuleSchema, scheduleDateSchema } from './item-schedules.js';
 import { calendarDateSchema } from './happened.js';
 import { itemEffortSchema } from './item-efforts.js';
 import { contextTagsSchema } from './item-contexts.js';
+import { itemStepsValueSchema } from './item-steps.js';
 import { itemWaitingSchema } from './item-waits.js';
 import { itemSomedaySchema } from './item-somedays.js';
 import { somedayReviewActions, somedayTargets } from './someday.js';
@@ -41,6 +43,8 @@ const knowledgeApprove=z.union([
 ]);
 const knowledgeReject=z.object({...knowledgeBase,operation:z.literal('knowledge-reject')}).strict();
 const knowledgeRetire=z.object({...base,operation:z.literal('knowledge-retire'),target_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
+// プロジェクトの領域。areaは変更後の領域で、nullは外す依頼。ハッシュは本人が確認した時点のproject.mdのもの。
+const projectArea=z.object({...base,operation:z.literal('project-area'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),area:areaSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const projectStatus=z.object({...base,operation:z.literal('project-status'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),status:projectStatusSchema,confirmed:z.literal(true),text:z.string()}).strict();
 // 誤りとして外す（exclude）ときだけ理由が必須で、一言を添えられる。承認操作の本文は空のままにするため、一言はfrontmatterで送る。
 const itemResolution=z.object({...base,operation:z.literal('item-resolution'),project_id:itemScopeSchema,item_key:itemKeySchema,action:itemActionSchema,reason:exclusionReasonSchema.optional(),note:exclusionNoteSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='exclude'?v.reason!==undefined:v.reason===undefined&&v.note===undefined,'理由は誤りとして外すときだけ指定します').refine(v=>v.project_id!==UNASSIGNED_SCOPE||v.action!=='exclude'||v.reason===UNASSIGNED_EXCLUSION_REASON,'プロジェクト未定の行は、「もう古い」としてだけ外せます');
@@ -54,6 +58,8 @@ const itemEffort=z.object({...base,operation:z.literal('item-effort'),project_id
 // 連絡待ちの印。waitingは変更後の全体（相手は任意、頼んだ日は必須）で、nullは印を外す依頼。
 // 場所・道具の札。contextsは変更後の全体（付けた順）で、nullはすべて外す依頼。
 const itemContexts=z.object({...base,operation:z.literal('item-contexts'),project_id:itemScopeSchema,item_key:itemKeySchema,contexts:contextTagsSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
+// 次の一手の手順。stepsは変更後の全体（手順と終えた数）で、nullは手順を外す依頼。進める・戻すのも全体を送る。
+const itemSteps=z.object({...base,operation:z.literal('item-steps'),project_id:itemScopeSchema,item_key:itemKeySchema,steps:itemStepsValueSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const itemWait=z.object({...base,operation:z.literal('item-wait'),project_id:itemScopeSchema,item_key:itemKeySchema,waiting:itemWaitingSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 // 「いつかやる」。somedayは変更後の全体（移した日と、最後に見直した日）で、nullは元の欄へ戻す依頼。
 const itemSomeday=z.object({...base,operation:z.literal('item-someday'),project_id:itemScopeSchema,item_key:itemKeySchema,someday:itemSomedaySchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
@@ -67,8 +73,8 @@ const gitDraftDismiss=z.object({...base,operation:z.literal('git-draft-dismiss')
 // 名前・別名・キーワードは変更後の全体を送る。上限と重複の整理は本体が検証する。
 // 望む結果は任意。送らなければ今の望む結果を保ち（対応していない版のアプリの依頼で消さない）、空文字なら外す。
 const projectDefinition=z.object({...base,operation:z.literal('project-definition'),project_id:projectIdSchema,project_hash:z.string().regex(/^[a-f0-9]{64}$/),title:z.string().max(PROJECT_TITLE_CHARS),aliases:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),keywords:z.array(z.string().max(PROJECT_TERM_CHARS)).max(PROJECT_TERMS_MAX),outcome:outcomeField.optional(),confirmed:z.literal(true),text:z.string()}).strict();
-// 本文は任意の最初のメモ。空なら作成だけを行う。
-const projectCreate=z.object({...base,operation:z.literal('project-create'),project_id:newProjectIdSchema,title:z.string(),aliases:z.array(z.string()),keywords:z.array(z.string()),outcome:outcomeField.optional(),confirmed:z.literal(true),text:z.string()}).strict().superRefine((value,ctx)=>{const result=projectCreateFieldsSchema.safeParse({title:value.title,aliases:value.aliases,keywords:value.keywords});if(!result.success)ctx.addIssue({code:z.ZodIssueCode.custom,message:'プロジェクトの名前・別名・キーワードが不正です'});});
+// 本文は任意の最初のメモ。空なら作成だけを行う。areaは本人が選んだ領域（任意）。
+const projectCreate=z.object({...base,operation:z.literal('project-create'),project_id:newProjectIdSchema,title:z.string(),aliases:z.array(z.string()),keywords:z.array(z.string()),outcome:outcomeField.optional(),area:areaSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().superRefine((value,ctx)=>{const result=projectCreateFieldsSchema.safeParse({title:value.title,aliases:value.aliases,keywords:value.keywords});if(!result.success)ctx.addIssue({code:z.ZodIssueCode.custom,message:'プロジェクトの名前・別名・キーワードが不正です'});});
 const conflictResolve=z.object({...base,operation:z.literal('conflict-resolve'),target:resolvableTargetSchema,target_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
 // 2件のアイデアを束ねる（link）か、別の話とする（separate）。ハッシュは索引で確認した内容のもので、束ねるときだけ一致を確かめる。
 const ideaLink=z.object({...base,operation:z.literal('idea-link'),idea_ids:z.tuple([ideaIdSchema,ideaIdSchema]).refine(([a,b])=>a!==b,'異なる2件のアイデアを指定してください'),idea_hashes:z.tuple([z.string().regex(/^[a-f0-9]{64}$/),z.string().regex(/^[a-f0-9]{64}$/)]),action:ideaLinkActionSchema,confirmed:z.literal(true),text:z.string()}).strict();
@@ -84,8 +90,10 @@ const askSchema=z.object({...base,operation:z.literal('ask'),project:projectIdSc
 // アプリの好みを端末間でそろえる。本文が好みのJSON（変えたまとまりだけ）。
 const preferencesSchema=z.object({...base,operation:z.literal('client-preferences'),confirmed:z.literal(true),text:z.string()}).strict();
 // 採用した方針を本人が「まだ有効」と確かめた。ハッシュは確かめた時点の知識のファイルのもの。
+// 整理（AIの読み取り）に失敗したメモ1件のやり直し。attemptsは本人が確かめた時点の試行回数で、今の記録と違えば受け付けない。
+const organizeRetry=z.object({...base,operation:z.literal('organize-retry'),input_id:inputIdSchema,attempts:z.number().int().min(1).max(1000),confirmed:z.literal(true),text:z.string()}).strict();
 const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemContexts, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition]);
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemContexts, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition, organizeRetry, projectArea, itemSteps]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

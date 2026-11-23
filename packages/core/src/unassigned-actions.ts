@@ -9,6 +9,7 @@ import { shortMemoText } from './short-memo.js';
 import { ACTION_LABEL, actionSource, movedActionIds, sourceRef } from './actions.js';
 import { effectiveSchedules, readItemSchedules, scheduleLabel, type ItemSchedule } from './item-schedules.js';
 import { effectiveEfforts, effortLabel, readItemEfforts, type ItemEffortRecord } from './item-efforts.js';
+import { effectiveSteps, readItemSteps, stepsLabel, type ItemStepsRecord } from './item-steps.js';
 import { effectiveContexts, readItemContexts, type ItemContextRecord } from './item-contexts.js';
 import { effectiveWaits, readItemWaits, waitingLabel, type ItemWaitRecord } from './item-waits.js';
 import { effectiveSomedays, readItemSomedays, SOMEDAY_LABEL, type ItemSomedayRecord } from './item-somedays.js';
@@ -80,7 +81,7 @@ export function buildUnassignedActions(config: HubConfig, units: EffectiveInput[
   return buildUnassigned(config, units, now, resolutions).actions;
 }
 /** 本人が行動に付けた記録（期日・見直す日・手間の目安・連絡待ち）。読めなかったときは空として一覧を作る。 */
-export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[]; contexts?: ItemContextRecord[]; waits?: ItemWaitRecord[]; somedays?: ItemSomedayRecord[] }
+export interface UnassignedRecords { schedules?: ItemSchedule[]; efforts?: ItemEffortRecord[]; contexts?: ItemContextRecord[]; waits?: ItemWaitRecord[]; somedays?: ItemSomedayRecord[]; steps?: ItemStepsRecord[] }
 export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now = new Date(), resolutions: ItemResolution[] = [], records: UnassignedRecords = {}): { actions: UnassignedActions; items: NowItems } {
   const settings = secretSettings(config), hide = (s: string) => settings.enabled ? redactText(s, settings).text : s;
   const closed = activeResolutions(resolutions, UNASSIGNED_SCOPE);
@@ -114,6 +115,7 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
   const contexts = effectiveContexts(records.contexts ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   const waits = effectiveWaits(records.waits ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   const somedays = effectiveSomedays(records.somedays ?? [], UNASSIGNED_SCOPE, ownItems, closed);
+  const steps = effectiveSteps(records.steps ?? [], UNASSIGNED_SCOPE, ownItems, closed);
   for (const item of ownOpen) {
     const s = scheduled.get(item.key), e = efforts.get(item.key), w = waits.get(item.key), d = somedays.get(item.key);
     if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) };
@@ -122,6 +124,8 @@ export function buildUnassigned(config: HubConfig, units: EffectiveInput[], now 
     if (t) item.contexts = t;
     if (w) item.waiting = w;
     if (d) item.someday = d;
+    const p = steps.get(item.key);
+    if (p) item.steps = p;
   }
   for (const unit of units) {
     const { chain, receipt } = unit, result = receipt?.result;
@@ -190,6 +194,7 @@ export async function rebuildUnassignedActionsLocked(config: HubConfig, vault: V
   try { records.contexts = (await readItemContexts(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.waits = (await readItemWaits(vault)).records; } catch { /* 上のとおり。 */ }
   try { records.somedays = (await readItemSomedays(vault)).records; } catch { /* 上のとおり。 */ }
+  try { records.steps = (await readItemSteps(vault)).records; } catch { /* 上のとおり。 */ }
   const built = buildUnassigned(config, units, now, resolutions, records);
   const items = await writeIfChanged(vault, unassignedItemsPath, built.items, raw => nowItemsSchema.parse(JSON.parse(raw)));
   return { actions: await writeIfChanged(vault, unassignedActionsPath, built.actions, raw => unassignedActionsSchema.parse(JSON.parse(raw))), items };
@@ -203,8 +208,8 @@ const clip = (s: string, n = 120) => clipText(s, n);
 /** 原文へのリンク先。空白や括弧を含むパスは、リンクが途中で切れないよう山括弧で囲む。 */
 const destination = (path: string) => /[\s()]/.test(path) ? `<${path}>` : path;
 /** 行動の行末に付ける、本人が付けた連絡待ち・日付・手間の目安の表示（なければ空文字）。連絡待ちの相手は、呼び出し側が必要なときだけ示す。 */
-export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort' | 'waiting' | 'someday'>): string {
-  const label = [item.someday ? SOMEDAY_LABEL : '', item.waiting ? waitingLabel(item.waiting) : '', item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : ''].filter(Boolean).join('・');
+export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort' | 'waiting' | 'someday' | 'steps'>): string {
+  const label = [item.someday ? SOMEDAY_LABEL : '', item.waiting ? waitingLabel(item.waiting) : '', item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : '', item.steps ? clipText(stepsLabel(item.steps), 80) : ''].filter(Boolean).join('・');
   return label ? `（${label}）` : '';
 }
 /**

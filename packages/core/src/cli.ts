@@ -22,6 +22,7 @@ import { setItemResolution,readNowItems,readItemResolutions,activeResolutions,ex
 import { ACTION_TEXT_CHARS } from './actions.js';
 import { moveAction } from './action-moves.js';
 import { setItemEffort,readItemEfforts,itemEfforts,itemEffortLabels,type ItemEffort } from './item-efforts.js';
+import { setItemSteps,readItemSteps,stepsLabel,ITEM_STEPS_MIN,ITEM_STEPS_MAX } from './item-steps.js';
 import { setItemContexts,readItemContexts,CONTEXT_TAGS_MAX,CONTEXT_TAG_CHARS } from './item-contexts.js';
 import { setItemWait,readItemWaits,effectiveWaits,WAIT_WHO_CHARS,type ItemWaiting } from './item-waits.js';
 import { setItemSomeday,readItemSomedays,effectiveSomedays,type ItemSomeday } from './item-somedays.js';
@@ -42,6 +43,10 @@ import { verifyBackup,readBackupChecks,backupStatus } from './backup-check.js';
 import { rebuildIdeaIndexLocked,setIdeaLink } from './idea-links.js';
 import { listConflicts,resolveConflict } from './conflicts.js';
 import { organize } from './organize.js';
+import { setProjectArea } from './project-areas.js';
+import { AREA_CHARS } from './areas.js';
+import { requestOrganizeRetry } from './organize-retries.js';
+import { readReceipts } from './views.js';
 import { previewSynthesis,runSynthesis,synthesisLlmConfig } from './synthesis.js';
 import { MockLlm } from './llm.js';
 import { answerQuestion,askSourcesFrom,formatAnswer,selectAskSources } from './ask.js';
@@ -86,6 +91,9 @@ project.command('add <id>').requiredOption('--title <text>','プロジェクト�
 project.command('list').description('定義・状態・確認用ハッシュを一覧').action(async()=>{const c=await config();const projects=await readProjects(c),catalog=await readProjectCatalog(new Vault(c));output(projects.map(p=>({...p,lifecycle:lifecycleOf(p),hash:catalog.find(x=>x.id===p.id)?.hash})));});
 project.command('status <id>').description('本人の判断でプロジェクトを進行中・休止・完了に切り替える').addOption(new Option('--set <status>','新しい状態').choices([...projectStatuses]).makeOptionMandatory()).requiredOption('--hash <sha256>','project listで確認したproject.mdのハッシュ').requiredOption('--confirm','定義を確認した本人による変更').action(async(id,opts)=>{const c=await config();// 同じ確認内容の再実行は、記録後・定義書込前の停止からの回復として扱う。
 const result=await setProjectStatus(c,{projectId:id,status:opts.set,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:${id}:${opts.hash}:${opts.set}`});await rebuildDashboard(c);output(result);});
+project.command('area <id>').description('本人の判断でプロジェクトに領域（責任範囲。例: 仕事・家）を付ける・外す。HOMEと週次レビューで領域ごとにまとめて見る。AIは付けず、帰属の推定にも使わない').option('--set <area>',`領域（${AREA_CHARS}文字以内）`).option('--clear','領域を外す').requiredOption('--hash <sha256>','project listで確認したproject.mdのハッシュ').requiredOption('--confirm','定義を確認した本人による変更').action(async(id,opts)=>{if((opts.set===undefined)===(opts.clear!==true))throw new Error('--setか--clearのどちらかを指定してください');const c=await config(),area=opts.clear?null:String(opts.set).normalize('NFC');
+// 同じ確認内容の再実行は、記録後・定義書込前の停止からの回復として扱う。
+const result=await setProjectArea(c,{projectId:id,area,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:${id}:${opts.hash}:area:${area??''}`});await rebuildDashboard(c);output(result);});
 const collect=(value:string,previous:string[])=>[...previous,value];
 project.command('edit <id>').description('本人の確認でプロジェクトの名前・別名・キーワード・望む結果を書き換える（帰属未確定のメモは次のcycleで再関連付けの対象になる）')
   .option('--title <text>','新しい名前').option('--outcome <text>','新しい望む結果（何をもって完了か。改行は\\nで書けます）').option('--clear-outcome','望む結果を外す').option('--add-alias <text>','追加する別名（複数指定可）',collect,[]).option('--remove-alias <text>','削除する別名（複数指定可）',collect,[])
@@ -123,7 +131,7 @@ for(const action of ['approve','reject'] as const){const command=project.command
  if(action==='approve')command.option('--outcome <text>','作るプロジェクトの望む結果（改行は\\nで書けます）');
  command.action(async(id,opts)=>output(await decideProject(await config(),{candidateId:id,expectedHash:opts.hash,confirmationToken:opts.token,confirmed:opts.confirm,action,source:'cli',sourceEventId:`cli:${id}:${action}`,...(opts.outcome!==undefined?{outcome:outcomeArg(opts.outcome)}:{})})));}
 const item=program.command('item').description('NOWの次の一手・未解決を、本人の確認で完了・解決にする、誤りとして外す、または未解決へ戻す');
-item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,repeat:i.schedule?.repeat?repeatLabel(i.schedule.repeat):null,effort:i.effort??null,contexts:i.contexts??[],waiting:i.waiting?{since:i.waiting.since,who:i.waiting.who??null}:null,someday:i.someday?{since:i.someday.since,reviewed:i.someday.reviewed}:null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{}),...(i.action?{added_by_person:true,...(i.action.from?{from:i.action.from}:{})}:{})})));});
+item.command('list <project>').description('直近に生成したNOWの項目とキーを表示').action(async id=>{const items=await readNowItems(new Vault(await config()),id);if(!items)throw new Error('NOW項目の記録がありません。cycleを実行してください');output(items.items.map(i=>({key:i.key,section:i.section,text:`${i.label}${i.text}`,input_id:i.input_id,resolved:i.resolution&&i.resolution.action!=='exclude'?i.resolution.id:null,...(i.resolution?.action==='exclude'?{excluded:{id:i.resolution.id,reason:i.resolution.reason,note:i.resolution.note??null}}:{}),due:i.schedule?.due??null,review_after:i.schedule?.review_after??null,repeat:i.schedule?.repeat?repeatLabel(i.schedule.repeat):null,effort:i.effort??null,contexts:i.contexts??[],steps:i.steps?{items:i.steps.items,done:i.steps.done,current:stepsLabel(i.steps)}:null,waiting:i.waiting?{since:i.waiting.since,who:i.waiting.who??null}:null,someday:i.someday?{since:i.someday.since,reviewed:i.someday.reviewed}:null,...(i.hints?.length?{maybe_done:i.hints.map(h=>({input_id:h.input_id,quote:h.quote}))}:{}),...(i.action?{added_by_person:true,...(i.action.from?{from:i.action.from}:{})}:{})})));});
 for(const action of ['resolve','reopen'] as const)item.command(`${action} <project> <key>`).description(action==='resolve'?'項目を完了・解決にする':'解決済み、または誤りとして外した項目を未解決へ戻す').requiredOption('--confirm','項目を確認した本人による報告').action(async(id,key,_opts)=>{const c=await config(),vault=new Vault(c);
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ操作なら同じ受付IDで再送し、記録後の停止から回復する。
 const last=(await readItemResolutions(vault)).filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.action===action&&last.source_event_id?last.source_event_id:`cli:${key}:${action}:${last?.id??'none'}`;const result=await setItemResolution(c,{projectId:id,itemKey:key,action,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
@@ -185,6 +193,17 @@ const c=await config(),vault=new Vault(c),contexts=opts.clear?null:tags;
 const same=(a:string[]|null)=>a===null?contexts===null:contexts!==null&&a.join('\n')===contexts.join('\n');
 const last=(await readItemContexts(vault)).records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&same(last.contexts)&&last.source_event_id?last.source_event_id:`cli:${key}:contexts:${last?.id??'none'}:${contexts===null?'none':hash(contexts.join('\n')).slice(0,16)}`;
 const result=await setItemContexts(c,{projectId:id,itemKey:key,contexts,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,contexts:contexts??[]});});
+item.command('steps <project> <key> [steps...]').description(`大きな次の一手を手順（${ITEM_STEPS_MIN}〜${ITEM_STEPS_MAX}個・1つ${ACTION_TEXT_CHARS}文字以内）に分ける。手順を指定すると全体を置き換えて最初からにし、--nextで今の手順を終えて次へ進め、--backで1つ戻す。NOW・HOMEには今の1歩だけが出る。AIは手順を作らない`).option('--next','今の手順を終えて次へ進める').option('--back','終えた手順を1つ戻す').option('--clear','手順を外す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,steps:string[],opts)=>{
+const modes=[steps.length>0,opts.next===true,opts.back===true,opts.clear===true].filter(Boolean).length;if(modes!==1)throw new Error('手順・--next・--back・--clearのどれか1つを指定してください');
+const c=await config(),vault=new Vault(c),items=(await readNowItems(vault,id))?.items??[],current=items.find(i=>i.key===key)?.steps;
+let value:{items:string[];done:number}|null;
+if(opts.clear)value=null;
+else if(steps.length)value={items:steps.map(s=>s.trim()),done:0};
+else{if(!current)throw new Error('この項目には手順がありません。先に手順を指定してください');const done=current.done+(opts.next?1:-1);if(done<0)throw new Error('まだ手順を1つも終えていません');if(done>current.items.length)throw new Error('手順はすべて終えています。項目を完了にするか、手順を付け直してください');value={items:current.items,done};}
+// 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
+const last=(await readItemSteps(vault)).records.filter(r=>r.project_id===id&&r.item_key===key).at(-1),same=JSON.stringify(last?.steps??null)===JSON.stringify(value);
+const event=last&&last.source==='cli'&&same&&last.source_event_id?last.source_event_id:`cli:${key}:steps:${last?.id??'none'}:${hash(JSON.stringify(value)).slice(0,16)}`;
+const result=await setItemSteps(c,{projectId:id,itemKey:key,steps:value,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,steps:value,current:value?stepsLabel(value):null});});
 item.command('wait <project> <key>').description(`項目に「連絡待ち」の印を付ける（人に頼んだこと・返事を待っていること）。印を付けた項目はHOMEの「次の一手」から外れ、「連絡待ち」にまとまる。見直す日（schedule --review）が来ると「次の一手」の先頭に確認として出る。AIは付けない`).option('--who <name>',`待っている相手（任意・${WAIT_WHO_CHARS}文字以内。HOMEとアプリにだけ示し、NOWとモデルへ渡す資料には載せない）`).option('--no-who','相手を外す').option('--since <date>','頼んだ日（YYYY-MM-DD。既定は、印が付いていれば今の頼んだ日、なければ今日）').option('--clear','印を外して元の欄へ戻す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
 if(opts.clear&&(opts.who!==undefined||opts.since!==undefined))throw new Error('--clearと--who・--sinceは同時に指定できません');
 const c=await config(),vault=new Vault(c),records=(await readItemWaits(vault)).records;
@@ -277,6 +296,7 @@ program.command('ask <question...>').description('記録だけを根拠に、問
   const llm=c.organize.llm.provider==='mock'?new MockLlm():new OpenClawInferLlm(c.organize.llm),answer=await answerQuestion(c,llm,question,opts.project?{project:opts.project}:{});
   if(opts.json){output({question,...answer});}else{const paths=new Map((await readEffectiveInputs(c)).flatMap(u=>[u.chain.root,...u.chain.revisions].map(i=>[i.id,i.path] as [string,string])));output(formatAnswer(question,answer,paths));}
   if(answer.status==='failed')process.exitCode=1;});
+program.command('retry-organize <input-id>').description('整理（AIの読み取り）に失敗したメモ1件のやり直しを頼み、次の整理（cycle）で1回だけ試す。organize --retry-failedと違い、選んだ1件だけを対象にし、organize.maxAttemptsには縛られない').requiredOption('--confirm','失敗したメモを確認した本人による依頼').action(async(id)=>{const c=await config();const receipt=(await readReceipts(c)).find(r=>r.input_id===id);const result=await requestOrganizeRetry(c,{inputId:id,attempts:receipt?.attempts??1,source:'cli'});await rebuildDashboard(c);output(result);});
 program.command('ingest').description('同期受付ファイルを正式保存').option('--limit <n>','受付操作の上限',positive).option('--dry-run','書き込みなし').action(async opts=>{const result=await ingest(await config(),{limit:opts.limit,dryRun:opts.dryRun});output(result);if(result.rejected)process.exitCode=1;});
 program.command('digest').description('直近の期間のふりかえりREVIEW.mdを生成').option('--days <n>','集計日数（既定は設定のretrieve.digestDays）',positive).action(async opts=>output(await rebuildDigest(await config(),opts.days?{days:opts.days}:{})));
 program.command('dashboard').description('プロジェクト一覧と処理状況のHOMEを生成').action(async()=>output(await rebuildDashboard(await config())));

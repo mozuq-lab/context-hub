@@ -20,6 +20,7 @@ import { candidateProjects } from './project-status.js';
 import { completeRedacted, redactText, secretSettings } from './secrets.js';
 import { shortMemoText } from './short-memo.js';
 import { evidenceBound } from './happened.js';
+import { pendingOrganizeRetries, readOrganizeRetries } from './organize-retries.js';
 
 export interface OrganizeOptions { limit?: number; dryRun?: boolean; retryFailed?: boolean; id?: string }
 export interface OrganizeRunResult { processed: number; failed: number; skipped: number; conflicts: string[]; dryRun: boolean; inputIds: string[]; recovered?:number; reassociated?:number; /** 本人が誤りとして外した項目の入力を読み直した件数。 */ reread?:number }
@@ -216,11 +217,14 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         if (!matchesId(chain) || chain.root.kind === 'action' || byId.get(chain.latest.id)?.status === 'organized') continue;
         if (await readJournal(vault, chain.latest.id)) journals.add(chain.latest.id);
       }
+      // 本人がやり直しを頼んだ失敗（依頼1件につき1回。organize.maxAttemptsには縛られない）。記録を読めないときは頼まれていないものとして続ける（doctorで示す）。
+      let retries = new Set<string>();
+      try { retries = pendingOrganizeRetries((await readOrganizeRetries(vault)).records, byId); } catch { /* 上のとおり。 */ }
       const selected = chains.filter((chain) => {
         // 本人が直接追加した行動はモデルで整理しない（NOWへは保存時に載せる）。
         if (!matchesId(chain) || chain.root.kind === 'action') return false;
         const receipt = byId.get(chain.latest.id);
-        return journals.has(chain.latest.id) || !receipt || (options.retryFailed === true && receipt.status === 'failed' && receipt.attempts < config.organize.maxAttempts);
+        return journals.has(chain.latest.id) || !receipt || (receipt.status === 'failed' && ((options.retryFailed === true && receipt.attempts < config.organize.maxAttempts) || retries.has(chain.latest.id)));
       }).sort((left, right) => Date.parse(left.root.occurred_at) - Date.parse(right.root.occurred_at) || left.latest.id.localeCompare(right.latest.id)).slice(0, budget - recovered);
       const outcome: OrganizeRunResult = { processed: 0, failed: 0, skipped: inputs.length - selected.length, conflicts: [], dryRun: options.dryRun === true, inputIds: selected.map((chain) => chain.latest.id) };
       if(recovered){outcome.recovered=recovered;if(!options.dryRun)outcome.processed=recovered;}

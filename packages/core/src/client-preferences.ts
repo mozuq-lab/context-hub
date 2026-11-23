@@ -1,15 +1,16 @@
 import { z } from 'zod';
 import { projectIdSchema } from './projects.js';
 import { CONTEXT_VOCABULARY_MAX, contextTagSchema } from './item-contexts.js';
+import { areaVocabularySchema } from './areas.js';
 import { findSecrets, secretSettings, summarizeFindings } from './secrets.js';
 import { Vault } from './storage.js';
 import type { HubConfig } from './types.js';
 
 /**
- * アプリの好み（ピン留めと並び順・メモのひな形・文脈かごの上限・場所・道具の札の語彙）を、端末間でそろえるための共有の記録。
+ * アプリの好み（ピン留めと並び順・メモのひな形・文脈かごの上限・場所・道具の札の語彙・プロジェクトの領域の語彙）を、端末間でそろえるための共有の記録。
  * - アプリは変更を受付ファイルで送り、本体がまとまり（グループ）ごとに新しい方を残して1つのファイルへ書く。
  * - ほかの端末は読込のときにこのファイルを読み、自分のものより新しいまとまりを取り込む。
- * - 本体は好みの中身を使わない（HOMEやNOWには出さない）。既読・ウインドウの位置・通知の許可・APIキーのような端末ごとの状態は扱わない。
+ * - 本体は好みの中身を使わない（HOMEやNOWには出さない。領域の語彙だけは、HOMEと週次レビューで領域を並べる順に使う）。既読・ウインドウの位置・通知の許可・APIキーのような端末ごとの状態は扱わない。
  * - 遅れて届いた古い依頼で巻き戻さない。端末の時計が進みすぎていても、受け付けた時刻より新しい日時は記録しない。
  */
 export const clientPreferencesPath = '90_system/client-preferences.json';
@@ -18,7 +19,7 @@ export const PREFERENCE_TEMPLATES_MAX = 12;
 export const PREFERENCE_TEMPLATE_NAME_CHARS = 40;
 export const PREFERENCE_TEMPLATE_BODY_CHARS = 1000;
 export const preferenceBasketLimits = [6000, 12000, 30000] as const;
-export const preferenceGroups = ['pins', 'templates', 'basket', 'contexts'] as const;
+export const preferenceGroups = ['pins', 'templates', 'basket', 'contexts', 'areas'] as const;
 export type PreferenceGroup = typeof preferenceGroups[number];
 /** 受付ファイルの本文（JSON）の上限。 */
 export const PREFERENCES_MAX_BYTES = 32 * 1024;
@@ -35,19 +36,21 @@ const templatesValue = z.object({ items: z.array(templateSchema).max(PREFERENCE_
 const basketValue = z.object({ max_chars: z.union(preferenceBasketLimits.map(n => z.literal(n)) as [z.ZodLiteral<6000>, z.ZodLiteral<12000>, z.ZodLiteral<30000>]) }).strict();
 // 場所・道具の札の語彙（アプリで札を選ぶときの一覧、並びは本人が決めた順）。本体は札の記録をこの語彙で縛らない（外した札も項目には残る）。
 const contextsValue = z.object({ items: z.array(contextTagSchema).max(CONTEXT_VOCABULARY_MAX).refine(items => new Set(items).size === items.length, '同じ札を重ねて指定できません') }).strict();
-const valueSchemas = { pins: pinsValue, templates: templatesValue, basket: basketValue, contexts: contextsValue } as const;
+// プロジェクトの領域の語彙（アプリで領域を選ぶときの一覧、並びは本人が決めた順。HOMEと週次レビューの領域の並びにも使う）。本体は領域の記録をこの語彙で縛らない。
+const areasValue = z.object({ items: areaVocabularySchema }).strict();
+const valueSchemas = { pins: pinsValue, templates: templatesValue, basket: basketValue, contexts: contextsValue, areas: areasValue } as const;
 const entry = <T extends z.ZodTypeAny>(value: T) => z.object({ updated_at: instant, value }).strict();
 /** 受付ファイルの本文。送るのは変えたまとまりだけでよい。 */
 export const preferencesPayloadSchema = z.object({
   schema_version: z.literal(1), device: deviceSchema,
-  groups: z.object({ pins: entry(pinsValue).optional(), templates: entry(templatesValue).optional(), basket: entry(basketValue).optional(), contexts: entry(contextsValue).optional() }).strict()
+  groups: z.object({ pins: entry(pinsValue).optional(), templates: entry(templatesValue).optional(), basket: entry(basketValue).optional(), contexts: entry(contextsValue).optional(), areas: entry(areasValue).optional() }).strict()
     .refine(g => Object.keys(g).length > 0, 'そろえる好みを1つ以上指定してください'),
 }).strict();
 export type PreferencesPayload = z.infer<typeof preferencesPayloadSchema>;
 const storedEntry = <T extends z.ZodTypeAny>(value: T) => z.object({ updated_at: instant, device: deviceSchema, request_id: z.string().min(1).max(200), value }).strict();
 export const clientPreferencesSchema = z.object({
   schema_version: z.literal(1),
-  groups: z.object({ pins: storedEntry(pinsValue).optional(), templates: storedEntry(templatesValue).optional(), basket: storedEntry(basketValue).optional(), contexts: storedEntry(contextsValue).optional() }).strict(),
+  groups: z.object({ pins: storedEntry(pinsValue).optional(), templates: storedEntry(templatesValue).optional(), basket: storedEntry(basketValue).optional(), contexts: storedEntry(contextsValue).optional(), areas: storedEntry(areasValue).optional() }).strict(),
 }).strict();
 export type ClientPreferences = z.infer<typeof clientPreferencesSchema>;
 
@@ -109,4 +112,9 @@ export async function setClientPreferences(config: HubConfig, request: Preferenc
     if (applied.length) await vault.write(clientPreferencesPath, JSON.stringify(clientPreferencesSchema.parse(next), null, 2) + '\n');
     return { applied, deduped: false };
   });
+}
+
+/** 本人が決めた領域の語彙（並び）。記録が無い・読めないときは空（HOMEと週次レビューは名前の順に並べる）。 */
+export async function readAreaVocabulary(vault: Vault): Promise<string[]> {
+  try { return (await readClientPreferences(vault))?.groups.areas?.value.items ?? []; } catch { return []; }
 }

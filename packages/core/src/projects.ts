@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { Vault, markdown, parseMarkdown } from './storage.js';
 import { nowText } from './markdown-text.js';
+import { readArea } from './areas.js';
 import type { HubConfig, Project } from './types.js';
 export const projectIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{1,40}$/);
 // outcomeは本人が書く「望む結果」。書いていない定義（空・null）も有効で、読むときに無いものとして扱う。手で書いた長い文も読み、上限はdoctorで示す。
-export const projectSchema = z.object({ id: projectIdSchema, title: z.string().min(1).max(200), aliases: z.array(z.string().max(100)).max(50), keywords: z.array(z.string().max(100)).max(50), status: z.string().max(100), merged_into: projectIdSchema.optional(), outcome: z.string().nullish() });
+export const projectSchema = z.object({ id: projectIdSchema, title: z.string().min(1).max(200), aliases: z.array(z.string().max(100)).max(50), keywords: z.array(z.string().max(100)).max(50), status: z.string().max(100), merged_into: projectIdSchema.optional(), outcome: z.string().nullish(), area: z.unknown().optional() });
 /** 望む結果の上限（正規化した後の文字数・行数）。 */
 export const PROJECT_OUTCOME_CHARS = 500;
 export const PROJECT_OUTCOME_LINES = 10;
@@ -51,7 +52,7 @@ export const outcomeOneLine = (outcome: string | null | undefined): string => ou
 const schema=projectSchema;
 /** 不正なプロジェクト定義のファイルと、不正な項目。 */
 export interface ProjectDefinitionIssue { path: string; fields: string[] }
-const fieldLabels: Record<string, string> = { id: 'ID', title: '名前（title）', aliases: '別名（aliases）', keywords: 'キーワード（keywords）', status: '状態（status）', merged_into: '統合先（merged_into）', outcome: '望む結果（outcome）' };
+const fieldLabels: Record<string, string> = { id: 'ID', title: '名前（title）', aliases: '別名（aliases）', keywords: 'キーワード（keywords）', status: '状態（status）', merged_into: '統合先（merged_into）', outcome: '望む結果（outcome）', area: '領域（area）' };
 export function projectIssueFields(issue: ProjectDefinitionIssue): string {
   return issue.fields.map(f => fieldLabels[f] ?? f).join('・');
 }
@@ -66,8 +67,9 @@ function parseProject(path: string, raw: string): { project?: Project; issue?: P
   if (!parsed.success) return { issue: { path, fields: [...new Set(parsed.error.issues.map(i => String(i.path[0] ?? 'frontmatter')))] } };
   if (path !== `10_projects/${parsed.data.id}/project.md`) return { issue: { path, fields: ['id'] } };
   // 空・nullの望む結果は書いていないものとして読む（登録簿のハッシュとAIへ渡す内容を、書いていない定義と同じにする）。
-  const { outcome, ...rest } = parsed.data;
-  return { project: typeof outcome === 'string' && outcomeLines(outcome).length ? { ...rest, outcome } : rest };
+  // 領域は規則に合う値だけを読む（手で書いた不正な値は付いていないものとして扱い、doctorで示す）。
+  const { outcome, area: rawArea, ...rest } = parsed.data, area = readArea(rawArea);
+  return { project: { ...rest, ...(typeof outcome === 'string' && outcomeLines(outcome).length ? { outcome } : {}), ...(area !== undefined ? { area } : {}) } };
 }
 /** 全プロジェクト定義を検査し、正しい定義と不正な定義の一覧を返す。 */
 export async function inspectProjects(config: HubConfig): Promise<{ projects: Project[]; issues: ProjectDefinitionIssue[] }> {
