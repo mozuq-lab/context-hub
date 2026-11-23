@@ -77,7 +77,7 @@ export async function readItemSchedules(vault: Vault, options: { raw?: boolean }
 export interface ItemRecordLike { id: string; project_id: string; item_key: string; section: string; text: string; input_id: string; source_event_id?: string }
 /** 「自分の行動にする」で元の行の記録を行動へ写した記録の受付ID（行動の入力IDと、写した元の記録のID）。take-over-records.tsが書く。 */
 export const takeOverEvent = (inputId: string, recordId: string) => `take-over:${inputId}:${recordId}`;
-const takeOverPattern = /^take-over:IN-[0-9A-HJKMNP-TV-Z]{26}:((?:SCH|EFF|WAIT|SMD|CTX)-[0-9A-HJKMNP-TV-Z]{26})$/;
+const takeOverPattern = /^take-over:IN-[0-9A-HJKMNP-TV-Z]{26}:((?:SCH|EFF|WAIT|SMD|CTX|STP)-[0-9A-HJKMNP-TV-Z]{26})$/;
 /** 行動へ写された（引き取られた）元の記録のID。元の置き場では、外した記録と同じに扱う。 */
 export function takenOverRecordIds(records: Pick<ItemRecordLike, 'source_event_id'>[]): Set<string> {
   const ids = new Set<string>();
@@ -364,11 +364,14 @@ export async function completeOccurrence(config: HubConfig, request: OccurrenceR
       };
       if (!await vault.create(schedulePath(next.id), JSON.stringify(next, null, 2) + '\n')) throw new Error('日付の記録が競合しました');
     };
+    // 手順を分けた定例は、今回を終えたら（見送っても）手順を最初に戻す（回の記録の直後に停止した場合も、再送で戻す）。手順は循環を避けて遅延読込する。
+    const ensureSteps = async (occurrence: ItemOccurrence) => { const { resetStepsForOccurrenceLocked } = await import('./item-steps.js'); await resetStepsForOccurrenceLocked(vault, occurrence); };
     if (r.sourceEventId) {
       const previous = (await readItemOccurrences(vault, { raw: true })).records.find(x => x.source === r.source && x.source_event_id === r.sourceEventId);
       if (previous) {
         if (previous.project_id !== r.projectId || previous.item_key !== r.itemKey || previous.action !== r.action || previous.due !== r.due) throw new Error('同じ受付IDで別の定例の報告が記録されています');
         await ensureNext(previous);
+        await ensureSteps(previous);
         await rebuild();
         return { projectId: r.projectId, itemKey: r.itemKey, action: r.action, occurrenceId: previous.id, nextDue: previous.next_due, deduped: true };
       }
@@ -394,6 +397,7 @@ export async function completeOccurrence(config: HubConfig, request: OccurrenceR
     };
     if (!await vault.create(occurrencePath(occurrence.id), JSON.stringify(occurrence, null, 2) + '\n')) throw new Error('定例の記録が競合しました');
     await ensureNext(occurrence);
+    await ensureSteps(occurrence);
     await rebuild();
     return { projectId: r.projectId, itemKey: r.itemKey, action: r.action, occurrenceId: occurrence.id, nextDue: occurrence.next_due, deduped: false };
   });

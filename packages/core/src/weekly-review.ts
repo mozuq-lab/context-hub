@@ -13,6 +13,8 @@ import { lastEvidenceAt } from './views.js';
 import { lifecycleOf } from './project-status.js';
 import { mergeTargets, projectIdSchema, readProjects } from './projects.js';
 import { UNASSIGNED_TITLE } from './unassigned-actions.js';
+import { NO_AREA_LABEL, orderAreas, usesAreas } from './areas.js';
+import { readAreaVocabulary } from './client-preferences.js';
 import type { HubConfig, Project } from './types.js';
 
 /**
@@ -25,6 +27,8 @@ import type { HubConfig, Project } from './types.js';
  */
 /** この日数以上見直していなければ、HOMEで週次レビューを促す。 */
 export const WEEKLY_REVIEW_INTERVAL_DAYS = 7;
+/** 領域を見渡す段で「しばらく動いていない」とみなす日数（進行中のプロジェクトのどれにも新しい入力がない日数）。 */
+export const WEEKLY_AREA_QUIET_DAYS = 30;
 /** 根拠のメモからこの日数以上たった次の一手を「長く残っている」とする。 */
 export const WEEKLY_NEXT_STALE_DAYS = 14;
 /** 根拠のメモからこの日数以上たった未解決を「長く残っている」とする。 */
@@ -73,7 +77,13 @@ const waitingSchema = itemRef.extend({ since: scheduleDateSchema, check: z.boole
  * 進行中のプロジェクト。nextは連絡待ち・「いつかやる」を除いた未完了の次の一手の数（項目一覧を読めないときはnull）、
  * waitingは連絡待ちの次の一手・未解決の数、hintsは「片付いたかも」の付いた項目の数。staleは最終根拠からretrieve.staleDaysを超えたもの。
  */
-const projectSchema = z.object({ project_id: projectIdSchema, title: z.string(), next: z.number().int().nonnegative().nullable(), open: z.number().int().nonnegative().nullable(), waiting: z.number().int().nonnegative(), hints: z.number().int().nonnegative(), last_evidence: z.string().nullable(), stale: z.boolean() }).strict();
+const projectSchema = z.object({ project_id: projectIdSchema, title: z.string(), area: z.string().optional(), next: z.number().int().nonnegative().nullable(), open: z.number().int().nonnegative().nullable(), waiting: z.number().int().nonnegative(), hints: z.number().int().nonnegative(), last_evidence: z.string().nullable(), stale: z.boolean() }).strict();
+/**
+ * 領域ごとのまとめ。areaがnullは領域なし。active・paused・doneはその状態のプロジェクトの数（統合済みは数えない）、
+ * last_evidenceは進行中・休止のプロジェクトの最終根拠の最も新しいもの。no_activeは進行中のプロジェクトが1つもないこと、
+ * quietは進行中のプロジェクトがあるのに、どれも{@link WEEKLY_AREA_QUIET_DAYS}日以上新しい入力がないこと。
+ */
+const areaRowSchema = z.object({ area: z.string().nullable(), active: z.number().int().nonnegative(), paused: z.number().int().nonnegative(), done: z.number().int().nonnegative(), last_evidence: z.string().nullable(), no_active: z.boolean(), quiet: z.boolean() }).strict();
 export const weeklyReviewListSchema = z.object({
   schema_version: z.literal(1), generated_at: z.string().datetime({ offset: true }),
   interval_days: z.number().int().min(1), next_stale_days: z.number().int().min(1), open_stale_days: z.number().int().min(1), project_stale_days: z.number().int().min(1), someday_review_days: z.number().int().min(1),
@@ -94,6 +104,9 @@ export const weeklyReviewListSchema = z.object({
   dated_counts: z.object({ overdue: z.number().int().nonnegative(), today: z.number().int().nonnegative(), week: z.number().int().nonnegative() }).strict(),
   /** 7. 「いつかやる」の件数と、長く見直していないものの件数（行はsomeday.jsonで読む）。 */
   someday: z.object({ total: z.number().int().nonnegative(), stale: z.number().int().nonnegative() }).strict(),
+  /** 8. 領域を見渡す。本人がプロジェクトに領域を1つでも付けているときだけある（本人が決めた語彙の順、領域なしは最後）。 */
+  areas: z.array(areaRowSchema).optional(),
+  area_quiet_days: z.number().int().min(1).optional(),
 }).strict();
 export type WeeklyReviewList = z.infer<typeof weeklyReviewListSchema>;
 type ItemRow = z.infer<typeof itemRef>;
@@ -151,7 +164,7 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
         if (!schedule && since !== undefined && waitingDays(since, today) >= (i.section === 'next' ? WEEKLY_NEXT_STALE_DAYS : WEEKLY_OPEN_STALE_DAYS)) lingering.push({ ...ref(project.id, i), since });
       }
     }
-    ordered.push({ row: { project_id: project.id, title: project.title, next, open, waiting: waits, hints, last_evidence: last, stale }, at });
+    ordered.push({ row: { project_id: project.id, title: project.title, ...(project.area ? { area: project.area } : {}), next, open, waiting: waits, hints, last_evidence: last, stale }, at });
   }
   rows.push(...ordered.sort((a, b) => b.at - a.at || a.row.project_id.localeCompare(b.row.project_id)).map(x => x.row));
   // プロジェクト未定: 本人が追加した行動（期日・連絡待ちを付けられる）と、メモから出たAIの行。
@@ -168,6 +181,19 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
   } catch { /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
   let someday = { total: 0, stale: 0 };
   try { const list = await buildSomedayList(config, vault, now, projects); someday = { total: list.entries.length, stale: list.entries.filter(e => somedayStale(e, today)).length }; } catch { /* 壊れた記録はHOMEとdoctorで示す。 */ }
+  // 領域を見渡す（本人が領域を1つでも付けているときだけ）。統合済みのプロジェクトは統合先に数える。
+  let areas: z.infer<typeof areaRowSchema>[] | undefined;
+  const live = projects.filter(p => !merged.has(p.id));
+  if (usesAreas(live)) {
+    const evidence = new Map<string, string | undefined>();
+    for (const p of live) if (lifecycleOf(p) !== 'done') evidence.set(p.id, await lastEvidenceAt(vault, p.id));
+    areas = orderAreas(live.map(p => p.area), await readAreaVocabulary(vault)).map(area => {
+      const members = live.filter(p => p.area === area), count = (s: string) => members.filter(p => lifecycleOf(p) === s).length;
+      const latest = (ids: Project[]) => ids.map(p => evidence.get(p.id)).filter((x): x is string => x !== undefined).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
+      const recent = latest(members.filter(p => lifecycleOf(p) !== 'done')), active = count('active'), activeLast = latest(members.filter(p => lifecycleOf(p) === 'active'));
+      return { area: area ?? null, active, paused: count('paused'), done: count('done'), last_evidence: recent, no_active: active === 0, quiet: active > 0 && (activeLast === null || now.getTime() - Date.parse(activeLast) >= WEEKLY_AREA_QUIET_DAYS * 86_400_000) };
+    });
+  }
   const last = lastWeeklyReview((await readWeeklyReviews(vault)).records);
   const order = { overdue: 0, today: 1, week: 2 } as const;
   lingering.sort((a, b) => a.since.localeCompare(b.since) || a.scope.localeCompare(b.scope) || a.section.localeCompare(b.section) || a.item_key.localeCompare(b.item_key));
@@ -185,6 +211,7 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
     dated: dated.slice(0, ROWS_MAX), dated_total: dated.length,
     dated_counts: { overdue: dated.filter(d => d.bucket === 'overdue').length, today: dated.filter(d => d.bucket === 'today').length, week: dated.filter(d => d.bucket === 'week').length },
     someday,
+    ...(areas ? { areas, area_quiet_days: WEEKLY_AREA_QUIET_DAYS } : {}),
   };
 }
 
@@ -248,7 +275,13 @@ export function weeklyReviewDigestLines(list: WeeklyReviewList, now: Date, timez
   lines.push(`6. 期日: 期限切れ ${count.overdue}件・今日 ${count.today}件・7日以内 ${count.week}件（期限切れは日付を付け直すか片付け、来週の期日を確かめる）`);
   for (const d of list.dated.slice(0, DIGEST_ROWS)) lines.push(`   - ${d.bucket === 'overdue' ? '期限切れ' : d.bucket === 'today' ? '今日' : '7日以内'} ${d.due} — ${place(d.scope, titles)} ${rowText(d)}`);
   lines.push(...more(Math.min(DIGEST_ROWS, list.dated.length), list.dated_total));
-  lines.push(`7. いつかやる: ${list.someday.total}件（${list.someday_review_days}日以上見直していない ${list.someday.stale}件。始める・そのまま・やめる）`, '');
+  lines.push(`7. いつかやる: ${list.someday.total}件（${list.someday_review_days}日以上見直していない ${list.someday.stale}件。始める・そのまま・やめる）`);
+  if (list.areas?.length) {
+    const empty = list.areas.filter(a => a.area !== null && a.no_active).length, quiet = list.areas.filter(a => a.quiet).length;
+    lines.push(`8. 領域を見渡す: ${list.areas.length}件（進行中のプロジェクトがない領域 ${empty}件・${list.area_quiet_days ?? WEEKLY_AREA_QUIET_DAYS}日以上動いていない領域 ${quiet}件。手薄な領域にプロジェクトや次の一手が要るかを考える）`);
+    for (const a of list.areas) lines.push(`   - ${a.area === null ? NO_AREA_LABEL : listText(a.area)}: 進行中 ${a.active}件・休止 ${a.paused}件・完了 ${a.done}件${a.last_evidence ? `・最終根拠から${Math.max(0, Math.floor((now.getTime() - Date.parse(a.last_evidence)) / 86_400_000))}日` : ''}${a.area !== null && a.no_active ? '（進行中なし）' : a.quiet ? '（しばらく動いていない）' : ''}`);
+  }
+  lines.push('');
   return lines;
 }
 

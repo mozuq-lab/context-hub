@@ -1,9 +1,13 @@
 import { clipText, listText } from './markdown-text.js';
+import { pendingOrganizeRetries,readOrganizeRetries } from './organize-retries.js';
+import { NO_AREA_LABEL,orderAreas,usesAreas } from './areas.js';
+import { readAreaVocabulary } from './client-preferences.js';
 import {rebuildPoliciesLocked,readPolicies} from './policies.js';
 import {modifiedKnowledgeWarning} from './policy-manifest.js';
 import { readGitDraftRecords,readGitCollectProblems } from './git-drafts.js';
 import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } from './item-resolutions.js';
 import { effortLabel,type ItemEffort } from './item-efforts.js';
+import { stepsLabel,type ItemStepsValue } from './item-steps.js';
 import { readItemWaits,waitingDays } from './item-waits.js';
 import { readItemSomedays,orphanedSomedays } from './item-somedays.js';
 import { readSomedayReviews,rebuildSomedayLocked,somedaySection } from './someday.js';
@@ -88,9 +92,11 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const groupNote=(c:ReviewCandidate)=>c.status==='pending'&&c.duplicates?.length?`（根拠のメモ${c.duplicates.length+1}件。まとめた案: ${c.duplicates.map(titleOf).join('、')}）`:'';
   const coveredNote=(c:ReviewCandidate)=>c.coveredBy?`（「${titleOf(c.coveredBy)}」とまとめて判断）`:'';
   const reviewRows=(items:ReviewCandidate[])=>items.map(c=>`- [${plain(c.title)}](${c.path}) — ${labels[c.kind]}${groupNote(c)} / ${c.status==='approved'?(c.reflected?'承認済み・反映済み':'承認済み・反映待ち'):c.status==='rejected'?'却下済み':c.status==='pending'?'未承認':'要確認'}${coveredNote(c)} / ${plain(c.rationale)}${c.adoptedTarget?' / '+(c.adoptedTarget.scope==='global'?'共通':`project:${c.adoptedTarget.projectId}`):''}${c.retired?' / 適用停止'+(c.retiredAt?' '+c.retiredAt:''):''}${c.warnings.length?' / '+plain(c.warnings.join(' ')):''}`).join('\n')||'該当する候補はありません。';
-  const listed:{row:string;at:number;group:'active'|'stale'|'inactive'|'merged'}[]=[];
+  const listed:{row:string;at:number;group:'active'|'stale'|'inactive'|'merged';area?:string}[]=[];
   // 本人が統合したプロジェクト。入力・完了報告・日付は統合先のものとして読み替えているので、一覧では統合先を示すだけにする。
   const mergedInto=mergeTargets(projects);
+  // 本人が付けた領域。1つでも付いていれば、プロジェクト一覧を領域ごとにまとめ、各行と次の一手に領域を示す（並びは本人が決めた語彙の順）。
+  const areaMode=usesAreas(projects.filter(p=>!mergedInto.has(p.id))),areaVocabulary=areaMode?await readAreaVocabulary(vault):[],areaTag=(p:{area?:string})=>areaMode&&p.area?`（${plain(p.area)}）`:'';
   const nextGroups:{at:number;id:string;rows:string[]}[]=[],nextProblems:string[]=[],nextUnread:string[]=[];
   // 本人が付けた期日・見直す日。期日が7日以内の項目はプロジェクトをまたいで前に出し、見直す日が先の項目はたたむ。
   const today=todayIn(config.timezone,clock),schedules=await readItemSchedules(vault),resolutionRecords=schedules.records.length?await readItemResolutions(vault):[];
@@ -121,7 +127,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    const stale=lifecycle==='active'&&last!==undefined&&clock.getTime()-at>config.retrieve.staleDays*DAY;
    const label=projectStatusLabels[lifecycle]+(project.status===lifecycle?'':`（${plain(project.status)}）`);
    const evidence=last?` / 最終根拠: ${dateLabel(last,config.timezone)}（${daysSince(last,clock)}日前）`:'';
-   listed.push({row:`- [${plain(project.title)}](${target}) — ${project.id} / ${label}${evidence}${target===now?'':' / NOW未生成・根拠未登録'}`,at,group:lifecycle!=='active'?'inactive':stale?'stale':'active'});
+   listed.push({row:`- [${plain(project.title)}](${target}) — ${project.id} / ${label}${areaMode&&project.area?` / 領域: ${plain(project.area)}`:''}${evidence}${target===now?'':' / NOW未生成・根拠未登録'}`,at,group:lifecycle!=='active'?'inactive':stale?'stale':'active',...(project.area?{area:project.area}:{})});
    // 進行中のプロジェクトの、本人が完了と報告していない次の一手。NOWと同時に書かれる項目一覧から読む。
    if(lifecycle==='active'&&target===now)try{
     const list=await readNowItems(vault,project.id);
@@ -139,7 +145,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      if(i.waiting)continue;
      const {bucket,hidden}=scheduleBucket(schedule,today);
      if(hidden){resting++;front.add(i.key);}
-     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
+     else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}${i.steps?`（${clip(stepsLabel(i.steps),80)}）`:''}`});}
     }
     // NOWから外れ、同じ本文の項目もない日付は黙って移さず、付け直しを促す（同じ本文の項目には引き継ぐ）。
     for(const s of loose)if(!takenKeys.has(s.item_key)&&!movedInputs.has(s.input_id))orphaned.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（${scheduleLabel(s)}） / key ${s.item_key}`);
@@ -147,8 +153,9 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
     for(const s of orphanedSomedays(somedayRecords,project.id,list.items,activeResolutions(resolutionRecords,project.id)))if(!takenKeys.has(s.item_key)&&!movedInputs.has(s.input_id))somedayOrphans.push(`- [${plain(project.title)}](${now}): ${clip(s.text)}（移した日 ${s.someday!.since}） / ${project.id} ${s.item_key}`);
     const items=list.items.filter(i=>i.section==='next'&&i.resolution===null&&!front.has(i.key));
     // 本人が付けた手間の目安も、日付と並べて行末に示す（NOWの項目一覧に載っている）。
-    const later=(i:{key:string;effort?:ItemEffort})=>{const s=scheduled.get(i.key),label=[s?scheduleLabel(s):'',i.effort?effortLabel(i.effort):''].filter(Boolean).join('・');return label?`（${label}）`:'';};
-    if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${later(i)}${i.hints?.length?'（片付いたかも・要確認）':''}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
+    // 本人が分けた手順は、今の1歩を添える（すべて終えたときは完了を確かめるよう促す）。
+    const later=(i:{key:string;effort?:ItemEffort;steps?:ItemStepsValue})=>{const s=scheduled.get(i.key),label=[s?scheduleLabel(s):'',i.effort?effortLabel(i.effort):'',i.steps?clip(stepsLabel(i.steps),80):''].filter(Boolean).join('・');return label?`（${label}）`:'';};
+    if(items.length)nextGroups.push({at,id:project.id,rows:[`- [${plain(project.title)}](${now})${areaTag(project)}${stale?'（停滞）':''}`,...items.slice(0,NEXT_PER_PROJECT).map(i=>`  - ${clip(i.label+i.text)}${later(i)}${i.hints?.length?'（片付いたかも・要確認）':''}`),...(items.length>NEXT_PER_PROJECT?[`  - ほか${items.length-NEXT_PER_PROJECT}件はNOWで確認`]:[])]});
    }catch{nextUnread.push(project.title);nextProblems.push(`- [NOW項目の記録が不正です](90_system/now-items/${project.id}.json)`);}
   }
   // プロジェクトを決めずに本人が追加した行動と、どのプロジェクトにも結び付いていないメモから出たタスクの分類とAIの提案。アプリが読む一覧も同時に書く（内容が変わったときだけ）。
@@ -163,11 +170,13 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
    if(i.waiting)continue;
    const {bucket,hidden}=scheduleBucket(schedule,today);
    if(hidden)resting++;
-   else if(bucket==='overdue'||bucket==='today'||bucket==='week'){unassignedFront.add(i.key);dated.push({bucket,due:schedule.due!,id:UNASSIGNED_SCOPE,row:`- 期日 ${schedule.due}${repeat?`（${repeatLabel(repeat)}）`:''} — ${UNASSIGNED_TITLE} 次の一手: ${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}`});}
+   else if(bucket==='overdue'||bucket==='today'||bucket==='week'){unassignedFront.add(i.key);dated.push({bucket,due:schedule.due!,id:UNASSIGNED_SCOPE,row:`- 期日 ${schedule.due}${repeat?`（${repeatLabel(repeat)}）`:''} — ${UNASSIGNED_TITLE} 次の一手: ${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}${i.steps?`（${clip(stepsLabel(i.steps),80)}）`:''}`});}
   }
   // 進行中は最近動いた順、停滞は長く止まっている順に並べる。
   const group=(name:'active'|'stale'|'inactive'|'merged')=>listed.filter(x=>x.group===name).sort((a,b)=>name==='stale'?a.at-b.at:b.at-a.at).map(x=>x.row);
-  const rows=group('active'),staleRows=group('stale'),inactiveRows=group('inactive'),mergedRows=group('merged');
+  // 領域を使っているときは、進行中のプロジェクトを領域ごとの見出しでまとめる（領域の中は最近動いた順）。
+  const activeRows=()=>{if(!areaMode)return group('active');const active=listed.filter(x=>x.group==='active');return orderAreas(active.map(x=>x.area),areaVocabulary).flatMap(a=>[`### ${a===undefined?NO_AREA_LABEL:plain(a)}`,...active.filter(x=>x.area===a).sort((x,y)=>y.at-x.at).map(x=>x.row)]);};
+  const rows=activeRows(),staleRows=group('stale'),inactiveRows=group('inactive'),mergedRows=group('merged');
   // 最近動いたプロジェクトから順に並べる。
   const nextRows=nextGroups.sort((a,b)=>b.at-a.at||a.id.localeCompare(b.id)).flatMap(g=>g.rows);
   // 日付を使っていない間は、これまでと同じ見出し・本文にする。
@@ -200,11 +209,13 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const path of await intakePaths(vault)){
    const ack=acksByPath.get(path),refusal=ack?undefined:refusals.get(path);let changed=false,refused=false;
    if(ack||refusal)try{const bytes=await vault.readBytes(path,config.capture.maxInputChars*4+8192),current=bytes?hash(decodeIntake(bytes)):undefined;changed=!!ack&&current!==ack.request_hash;refused=!!refusal&&current===refusal.file_hash;}catch{changed=!!ack;}
-   intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':refused?'断った依頼（理由はアプリの依頼の結果で確認できます）':'受付待ち（同期と受付の完了は未確認）'}${ack&&'inputId'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:(!!ack&&!changed)||refused,at:ack?Date.parse(ack.received_at):refused?Date.parse(refusal!.updated_at):0});
+   intakeRows.push({row:`- [${plain(path.slice(6,-3))}](${path}): ${ack?changed?'内容変更・旧内容の受領（現在のファイルは未受理）':'Mac mini受領済み':refused?'断った依頼（理由はアプリの依頼の結果で確認できます）':'受付待ち（同期と受付の完了は未確認）'}${ack&&'path'in ack.result?' / ['+ack.result.inputId+']('+ack.result.path+')':''}`,routine:(!!ack&&!changed)||refused,at:ack?Date.parse(ack.received_at):refused?Date.parse(refusal!.updated_at):0});
   }
   statuses.push(...recentRoutine(intakeRows,'Mac mini受領済み・断った依頼'));
   // 本人が直接追加した行動はモデルで整理しないため、整理待ちに数えない。
-  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id),action=unit.chain.root.kind==='action';return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${action?'本人が追加した行動（整理しません）':latest?.status==='organized'?'整理済み':latest?.status==='failed'?'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:action||latest?.status==='organized',at:Date.parse(unit.chain.root.received_at)};});
+  // 本人がやり直しを頼んだ失敗は、次の整理で試すことを示す（記録を読めなければ示さず、doctorで示す）。
+  let retrying=new Set<string>();try{retrying=pendingOrganizeRetries((await readOrganizeRetries(vault)).records,receiptsById);}catch{/* 上のとおり。 */}
+  const inputRows=effective.map(unit=>{const latest=receiptsById.get(unit.chain.latest.id),action=unit.chain.root.kind==='action';return{row:`- [${unit.chain.root.id}](${unit.chain.root.path}): ${action?'本人が追加した行動（整理しません）':latest?.status==='organized'?'整理済み':latest?.status==='failed'?retrying.has(unit.chain.latest.id)?'整理失敗（やり直しを頼まれています。次の整理で試します）':'整理失敗':'整理待ち'}${unit.chain.revisions.length?' / '+correctionNotice(unit):''}`,routine:action||latest?.status==='organized',at:Date.parse(unit.chain.root.received_at)};});
   statuses.push(...recentRoutine(inputRows,'整理済み'));
   // 件数は1行にまとめて先に示す。行の一覧は対応が要るものと直近の分だけにし、全件はアプリの受付状況に任せる。
   const waitingIntake=intakeRows.filter(r=>!r.routine).length,failedInputs=effective.filter(u=>receiptsById.get(u.chain.latest.id)?.status==='failed').length,waitingInputs=inputRows.filter(r=>!r.routine).length-failedInputs;

@@ -54,6 +54,8 @@ const nowItemSchema = z.object({
   effort: z.enum(['quick', 'hour', 'half-day']).optional(),
   // 本人が付けた場所・道具の札（item-contexts）。付けた順。札のない項目と旧版の一覧にはない。
   contexts: z.array(z.string().min(1).max(20)).min(1).max(8).optional(),
+  // 本人が付けた手順（item-steps）。itemsは手順、doneは終えた手順の数。手順のない項目と旧版の一覧にはない。
+  steps: z.object({ id: z.string().regex(/^STP-[0-9A-HJKMNP-TV-Z]{26}$/), items: z.array(z.string().min(1).max(200)).min(2).max(10), done: z.number().int().min(0).max(10) }).strict().optional(),
   // 本人が付けた連絡待ちの印（item-waits）。sinceは頼んだ日、whoは相手（任意）。印のない項目と旧版の一覧にはない。
   waiting: z.object({ id: z.string().regex(/^WAIT-[0-9A-HJKMNP-TV-Z]{26}$/), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), who: z.string().min(1).max(40).optional() }).strict().optional(),
   // 本人が「いつかやる」へ移した項目（item-somedays）。sinceは移した日、reviewedは最後に見直した日（見直していなければ移した日）。移していない項目と旧版の一覧にはない。

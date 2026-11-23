@@ -64,6 +64,8 @@ export interface Project {
   id: string; title: string; aliases: string[]; keywords: string[]; status: string;
   /** 本人がこのプロジェクトを統合した先のID。入力・完了報告・日付は統合先のものとして読み替える（原文と記録は書き換えない）。 */
   merged_into?: string;
+  /** 本人が付けた領域（責任範囲。例: 仕事・家）。AIへは渡さず、登録簿のハッシュにも含めない。 */
+  area?: string;
   /** 本人が書いた望む結果（何をもって完了か）。書いていなければ無い。AIの整理と再関連付けにも渡す。 */
   outcome?: string;
 }

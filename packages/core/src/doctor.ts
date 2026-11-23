@@ -13,6 +13,10 @@ import { associationSchema,associationViewsComplete,projectRegistryHash } from '
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
 import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
 import { readItemEfforts } from './item-efforts.js';
+import { readOrganizeRetries } from './organize-retries.js';
+import { readItemSteps } from './item-steps.js';
+import { AREA_CHARS, invalidArea } from './areas.js';
+import { readProjectAreaChanges } from './project-areas.js';
 import { readItemContexts } from './item-contexts.js';
 import { readItemWaits } from './item-waits.js';
 import { readItemSomedays } from './item-somedays.js';
@@ -57,6 +61,9 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
     try { await read(); } catch { issues.push(`${label}の記録が不正です（経緯から省かれます）`); }
   }
   try { issues.push(...mergeIssues(await readProjects(config))); } catch { /* 定義の不正は上で報告する。 */ }
+  // 手で書いた領域が規則に合わなければ、付いていないものとして読む。書き直しを促す。
+  try { for (const project of await readProjects(config)) { const raw = await vault.read(`10_projects/${project.id}/project.md`); if (raw !== undefined && invalidArea(parseMarkdown(raw).meta.area)) issues.push(`領域（area）が読めません（1行・${AREA_CHARS}文字以内の名前にしてください。読めるまで領域なしとして扱います）: 10_projects/${project.id}/project.md`); } } catch { /* 不正な定義は上で示す。 */ }
+  try { for (const path of (await readProjectAreaChanges(vault)).problems) issues.push(`領域の変更の記録が不正です: ${path}`); } catch { issues.push('領域の変更の記録を走査できません'); }
   // 手で書いた望む結果が上限を超えていても定義は読む（AIへは先頭だけを渡す）。書き直しを促す。
   try { for (const project of await readProjects(config)) { try { normalizeOutcome(project.outcome ?? ''); } catch (error) { issues.push(`${error instanceof Error ? error.message : '望む結果を確認してください'}${cleanOutcome(project.outcome).length > PROJECT_OUTCOME_CHARS ? `（AIへは先頭の${PROJECT_OUTCOME_CHARS}文字だけを渡します）` : ''}: 10_projects/${project.id}/project.md`); } } } catch { /* 定義の不正は上で報告する。 */ }
   try { for (const project of await readProjects(config)) if (await historyStopped(vault, project.id)) issues.push(`経緯の更新が止まっています（手で変更されています）: 10_projects/${project.id}/HISTORY.md`); } catch { /* 定義の不正は上で報告する。 */ }
@@ -65,6 +72,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { await readPersonChanges(vault); } catch (error) { issues.push(error instanceof Error && error.message.startsWith('人の定義の変更記録') ? error.message : '人の定義の変更記録を走査できません'); }
   try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
   try { for (const path of (await readItemEfforts(vault)).problems) issues.push(`手間の目安の記録が不正です: ${path}`); } catch { issues.push('手間の目安の記録を走査できません'); }
+  try { for (const path of (await readItemSteps(vault)).problems) issues.push(`手順の記録が不正です: ${path}`); } catch { issues.push('手順の記録を走査できません'); }
+  try { for (const path of (await readOrganizeRetries(vault)).problems) issues.push(`整理のやり直しの依頼の記録が不正です: ${path}`); } catch { issues.push('整理のやり直しの依頼の記録を走査できません'); }
   try { for (const path of (await readItemContexts(vault)).problems) issues.push(`場所・道具の札の記録が不正です: ${path}`); } catch { issues.push('場所・道具の札の記録を走査できません'); }
   try { for (const path of (await readItemWaits(vault)).problems) issues.push(`連絡待ちの記録が不正です: ${path}`); } catch { issues.push('連絡待ちの記録を走査できません'); }
   try { for (const path of [...(await readItemSomedays(vault)).problems, ...(await readSomedayReviews(vault)).problems]) issues.push(`「いつかやる」の記録が不正です: ${path}`); } catch { issues.push('「いつかやる」の記録を走査できません'); }
@@ -86,7 +95,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
       const raw=await vault.readBytes(ack.path,config.capture.maxInputChars*4+8192);
       if(raw!==undefined&&hash(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(raw))!==ack.request_hash)issues.push(`受付ファイルの変更: ${ack.path}`);
       const result=ack.result;
-      if('inputId'in result&&!inputs.some(i=>i.id===result.inputId&&i.path===result.path))issues.push(`受付記録の原文欠損: ${ack.request_id}`);
+      if('path'in result&&!inputs.some(i=>i.id===result.inputId&&i.path===result.path))issues.push(`受付記録の原文欠損: ${ack.request_id}`);
     }
     for(const path of await vault.files('90_system/intake/pending'))if(path.endsWith('.json')){const{snapshot}=parseIntakePending(path,(await vault.read(path))!,config.capture.maxInputChars);const ack=acks.find(a=>a.request_id===snapshot.request_id);if(ack&&ack.request_hash!==snapshot.request_hash)issues.push(`受付回復と受領記録の不一致: ${path}`);else if(!ack)issues.push(`受付の停止回復待ち: ${snapshot.request_id}`);}
     for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){const record=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(record.status!=='conflict'&&acks.some(a=>a.path===record.path))continue;

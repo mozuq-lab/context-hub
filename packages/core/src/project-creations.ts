@@ -4,6 +4,7 @@ import { Vault, hash, markdown } from './storage.js';
 import { captureLocked } from './capture.js';
 import { PROJECT_OUTCOME_CHARS, normalizeOutcome, overlappingProject, projectSchema, readProjects } from './projects.js';
 import { rebuildPoliciesLocked } from './policies.js';
+import { areaSchema } from './areas.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -18,14 +19,16 @@ export const projectCreateFieldsSchema = z.object({
   aliases: z.array(nameSchema).max(50), keywords: z.array(nameSchema).max(50),
   // 望む結果（任意）。正規化した文だけを受け付ける（前後の空白・空の行を含めない）。空は送らない。
   outcome: z.string().min(1).max(PROJECT_OUTCOME_CHARS).refine(s => { try { return normalizeOutcome(s) === s; } catch { return false; } }, '望む結果の書き方が不正です').optional(),
+  // 本人が選んだ領域（任意）。
+  area: areaSchema.optional(),
 }).strict();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const projectCreationSchema = z.object({
-  schema_version: z.literal(1), id: projectCreationIdSchema, project_id: newProjectIdSchema, title: z.string(), aliases: z.array(z.string()), keywords: z.array(z.string()), outcome: z.string().optional(),
+  schema_version: z.literal(1), id: projectCreationIdSchema, project_id: newProjectIdSchema, title: z.string(), aliases: z.array(z.string()), keywords: z.array(z.string()), outcome: z.string().optional(), area: z.string().optional(),
   project_hash: digest, first_memo_hash: digest.optional(), source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(1000).optional(), created_at: z.string().datetime({ offset: true }),
 }).strict();
 export type ProjectCreation = z.infer<typeof projectCreationSchema>;
-export interface ProjectCreateRequest { projectId: string; title: string; aliases: string[]; keywords: string[]; outcome?: string; firstMemo?: string; occurredAt: string; source: string; sourceEventId?: string }
+export interface ProjectCreateRequest { projectId: string; title: string; aliases: string[]; keywords: string[]; outcome?: string; area?: string; firstMemo?: string; occurredAt: string; source: string; sourceEventId?: string }
 export interface ProjectCreateResult { projectId: string; creationId: string; firstMemoInputId?: string; deduped: boolean }
 const creationDir = '90_system/project-creations';
 
@@ -51,10 +54,10 @@ function definition(id: string, fields: z.infer<typeof projectCreateFieldsSchema
 }
 
 export async function createProject(config: HubConfig, request: ProjectCreateRequest): Promise<ProjectCreateResult> {
-  const r = z.object({ projectId: newProjectIdSchema, title: z.string(), aliases: z.array(z.string()), keywords: z.array(z.string()), outcome: z.string().optional(), firstMemo: z.string().optional(), occurredAt: z.string(), source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(1000).optional() }).strict().parse(request);
+  const r = z.object({ projectId: newProjectIdSchema, title: z.string(), aliases: z.array(z.string()), keywords: z.array(z.string()), outcome: z.string().optional(), area: z.string().optional(), firstMemo: z.string().optional(), occurredAt: z.string(), source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(1000).optional() }).strict().parse(request);
   // 望む結果は正規化してから検証する（空なら書かない）。
   const outcome = r.outcome === undefined ? '' : normalizeOutcome(r.outcome);
-  const fields = projectCreateFieldsSchema.parse({ title: r.title, aliases: r.aliases, keywords: r.keywords, ...(outcome ? { outcome } : {}) });
+  const fields = projectCreateFieldsSchema.parse({ title: r.title, aliases: r.aliases, keywords: r.keywords, ...(outcome ? { outcome } : {}), ...(r.area !== undefined ? { area: r.area } : {}) });
   const memo = r.firstMemo?.trim() ? r.firstMemo : undefined;
   if (memo !== undefined && memo.length > config.capture.maxInputChars) throw new Error('最初のメモが文字数上限を超えています');
   const vault = new Vault(config), path = `10_projects/${r.projectId}/project.md`, content = definition(r.projectId, fields);
