@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -11,6 +11,7 @@ import { buildReferences, rebuildReferences, readReferenceIndex } from '../src/r
 import { readReferenceMarks } from '../src/reference-marks.js';
 import { AttachmentError, FILE_NAME_BYTES, attachmentPath, fileNameSchema, sanitizeFileName } from '../src/attachments.js';
 import { doctor } from '../src/doctor.js';
+import { LockTimeoutError, Vault } from '../src/storage.js';
 import { find } from '../src/retrieve.js';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
@@ -142,20 +143,81 @@ test('届いたファイルが依頼と違う・大きすぎる依頼は理由�
   // 依頼より大きいファイルは、届いた後で内容の不一致として断る。
   const longer = await packet(config, { reference: true, attachment: { name: 'c.pdf', bytes: 3, sha256: sha('abc') } }, '長い');
   await transport(config.vaultPath, longer.requestId, 'abcd');
+  // 小さく申告して上限を超えるファイルを置いたときも、上限ではなく内容の不一致として断る。
+  const over = await packet(config, { reference: true, attachment: { name: 'f.pdf', bytes: 10, sha256: sha('0123456789') } }, '申告より大きい');
+  await transport(config.vaultPath, over.requestId, Buffer.alloc(2000));
   const result = await ingest(config);
-  expect(result).toMatchObject({ accepted: 0, rejected: 3 });
+  expect(result).toMatchObject({ accepted: 0, rejected: 4 });
   const errors = await Promise.all((await vault.files('90_system/intake-errors')).map(async p => intakeErrorSchema.parse(JSON.parse((await vault.read(p))!))));
   const reasonOf = (path: string) => errors.find(e => e.path === path)?.reason;
   expect(reasonOf(mismatch.path)).toEqual({ code: 'attachment-refused', cause: 'mismatch' });
   expect(reasonOf(big.path)).toEqual({ code: 'attachment-refused', cause: 'too-large', max_bytes: 1000 });
   expect(reasonOf(longer.path)).toEqual({ code: 'attachment-refused', cause: 'mismatch' });
+  expect(reasonOf(over.path)).toEqual({ code: 'attachment-refused', cause: 'mismatch' });
   expect(await vault.files('Input/files')).toEqual([]);
-  expect(await vault.files('05_files')).toEqual([]);
+  // 断った複製は、空のフォルダーも残さない（同期で各端末に広がるため）。
+  expect(await readdir(join(config.vaultPath, '05_files')).catch(() => [])).toEqual([]);
   expect(await readInputs(config)).toEqual([]);
   // ファイルを片付けた後も、断った依頼は断ったまま（ファイル待ちの保留に戻らない）。
-  expect(await ingest(config)).toMatchObject({ accepted: 0, rejected: 0, deferred: 0, deduped: 3 });
+  expect(await ingest(config)).toMatchObject({ accepted: 0, rejected: 0, deferred: 0, deduped: 4 });
   // 行動・資料でないメモにはファイルを添えられない（受付形式の誤り）。
   await packet(config, { attachment: { name: 'd.pdf', bytes: 1, sha256: sha('d') } }, '資料でない');
   await packet(config, { kind: 'action', reference: true, attachment: { name: 'e.pdf', bytes: 1, sha256: sha('e') } }, '行動');
   expect(await ingest(config)).toMatchObject({ rejected: 2 });
+});
+
+test('断った記録を書けなかった回は、届いたファイルを消さず、次の受付で理由付きで断る', async () => {
+  const { config, vault } = await fixture();
+  const data = Buffer.from('本物の内容'), other = Buffer.from('別物の内容');
+  const sent = await packet(config, { reference: true, attachment: { name: 'a.pdf', bytes: data.length, sha256: sha(data) } }, 'メモ');
+  await transport(config.vaultPath, sent.requestId, other);
+  // Writerの混雑で、断った記録だけを書けなかった回。
+  const write = Vault.prototype.write;
+  let failures = 1;
+  Vault.prototype.write = async function (this: Vault, rel: string, text: string) {
+    if (rel.startsWith('90_system/intake-errors/') && failures-- > 0) throw new LockTimeoutError('writer');
+    return write.call(this, rel, text);
+  };
+  try { await ingest(config); } finally { Vault.prototype.write = write; }
+  expect(await vault.files('90_system/intake-errors')).toEqual([]);
+  expect(await vault.files('Input/files')).toEqual([`Input/files/${sent.requestId}`]);
+  // 次の受付では、同じ理由で断って記録し、ファイルを片付ける。
+  await ingest(config);
+  const [error] = await Promise.all((await vault.files('90_system/intake-errors')).map(async p => intakeErrorSchema.parse(JSON.parse((await vault.read(p))!))));
+  expect(error?.reason).toEqual({ code: 'attachment-refused', cause: 'mismatch' });
+  expect(await vault.files('Input/files')).toEqual([]);
+  expect(await vault.files('90_system/intake/pending')).toEqual([]);
+});
+
+test('doctorは、届かないファイル・依頼のないファイル・途中で止まった一時ファイルを注意として示す', async () => {
+  const { config, vault } = await fixture();
+  const data = Buffer.from('PNG架空の画像');
+  const waiting = await packet(config, { reference: true, attachment: { name: 'a.png', bytes: data.length, sha256: sha(data) } }, '届かない');
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  await utimes(join(config.vaultPath, waiting.path), old, old);
+  const orphan = await transport(config.vaultPath, 'REQ-' + 'a'.repeat(32), data);
+  const temp = await transport(config.vaultPath, '.ctx-1234.tmp', data);
+  await mkdir(join(config.vaultPath, '05_files/2026-11/' + 'b'.repeat(24)), { recursive: true });
+  const copy = join(config.vaultPath, '05_files/2026-11/' + 'b'.repeat(24), '.ctx-tmp-1');
+  await writeFile(copy, data);
+  for (const path of [orphan, temp, copy]) await utimes(path, old, old);
+  // 保存したばかりの依頼と、新しいファイルは示さない。
+  const fresh = await packet(config, { reference: true, attachment: { name: 'b.png', bytes: data.length, sha256: sha(data) } }, '保存したばかり');
+  await utimes(join(config.vaultPath, fresh.path), new Date(), new Date());
+  await transport(config.vaultPath, 'REQ-' + 'c'.repeat(32), data);
+  await utimes(join(config.vaultPath, 'Input/files', 'REQ-' + 'c'.repeat(32)), new Date(), new Date());
+  const result = await doctor(config);
+  expect(result.issues).toEqual([]);
+  expect(result.notices).toHaveLength(4);
+  expect(result.notices).toEqual(expect.arrayContaining([
+    expect.stringContaining(`添えたファイルが届いていない依頼: ${waiting.path}（48時間前に保存）`),
+    expect.stringContaining('依頼のない添付ファイル: Input/files/REQ-' + 'a'.repeat(32) + '（2日前）'),
+    expect.stringContaining('写す途中で止まった一時ファイル: Input/files/.ctx-1234.tmp'),
+    expect.stringContaining('複製の途中で止まった一時ファイル: 05_files/2026-11/' + 'b'.repeat(24) + '/.ctx-tmp-1'),
+  ]));
+  expect(result.notices!.join('\n')).not.toContain(fresh.path);
+  // 受け付けた後は示さない。
+  await transport(config.vaultPath, waiting.requestId, data);
+  await ingest(config);
+  expect((await doctor(config)).notices?.some(n => n.includes(waiting.path)) ?? false).toBe(false);
 });

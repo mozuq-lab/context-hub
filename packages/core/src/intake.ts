@@ -2,6 +2,7 @@ import {retireKnowledge} from './knowledge-retirement.js';
 import {adoptionTargetSchema} from './knowledge-scope.js';
 import { z } from 'zod';
 import { readdir,lstat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { Vault,hash,LockTimeoutError } from './storage.js';
 import { capture,parseInput,inputIdSchema } from './capture.js';
@@ -39,7 +40,7 @@ import { ACTION_TEXT_CHARS } from './actions.js';
 import { setItemSteps,stepsIdSchema,ItemStepsError,itemStepsMessage,itemStepsRefusalCauses,ITEM_STEPS_MIN,ITEM_STEPS_MAX } from './item-steps.js';
 import { areaSchema,AREA_CHARS,AREA_VOCABULARY_MAX } from './areas.js';
 import { setReferenceMark,ReferenceMarkError,referenceMarkIdSchema,referenceMarkActions,referenceMessage,referenceRefusalCauses,REFERENCE_TITLE_CHARS } from './reference-marks.js';
-import { AttachmentError,attachmentMessage,attachmentRefusalCauses,attachmentTransportPath,ATTACHMENT_TRANSPORT_DIR,FILE_NAME_BYTES,maxFileBytes,transportState } from './attachments.js';
+import { ATTACHMENTS_DIR,AttachmentError,attachmentMessage,attachmentRefusalCauses,attachmentTransportPath,ATTACHMENT_TRANSPORT_DIR,FILE_NAME_BYTES,maxFileBytes,transportState } from './attachments.js';
 import type { HubConfig } from './types.js';
 export interface IntakeRunResult { accepted:number; rejected:number; deferred:number; deduped:number; conflicts:string[]; requestIds:string[]; dryRun:boolean }
 const digest=z.string().regex(/^[a-f0-9]{64}$/);
@@ -172,11 +173,16 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   });}
   catch(error){if(!(error instanceof LockTimeoutError))throw error;/* Writerの混雑で片付けられない回は、次の受付で片付ける。 */}
  };
- // 依頼に添えたファイル（Input/files/<受付ID>）は、受け付けた・理由付きで断った後は要らないため片付ける。
- // 片付けられない回（Writerの混雑・フォルダーの異常）は、次の受付で片付ける（受付の結果は変えない）。
- const dropTransport=async(id:string)=>{if(options.dryRun)return;try{await vault.withLock(()=>vault.remove(attachmentTransportPath(id)));}catch{/* 次の受付で片付ける。 */}};
  // 今の内容への理由付きの拒否の記録があるか（同じ内容で送り直しても結果は変わらない）。
  const refused=async(path:string,requestHash:string)=>{const raw=await vault.read(`90_system/intake-errors/${hash(path)}.json`);if(raw===undefined)return false;try{const error=intakeErrorSchema.parse(JSON.parse(raw));return error.file_hash===requestHash&&isIntakeRefusal(error);}catch{return false;}};
+ // 依頼に添えたファイル（Input/files/<受付ID>）は、受け付けた・理由付きで断った後は要らないため片付ける。
+ // 断った後は、拒否の記録（今の内容への理由付きの拒否）が書けていることを同じロック内で確かめてから消す。記録できなかった回にファイルだけを
+ // 消すと、次の受付で理由のない失敗になり、本人に保存し直すよう示せないため。
+ // 片付けられない回（Writerの混雑・フォルダーの異常）は、次の受付で片付ける（受付の結果は変えない）。
+ const dropTransport=async(id:string,refusal?:{path:string;requestHash:string})=>{
+  if(options.dryRun)return;
+  try{await vault.withLock(async()=>{if(refusal&&!await refused(refusal.path,refusal.requestHash))return;await vault.remove(attachmentTransportPath(id));});}catch{/* 次の受付で片付ける。 */}
+ };
  const done=new Set<string>();
  for(const path of await intakePaths(vault)){
   if(path.includes('.sync-conflict-')){await problem(path,'sync-conflict','conflict','同期の競合コピーです。通常受付から除外しました');continue;}
@@ -215,7 +221,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   let permanent=false;
   if(raw)try{const error=intakeErrorSchema.parse(JSON.parse(raw));if(error.file_hash===hash(item.raw)&&error.status==='error'){failedAt=Date.parse(error.updated_at);permanent=error.reason!==undefined;}}catch{ /* 不正な記録は通常受付で検証・報告する。 */ }
   // 理由付きの拒否（古い訂正対象・既にあるプロジェクトなど）は、同じ内容で再実行しても同じ結果になる。内容が変われば再び受け付ける。
-  if(permanent){outcome.deduped++;await dropPending(item.packet.request_id,item.path,hash(item.raw));if(item.packet.operation==='capture'&&item.packet.attachment)await dropTransport(item.packet.request_id);continue;}
+  if(permanent){outcome.deduped++;await dropPending(item.packet.request_id,item.path,hash(item.raw));if(item.packet.operation==='capture'&&item.packet.attachment)await dropTransport(item.packet.request_id,{path:item.path,requestHash:hash(item.raw)});continue;}
   ordered.push({...item,failedAt});
  }
  // 未試行を先に受け付け、失敗の再試行は古い試行から順に回す。
@@ -290,7 +296,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    const reason=error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof InsightReactionError||error instanceof HappenedOnError||error instanceof PolicyReviewError||error instanceof ProjectMergeError||error instanceof ProjectMergedError||error instanceof ItemTargetError||error instanceof OccurrenceError||error instanceof PreferencesError||error instanceof AskError||error instanceof PersonDefinitionError||error instanceof SomedayError||error instanceof OrganizeRetryError||error instanceof ItemStepsError||error instanceof ReferenceMarkError||error instanceof AttachmentError?error.reason:undefined;
    await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':error instanceof ItemTargetError?itemTargetMessage(error.reason):error instanceof PersonDefinitionError?personReasonMessage(error.reason):error instanceof OccurrenceError?occurrenceMessage(error.reason):error instanceof PreferencesError?preferencesMessage(error.reason):error instanceof AskError?askReasonMessage(error.reason):error instanceof HappenedOnError||error instanceof PolicyReviewError||error instanceof SomedayError||error instanceof OrganizeRetryError||error instanceof ItemStepsError||error instanceof ReferenceMarkError||error instanceof AttachmentError?error.message:'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,reason);
    // 理由付きの拒否は同じ内容では結果が変わらず、停止回復も要らない。停止回復記録を残すと「回復待ち」がdoctorに残り続けるため片付ける。
-   if(reason&&!conflict){await dropPending(id,path,requestHash);if(packet.operation==='capture'&&packet.attachment)await dropTransport(id);}
+   if(reason&&!conflict){await dropPending(id,path,requestHash);if(packet.operation==='capture'&&packet.attachment)await dropTransport(id,{path,requestHash});}
   }
  }
  // 受領記録がある依頼のファイルが残っていれば片付ける（受領の直後に停止した場合など）。
@@ -300,4 +306,48 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   for(const name of names)if(requestIdSchema.safeParse(name).success&&await vault.read(ackPath(name))!==undefined)await dropTransport(name);
  }
  return outcome;
+}
+
+const HOUR_MS=60*60*1000,DAY_MS=24*HOUR_MS;
+/**
+ * 添えたファイルの受け渡しの注意（doctorの注意。Vaultの異常ではない）。
+ * - 保存から1時間を過ぎてもファイルが届かない（または途中の）依頼。届くまでメモも受け付けないため、同期を確かめてもらう。
+ * - 1日を過ぎても依頼のないファイル（端末が写した後に保存をやめた・失敗したなど）。本体は使わないため、消してかまわない。
+ * - 複製の途中で止まった一時ファイル（Input/files・05_filesの`.ctx-`で始まる名前）。
+ */
+export async function attachmentTransportNotices(config:HubConfig,now=Date.now()):Promise<string[]>{
+ const vault=new Vault(config),notices:string[]=[],waiting=new Set<string>();
+ const age=async(abs:string)=>{try{const info=await lstat(abs);return now-info.mtimeMs;}catch{return undefined;}};
+ for(const path of await intakePaths(vault)){
+  if(!/^Input\/REQ-[A-Za-z0-9]{32}\.md$/.test(path))continue;
+  let packet;try{const raw=await vault.read(path);if(raw===undefined)continue;packet=parseIntake(path,raw,config.capture.maxInputChars);}catch{continue;/* 不正な依頼は受付の失敗として示す。 */}
+  if(packet.operation!=='capture'||!packet.attachment||await vault.read(ackPath(packet.request_id))!==undefined)continue;
+  waiting.add(packet.request_id);
+  const raw=await vault.read(`90_system/intake-errors/${hash(path)}.json`);
+  if(raw!==undefined)try{const error=intakeErrorSchema.parse(JSON.parse(raw));if(error.file_hash===hash((await vault.read(path))!)&&isIntakeRefusal(error))continue;}catch{/* 不正な記録は受付の失敗として示す。 */}
+  let state;try{state=await transportState(await vault.path(attachmentTransportPath(packet.request_id)),packet.attachment.bytes,now);}catch{continue;/* 通常のファイルでないものは受付で断る。 */}
+  const since=await age(await vault.path(path));
+  if(state==='waiting'&&since!==undefined&&since>=HOUR_MS)notices.push(`添えたファイルが届いていない依頼: ${path}（${Math.floor(since/HOUR_MS)}時間前に保存）。保存した端末で同期が終わっているか確かめてください。ファイルが届くまでメモも受け付けません。`);
+ }
+ let names:import('node:fs').Dirent[]=[];
+ try{names=await readdir(await vault.path(ATTACHMENT_TRANSPORT_DIR),{withFileTypes:true});}catch{/* フォルダーがない・読めないときは示さない。 */}
+ for(const entry of names){
+  if(waiting.has(entry.name))continue;
+  const rel=`${ATTACHMENT_TRANSPORT_DIR}/${entry.name}`,since=await age(join(await vault.path(ATTACHMENT_TRANSPORT_DIR),entry.name));
+  if(since===undefined||since<DAY_MS)continue;
+  // 受け付けた依頼のファイルは、次の受付で片付ける。
+  if(requestIdSchema.safeParse(entry.name).success&&await vault.read(ackPath(entry.name))!==undefined)continue;
+  notices.push(entry.name.startsWith('.ctx-')?`写す途中で止まった一時ファイル: ${rel}。消してかまいません。`:`依頼のない添付ファイル: ${rel}（${Math.floor(since/DAY_MS)}日前）。本体は使いません。保存をやり直した後の残りなら、消してかまいません。`);
+ }
+ // 05_files/<年-月>/<キー>/ の一時ファイル（複製の途中で止まったもの）。
+ const walk=async(abs:string,rel:string,depth:number):Promise<void>=>{
+  let entries;try{entries=await readdir(abs,{withFileTypes:true});}catch{return;}
+  for(const entry of entries){
+   const childAbs=join(abs,entry.name),childRel=`${rel}/${entry.name}`;
+   if(entry.isDirectory()&&depth<2)await walk(childAbs,childRel,depth+1);
+   else if(entry.isFile()&&entry.name.startsWith('.ctx-tmp-')){const since=await age(childAbs);if(since!==undefined&&since>=DAY_MS)notices.push(`複製の途中で止まった一時ファイル: ${childRel}。消してかまいません。`);}
+  }
+ };
+ try{await walk(await vault.path(ATTACHMENTS_DIR),ATTACHMENTS_DIR,0);}catch{/* フォルダーがないときは示さない。 */}
+ return notices;
 }

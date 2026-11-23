@@ -8,7 +8,7 @@ import { readProjects,inspectProjects,describeProjectIssue,mergeIssues,normalize
 import { readProjectMerges } from './project-merges.js';
 import { readEffectiveInputs } from './effective-inputs.js';
 import { listProjectCandidates,readProjectCoverage,recoverProjectApprovalsLocked } from './project-proposals.js';
-import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths,isIntakeRefusal,refusalNoticeVisible } from './intake.js';
+import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths,isIntakeRefusal,refusalNoticeVisible,attachmentTransportNotices } from './intake.js';
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
 import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
@@ -154,7 +154,9 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
   try{const paths=await knowledgePaths(vault);for(const path of paths){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id,paths);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
   // 見つからない作業フォルダーの対応付けは、外付けを外しただけでも起こり、方針の読取も止めないため、異常（issues）ではなく注意に示す。
-  const notices=[...await policyRootProblems(config),...refusals];
+  // 添えたファイルの受け渡しの注意（届かない依頼・依頼のないファイル・一時ファイル）。Vaultの異常ではないため注意に示す。
+  let transport:string[]=[];try{transport=await attachmentTransportNotices(config);}catch{transport=['添えたファイルの受け渡しを確かめられません'];}
+  const notices=[...await policyRootProblems(config),...refusals,...transport];
   try{await readPolicies(config);}catch{issues.push(definitionsBroken?afterDefinitions('方針の同期・集約を確認できません'):'方針manifest・正本・停止記録の同期または集約が未完了です');}
   try{await readIdeaLinks(vault);}catch(error){issues.push(error instanceof Error?error.message:'アイデアの束ねの記録が不正です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}
