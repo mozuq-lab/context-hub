@@ -10,6 +10,7 @@ import type { HubConfig, Input } from './types.js';
 import { redactText, secretSettings } from './secrets.js';
 import { readIdeaGroupMap } from './idea-links.js';
 import { inputWhen } from './happened.js';
+import { effectiveReferenceMarks, onReferenceShelf, readReferenceMarks } from './reference-marks.js';
 
 export function displayTime(value: string): string {
   if (!Number.isFinite(Date.parse(value))) return '不明';
@@ -52,7 +53,7 @@ export async function pending(config: HubConfig, options: ExcerptOptions = {}): 
   }
   return lines.join('\n\n') || '見つかりません（未整理・失敗なし）';
 }
-/** referenceは種類ではなく絞り込みの条件で、整理でAIが参考資料に分類したメモ・作業要約（訂正を含む）に当たる。 */
+/** referenceは種類ではなく絞り込みの条件で、資料棚に載るメモ・作業要約（訂正を含む）に当たる。本人が資料棚に加えたもの、またはAIが参考資料に分類し本人が外していないもの。 */
 export const findKinds = ['memo','work-summary','action','correction','idea','knowledge','now','reference'] as const;
 export type FindKind = typeof findKinds[number];
 export interface FindOptions extends ExcerptOptions {
@@ -88,9 +89,12 @@ async function collectDocs(config: HubConfig) {
   const effective=await readEffectiveInputs(config);
   // 入力IDごとの帰属。本人が指定したプロジェクトは確定、整理結果の関連候補はAI推定として区別する。
   const assigned = new Map<string,{ owned:Set<string>; estimated:Set<string> }>(), references = new Set<string>();
+  // 本人が資料棚に加えた・外した記録。読めない記録は無いものとして扱う（HOMEとdoctorで示す）。
+  const marks = effectiveReferenceMarks((await readReferenceMarks(vault)).records);
   for (const unit of effective) {
-    // 有効な解釈（最後に整理できた訂正）が参考資料なら、元のメモと訂正を資料として絞り込めるようにする。
-    if (unit.receipt?.result?.category === 'reference') for (const input of [unit.chain.root,...unit.chain.revisions]) references.add(input.id);
+    // 有効な解釈（最後に整理できた訂正）が参考資料か、本人が資料棚に加えたメモなら、元のメモと訂正を資料として絞り込めるようにする。
+    // 本人が資料棚から外したメモは、AIが参考資料に分類していても資料として絞り込まない。
+    if (unit.chain.root.kind !== 'action' && onReferenceShelf(unit.receipt?.result?.category, marks.get(unit.chain.root.id))) for (const input of [unit.chain.root,...unit.chain.revisions]) references.add(input.id);
     const owned = new Set(unit.chain.root.project ? [unit.chain.root.project] : []);
     const estimated = new Set(unit.receipt ? associatedProjects(unit.chain.root,unit.receipt,config).filter(p => !owned.has(p)) : []);
     for (const input of [unit.chain.root,...unit.chain.revisions]) assigned.set(input.id,{owned,estimated});

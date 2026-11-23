@@ -108,6 +108,12 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     const tags = actionTagsSchema.safeParse({ effort: request.effort, contexts: request.contexts });
     if (!tags.success) throw new Error(tags.error.issues[0]?.message ?? '手間の目安か札が不正です');
   } else if (request.effort !== undefined || request.contexts !== undefined) throw new Error('手間の目安と札は行動にだけ付けられます');
+  if (request.reference !== undefined || request.referenceTitle !== undefined) {
+    if (request.kind === 'action') throw new Error('行動は資料として保存できません');
+    if (request.reference !== true) throw new Error('資料の名前は資料として保存するときだけ付けられます');
+    // reference-marks.tsはこのファイルを読むため、循環を避けて遅延読込する。
+    if (request.referenceTitle !== undefined) { const { referenceTitleSchema } = await import('./reference-marks.js'); const title = referenceTitleSchema.safeParse(request.referenceTitle); if (!title.success) throw new Error(title.error.issues[0]?.message ?? '資料の名前が不正です'); }
+  }
   if (request.happenedOn !== undefined) calendarDateSchema.parse(request.happenedOn);
   if (request.continues !== undefined) {
     inputIdSchema.parse(request.continues);
@@ -175,6 +181,11 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
     // 本人が追加した行動を指す行動（別の置き場へ移す依頼）は、元の行動を確かめてから保存する。
     const movedKey = request.kind === 'action' ? await (await import('./take-over-records.js')).movedActionSourceLocked(config, vault, request) : undefined;
     const saved = await captureLocked(config, vault, request);
+    // 資料として保存したメモは、資料の記録を一緒に書く（資料棚はcycleが作り直す）。再送では同じ受付IDの記録があれば書かない。
+    if (request.reference === true) {
+      const { writeReferenceMarkLocked } = await import('./reference-marks.js');
+      await writeReferenceMarkLocked(vault, { inputId: saved.inputId, action: 'add', title: request.referenceTitle ?? null, source: request.source, sourceEventId: request.sourceEventId ?? `capture:${saved.inputId}`, decidedAt: request.occurredAt });
+    }
     // 行動はモデルの整理を待たずにNOWへ載せる。保存の後、NOWの再生成前に停止しても、同じイベントの再送で再生成だけを行う。
     if (request.kind === 'action') {
       // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。

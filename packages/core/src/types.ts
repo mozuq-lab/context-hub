@@ -49,6 +49,8 @@ export interface CaptureRequest {
   continues?: string;
   /** 行動（kind: action）を追加するときに一緒に付ける手間の目安と場所・道具の札。行動の記録（item-efforts・item-contexts）として書く。 */
   effort?: 'quick' | 'hour' | 'half-day'; contexts?: string[];
+  /** メモ・作業要約を資料として保存する（AIの分類に関係なく資料棚に載せる）。referenceTitleは本人が付ける資料の名前。資料の記録（reference-marks）として書く。 */
+  reference?: boolean; referenceTitle?: string;
 }
 export interface CaptureResult { inputId: string; deduped: boolean; path: string; receivedAt: string }
 export interface Input {

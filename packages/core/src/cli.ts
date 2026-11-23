@@ -54,6 +54,8 @@ import { readEffectiveInputs } from './effective-inputs.js';
 import { OpenClawInferLlm } from './infer.js';
 import { listCandidates, approve, reject, propose } from './approvals.js';
 import type { HubConfig } from './types.js';
+import { setReferenceMark,readReferenceMarks } from './reference-marks.js';
+import { readReferenceIndex } from './references.js';
 
 const program = new Command().name('ctx').description('Markdownを正本とする個人用AI Context Hub').version('0.1.0')
   .option('--config <path>', '設定ファイル').option('--vault <path>', '明示的な保存先').option('--state <path>', 'Vault外のローカル状態');
@@ -82,7 +84,8 @@ program.command('add [text]').description('原文を保存').option('--file <pat
   .addOption(new Option('--kind <kind>','入力の種別').choices(['memo','work-summary']).default('memo'))
   .option('--project <id>','人が指定する既存プロジェクト').option('--tool <name>','作業したAI/ツール').option('--session <reference>','元セッションの参照先')
   .option('--continues <input-id>','続きとして書く前のメモの入力ID（--projectを省くと、前のメモで指定したプロジェクトを引き継ぐ）')
-  .action(async(text,opts)=>{const c=await config();const body=await inputText(text,opts.file,c.capture.maxInputChars);output(await capture(c,{text:body,source:opts.source??(opts.file?'file':text!==undefined?'cli':'stdin'),sourceEventId:opts.eventId,occurredAt:opts.occurredAt??new Date().toISOString(),kind:opts.kind,project:opts.project,tool:opts.tool,meta:opts.session?{session:opts.session}:undefined,happenedOn:opts.happenedOn,...(opts.continues!==undefined?{continues:opts.continues}:{})}));});
+  .option('--reference','資料として保存する（AIの分類に関係なく資料棚に載せる）').option('--reference-title <text>','資料の名前（--referenceと一緒に指定。1行・100文字以内）')
+  .action(async(text,opts)=>{const c=await config();const body=await inputText(text,opts.file,c.capture.maxInputChars);output(await capture(c,{text:body,source:opts.source??(opts.file?'file':text!==undefined?'cli':'stdin'),sourceEventId:opts.eventId,occurredAt:opts.occurredAt??new Date().toISOString(),kind:opts.kind,project:opts.project,tool:opts.tool,meta:opts.session?{session:opts.session}:undefined,happenedOn:opts.happenedOn,...(opts.continues!==undefined?{continues:opts.continues}:{}),...(opts.reference?{reference:true}:{}),...(opts.referenceTitle!==undefined?{referenceTitle:opts.referenceTitle}:{})}));});
 const project=program.command('project').description('人によるプロジェクト管理');
 program.command('correct <id> [text]').description('元原文を保持して最新入力を訂正').option('--file <path>','訂正文ファイル').option('--event-id <id>','再送判定ID').option('--source <name>','出典名','cli-correction')
   .action(async(id,text,opts)=>{const c=await config();output(await correctInput(c,id,{text:await inputText(text,opts.file,c.capture.maxInputChars),source:opts.source,sourceEventId:opts.eventId,occurredAt:new Date().toISOString()}));});
@@ -235,7 +238,13 @@ const resume=last&&last.source==='cli'&&last.due===due&&last.action===action&&la
 const event=resume?last.source_event_id!:`cli:${key}:round:${due}:${action}:${last?.id??'none'}`;
 const result=await completeOccurrence(c,{projectId:id,itemKey:key,action,due,source:'cli',sourceEventId:event});await rebuildDashboard(c);output(result);});
 program.command('history [project]').description('プロジェクトの経緯HISTORY.mdを根拠と処理記録から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildHistories(await config(),id?{projectId:id}:{})));
-program.command('references [project]').description('プロジェクトの資料REFERENCES.md（AIが参考資料に分類したメモとURLの一覧）を整理結果から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildReferences(await config(),id?{projectId:id}:{})));
+program.command('references [project]').description('プロジェクトの資料REFERENCES.md（本人が資料にしたメモとAIが参考資料に分類したメモ、URLの一覧）を整理結果と資料の記録から作り直す（省略時は全プロジェクト）').action(async id=>output(await rebuildReferences(await config(),id?{projectId:id}:{})));
+const reference=program.command('reference').description('資料棚に載せる資料を本人が決める（AIの分類より優先する）。本文やURLを直すときはcorrectを使う');
+// 同じ操作を続けて実行しても記録を重ねない（前の記録がCLIの同じ操作・同じ名前なら、同じ受付IDで再送する）。
+const referenceEvent=async(c:HubConfig,inputId:string,action:'add'|'remove',title:string|null)=>{const last=(await readReferenceMarks(new Vault(c))).records.filter(r=>r.input_id===inputId).sort((a,b)=>Date.parse(a.decided_at)-Date.parse(b.decided_at)||a.id.localeCompare(b.id)).at(-1);return last&&last.source==='cli'&&last.action===action&&last.title===title&&last.source_event_id?last.source_event_id:`cli:reference:${inputId}:${action}:${last?.id??'none'}`;};
+reference.command('add <input-id>').description('保存済みのメモ・作業要約を資料棚に載せる。名前を変える・外した資料を戻すのも同じ（--titleを省くと名前なしでAIの要約を示す）').option('--title <text>','資料の名前（1行・100文字以内）').requiredOption('--confirm','メモを確認した本人による操作').action(async(id,opts)=>{const c=await config(),title=opts.title??null;const result=await setReferenceMark(c,{inputId:id,action:'add',title,source:'cli',sourceEventId:await referenceEvent(c,id,'add',title)});await rebuildReferences(c);await rebuildDashboard(c);output(result);});
+reference.command('remove <input-id>').description('資料棚から外す（AIが参考資料に分類したメモも外せる。メモと整理結果は変えない）').requiredOption('--confirm','メモを確認した本人による操作').action(async id=>{const c=await config();const result=await setReferenceMark(c,{inputId:id,action:'remove',source:'cli',sourceEventId:await referenceEvent(c,id,'remove',null)});await rebuildReferences(c);await rebuildDashboard(c);output(result);});
+reference.command('list').description('資料棚に載る資料と本人が外した資料（cycleかreferencesで作った一覧）').option('--removed','外した資料を表示').action(async opts=>{const c=await config(),index=await readReferenceIndex(new Vault(c));if(!index)throw new Error('資料の一覧がありません。cycleかreferencesを実行してください');output(opts.removed?index.removed:index.entries);});
 const git=program.command('git').description('設定したローカルリポジトリのコミット履歴から作業記録の下書きを作る（既定は無効）');
 git.command('collect').description('下書きを作ってHOMEを更新').action(async()=>{const c=await config();if(!c.git.enabled)throw new Error('設定のgit.enabledが無効です');const result=await collectGitDrafts(c);await rebuildDashboard(c);output(result);if(result.errors.length)process.exitCode=1;});
 git.command('drafts').description('下書きの一覧').option('--all','入力済み・見送り済みも表示').action(async opts=>output((await readGitDrafts(await config())).filter(d=>opts.all||d.status==='pending').map(d=>({id:d.id,hash:d.hash,status:d.status,project:d.project_id,repo:d.repo,commits:d.commits.length,text:d.text,inputId:d.inputId??null}))));

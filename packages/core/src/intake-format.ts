@@ -21,6 +21,7 @@ import { resolvableTargetSchema } from './conflicts.js';
 import { ideaIdSchema, ideaLinkActionSchema } from './idea-links.js';
 import { PROJECT_COVERS_MAX } from './project-proposals.js';
 import { insightItemKeySchema, insightReactionValueSchema, insightRunIdSchema } from './insight-feedback.js';
+import { referenceMarkActionSchema, referenceTitleSchema } from './reference-marks.js';
 import { PERSON_ALIASES_MAX, PERSON_NAME_CHARS, personActions, personIdSchema } from './people.js';
 
 export const requestIdSchema = z.string().regex(/^REQ-[A-Za-z0-9]{32}$/);
@@ -32,7 +33,8 @@ const outcomeField = z.string().max(PROJECT_OUTCOME_CHARS * 4).refine(s => { try
 // happened_onは本人が後から記録した出来事の日付。occurred_atは実際に書いた日時のまま送る（actionには付けられない）。
 // continuesは続きとして書いたときの前のメモの入力ID（actionには付けられない）。projectを省くと前のメモで指定したプロジェクトを引き継ぐ。
 // effortとcontextsは、行動（kind: action）を追加するときに一緒に付ける手間の目安と場所・道具の札（本体が行動の記録として書く）。
-const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), continues: inputIdSchema.optional(), effort: itemEffortSchema.optional(), contexts: contextTagsSchema.optional(), text: z.string() }).strict().refine(v => v.kind !== 'action' || v.continues === undefined, '行動には前のメモを指定できません').refine(v => v.kind === 'action' || (v.effort === undefined && v.contexts === undefined), '手間の目安と札は行動にだけ付けられます');
+// referenceは、メモ・作業要約を資料として保存する（AIの分類に関係なく資料棚に載せる）。reference_titleは本人が付ける資料の名前（任意）。
+const captureSchema = z.object({ ...base, operation: z.literal('capture'), kind: z.enum(['memo','work-summary','action']), project: projectIdSchema.optional(), tool: z.string().max(100).optional(), meta: z.record(z.string().max(100),z.string().max(2000)).optional(), happened_on: calendarDateSchema.optional(), continues: inputIdSchema.optional(), effort: itemEffortSchema.optional(), contexts: contextTagsSchema.optional(), reference: z.literal(true).optional(), reference_title: referenceTitleSchema.optional(), text: z.string() }).strict().refine(v => v.kind !== 'action' || v.continues === undefined, '行動には前のメモを指定できません').refine(v => v.kind === 'action' || (v.effort === undefined && v.contexts === undefined), '手間の目安と札は行動にだけ付けられます').refine(v => v.kind !== 'action' || v.reference === undefined, '行動は資料として保存できません').refine(v => v.reference_title === undefined || v.reference === true, '資料の名前は資料として保存するときだけ付けられます');
 const correctionSchema = z.object({ ...base, operation: z.literal('correct'), target_id: inputIdSchema, text: z.string() }).strict();
 // cover_idsは、同じ対象の案として同じ判断にまとめる確認待ちの案。cover_hashesは同じ順で、本人が確認した内容のハッシュ。本体が同じ組の案かを検証する。
 const decisionSchema = z.object({ ...base, operation: z.enum(['project-approve','project-reject']), candidate_id: z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/), candidate_hash: z.string().regex(/^[a-f0-9]{64}$/), confirmation_token: z.string().regex(/^[a-f0-9]{64}$/), cover_ids: z.array(z.string().regex(/^PCAN-[0-9A-HJKMNP-TV-Z]{26}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), cover_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(PROJECT_COVERS_MAX).optional(), outcome: outcomeField.optional(), confirmed: z.literal(true), text: z.string() }).strict().refine(v => v.outcome === undefined || v.operation === 'project-approve', '望む結果は採用のときだけ送ります').refine(v => (v.cover_ids?.length ?? 0) === (v.cover_hashes?.length ?? 0), 'まとめる案のIDとハッシュの数が一致しません');
@@ -92,8 +94,10 @@ const preferencesSchema=z.object({...base,operation:z.literal('client-preference
 // 採用した方針を本人が「まだ有効」と確かめた。ハッシュは確かめた時点の知識のファイルのもの。
 // 整理（AIの読み取り）に失敗したメモ1件のやり直し。attemptsは本人が確かめた時点の試行回数で、今の記録と違えば受け付けない。
 const organizeRetry=z.object({...base,operation:z.literal('organize-retry'),input_id:inputIdSchema,attempts:z.number().int().min(1).max(1000),confirmed:z.literal(true),text:z.string()}).strict();
+// 保存済みのメモを資料棚に載せる（add。名前を変える・外した資料を戻すのも同じ）か、資料棚から外す（remove）。titleは変更後の名前で、省くと名前なし（AIの要約を示す）。
+const referenceMark=z.object({...base,operation:z.literal('reference-mark'),input_id:inputIdSchema,action:referenceMarkActionSchema,title:referenceTitleSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='add'||v.title===undefined,'外すときは名前を指定しません');
 const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemContexts, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition, organizeRetry, projectArea, itemSteps]);
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemContexts, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition, organizeRetry, projectArea, itemSteps, referenceMark]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

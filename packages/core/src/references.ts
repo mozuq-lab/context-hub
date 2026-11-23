@@ -5,17 +5,24 @@ import { mergeTargets, readProjects } from './projects.js';
 import { associatedProjects, dateLabel, generatedMarkdown, isGeneratedIntact } from './views.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { redactText, secretSettings } from './secrets.js';
+import { effectiveReferenceMarks, onReferenceShelf, readReferenceMarks, type ReferenceMark } from './reference-marks.js';
 import type { HubConfig, Input, Project } from './types.js';
 
 /**
- * プロジェクトの資料棚（10_projects/<id>/REFERENCES.md）。整理でAIが「参考資料（reference）」に分類したメモを、
- * モデルを使わずに新しい順へ並べる。URLは本文から文字列として取り出すだけで、取得・要約はしない。
+ * プロジェクトの資料棚（10_projects/<id>/REFERENCES.md）。本人が資料にしたメモと、整理でAIが「参考資料（reference）」に分類したメモを、
+ * モデルを使わずに新しい順へ並べる。本人が資料棚から外したメモは載せない（reference-marks.ts）。
+ * URLは本文から文字列として取り出すだけで、取得・要約はしない。
  * NOWは「今」、経緯は流れを示すため、あとで読み返す記事・仕様・リポジトリなどを探す場所として使う。
+ * アプリが資料ごとに名前を変える・外す・戻すための一覧は、90_system/references.jsonに書く。
  */
 // AIの要約と名前は1行の文字として載せる。リンク・HTML・コメントとして解釈される文字は無害にする。
 const plain = listText;
 const clip = (s: string, n = 160) => clipText(s, n);
 export const referencesPath = (projectId: string) => `10_projects/${projectId}/REFERENCES.md`;
+/** アプリが読む資料の一覧（資料棚に載る資料と、本人が外した資料）。 */
+export const referenceIndexPath = '90_system/references.json';
+/** 一覧に載せる、本人が外した資料の上限（外した日時の新しい順）。 */
+export const REMOVED_REFERENCES_MAX = 100;
 /** 1件の資料から載せるURLの上限。超えた分は件数だけ示す。 */
 export const REFERENCE_URLS_PER_INPUT = 10;
 /** 載せるURLの長さの上限。超えるURLは載せず、原文で確認してもらう。 */
@@ -60,7 +67,11 @@ export function extractUrls(text: string): { urls: string[]; skipped: number } {
 
 export interface ReferenceEntry {
   /** 元のメモ（訂正があっても最初の入力）。 */ input: Input;
-  /** AIの一行要約（未検証）。 */ summary: string;
+  /** 資料棚に示す文。本人が付けた名前、なければAIの一行要約（未検証）、AIがまだ読み取っていなければ本文の1行目。 */ summary: string;
+  /** 本人が付けた資料の名前。 */ title: string | null;
+  /** AIの一行要約（未検証）。AIがまだ読み取っていなければnull。 */ aiSummary: string | null;
+  /** 本人が資料棚に加えた（true）か、AIの分類で載った（false）か。 */ addedByPerson: boolean;
+  /** AIがまだ読み取っていない（整理待ち・整理に失敗）。本人が資料にしたメモだけがこの状態で載る。 */ unorganized: boolean;
   urls: string[];
   /** 載せなかったURL（長すぎる・伏せ字を含む）の数。 */ skippedUrls: number;
   /** 本人がそのプロジェクトを指定した（true）か、AIが推定した関連か（false）。プロジェクト未定の資料ではfalse。 */ owned: boolean;
@@ -68,24 +79,34 @@ export interface ReferenceEntry {
   projects: string[];
 }
 
-/** 参考資料に分類された入力を、発生日時の新しい順に返す。訂正がある入力は、最後に整理できた訂正の本文と分類を使う。 */
-export function referenceEntries(config: HubConfig, units: EffectiveInput[]): ReferenceEntry[] {
+/** 本文の最初の空でない行（伏せ字にした後）。AIがまだ読み取っていない資料の表示に使う。 */
+function firstLine(text: string): string { return text.split(/\r?\n/).map(l => l.trim()).find(Boolean) ?? ''; }
+
+/**
+ * 資料棚に載る入力を、発生日時の新しい順に返す。訂正がある入力は、最後に整理できた訂正の本文と分類を使う。
+ * marksは本人の記録（メモごとに最後の判断）。本人が加えたメモは、AIがまだ読み取っていなくても載せる（本文は最新の訂正）。
+ */
+export function referenceEntries(config: HubConfig, units: EffectiveInput[], marks: ReadonlyMap<string, ReferenceMark> = new Map()): ReferenceEntry[] {
   const settings = secretSettings(config), entries: ReferenceEntry[] = [];
   for (const unit of units) {
-    const { chain, receipt } = unit;
-    if (!receipt?.result || receipt.result.category !== 'reference') continue;
-    const evidence = [chain.root, ...chain.revisions], source = evidence.find(i => i.id === receipt.input_id) ?? chain.root;
-    const { urls, skipped } = extractUrls(redactText(source.text, settings).text);
+    const { chain, receipt } = unit, mark = marks.get(chain.root.id), result = receipt?.result ?? undefined;
+    if (chain.root.kind !== 'memo' && chain.root.kind !== 'work-summary') continue;
+    if (!onReferenceShelf(result?.category, mark)) continue;
+    const evidence = [chain.root, ...chain.revisions], source = receipt && result ? evidence.find(i => i.id === receipt.input_id) ?? chain.root : chain.latest;
+    const text = redactText(source.text, settings).text, { urls, skipped } = extractUrls(text);
+    const title = mark?.action === 'add' ? mark.title : null, aiSummary = result ? result.summary : null;
     entries.push({
-      input: chain.root, summary: receipt.result.summary, urls, skippedUrls: skipped, owned: false,
-      corrected: chain.revisions.length > 0, pendingCorrection: unit.pendingCorrection, projects: associatedProjects(chain.root, receipt, config),
+      input: chain.root, summary: title ?? aiSummary ?? firstLine(text), title, aiSummary, addedByPerson: mark?.action === 'add', unorganized: !result,
+      urls, skippedUrls: skipped, owned: false, corrected: chain.revisions.length > 0, pendingCorrection: unit.pendingCorrection,
+      // AIがまだ読み取っていない資料は、本人が指定したプロジェクトにだけ載せる。
+      projects: receipt && result ? associatedProjects(chain.root, receipt, config) : chain.root.project ? [chain.root.project] : [],
     });
   }
   return entries.sort((a, b) => Date.parse(b.input.occurred_at) - Date.parse(a.input.occurred_at) || b.input.id.localeCompare(a.input.id));
 }
 
 function entryLines(entry: ReferenceEntry, day: string, link: string, seen: Set<string>): string[] {
-  const flags = [entry.corrected ? (entry.pendingCorrection ? '訂正未反映' : '訂正あり') : '', entry.owned ? '' : '関連候補（AI推定）'].filter(Boolean);
+  const flags = [entry.addedByPerson ? '本人が追加' : '', entry.unorganized ? 'AIの読み取り待ち' : '', entry.corrected ? (entry.pendingCorrection ? '訂正未反映' : '訂正あり') : '', entry.owned ? '' : '関連候補（AI推定）'].filter(Boolean);
   const lines = [`- ${day} ${clip(entry.summary) || '（要約なし）'} — [${entry.input.id}](${link})${flags.length ? ` / ${flags.join(' / ')}` : ''}`];
   // 同じURLは新しい資料にだけ載せる。
   const fresh = entry.urls.filter(u => !seen.has(u)), repeated = entry.urls.length - fresh.length;
@@ -110,10 +131,10 @@ export function buildReferencesText(config: HubConfig, project: Project, all: Re
   const lines = [
     `# ${plain(project.title)}の資料`, '',
     `資料 ${mine.length}件 / URL ${new Set(mine.flatMap(e => e.urls)).size}件`, '',
-    '整理でAIが「参考資料」に分類したメモを、新しい順に並べた一覧です。分類と要約はAI生成・未検証です。URLは本文に書かれた文字列をそのまま載せており、取得・確認はしていません。開く前にリンク先を確かめてください。今の状態は[NOW](NOW.md)を参照してください。', '',
+    '本人が資料にしたメモと、整理でAIが「参考資料」に分類したメモを、新しい順に並べた一覧です。名前は本人が付けたもの、それ以外の要約と分類はAI生成・未検証です。URLは本文に書かれた文字列をそのまま載せており、取得・確認はしていません。開く前にリンク先を確かめてください。資料を加える・外す・名前を変えるのはアプリか`ctx reference`で行います。今の状態は[NOW](NOW.md)を参照してください。', '',
   ];
   if (mergedInto) lines.push(`このプロジェクトは${plain(mergedInto.title)}（${mergedInto.id}）に統合済みです。資料は統合先の[REFERENCES.md](../${mergedInto.id}/REFERENCES.md)にまとめています（統合先に資料がなければ、まだ作られていません）。`, '');
-  else if (!mine.length) lines.push('まだ資料はありません。URLや「参考」と分かるメモを追加すると、次の整理でここに載ります。', '');
+  else if (!mine.length) lines.push('まだ資料はありません。メモを「資料として保存」するか、URLや「参考」と分かるメモを追加すると、ここに載ります。', '');
   let current: string | undefined;
   for (const entry of shown) {
     const key = month(entry.input.occurred_at);
@@ -126,11 +147,11 @@ export function buildReferencesText(config: HubConfig, project: Project, all: Re
 }
 
 /** HOMEに載せる、どのプロジェクトにも結び付いていない資料。なければ空文字。 */
-export function unassignedReferenceSection(config: HubConfig, units: EffectiveInput[]): string {
-  const loose = referenceEntries(config, units).filter(e => !e.projects.length);
+export function unassignedReferenceSection(config: HubConfig, units: EffectiveInput[], marks: ReadonlyMap<string, ReferenceMark> = new Map()): string {
+  const loose = referenceEntries(config, units, marks).filter(e => !e.projects.length);
   if (!loose.length) return '';
   const seen = new Set<string>(), rows = loose.slice(0, UNASSIGNED_ROWS).flatMap(e => entryLines({ ...e, owned: true }, dateLabel(e.input.occurred_at, config.timezone).slice(0, 10), e.input.path, seen));
-  return `\n\n## プロジェクト未定の資料（${loose.length}件）\nAIが「参考資料」に分類したメモのうち、どのプロジェクトにも結び付いていないものです。プロジェクトに結び付いた資料は、各プロジェクトのREFERENCES.md（資料）に載ります。${loose.length > UNASSIGNED_ROWS ? `新しい${UNASSIGNED_ROWS}件を載せます。` : ''}\n${rows.join('\n')}`;
+  return `\n\n## プロジェクト未定の資料（${loose.length}件）\n本人が資料にしたメモと、AIが「参考資料」に分類したメモのうち、どのプロジェクトにも結び付いていないものです。プロジェクトに結び付いた資料は、各プロジェクトのREFERENCES.md（資料）に載ります。${loose.length > UNASSIGNED_ROWS ? `新しい${UNASSIGNED_ROWS}件を載せます。` : ''}\n${rows.join('\n')}`;
 }
 
 const optionsSchema = z.object({ projectId: z.string().optional() }).strict();
@@ -145,7 +166,9 @@ export async function rebuildReferencesLocked(config: HubConfig, vault: Vault, o
   optionsSchema.parse(options);
   const projects = await readProjects(config), targets = options.projectId ? projects.filter(p => p.id === options.projectId) : projects;
   if (options.projectId && !targets.length) throw new Error('プロジェクトが見つかりません');
-  const entries = referenceEntries(config, await readEffectiveInputs(config)), result: ReferencesWrite[] = [], merged = mergeTargets(projects);
+  const units = await readEffectiveInputs(config), records = (await readReferenceMarks(vault)).records, marks = effectiveReferenceMarks(records);
+  const entries = referenceEntries(config, units, marks), result: ReferencesWrite[] = [], merged = mergeTargets(projects);
+  await writeReferenceIndexLocked(vault, buildReferenceIndex(config, units, entries, records, marks));
   for (const project of targets) {
     const path = referencesPath(project.id), existing = await vault.read(path);
     if (existing !== undefined && !isGeneratedIntact(existing)) { result.push({ projectId: project.id, path, written: false, stopped: true }); continue; }
@@ -172,5 +195,64 @@ export async function rebuildReferences(config: HubConfig, options: { projectId?
 export async function buildReferences(config: HubConfig, projectId: string): Promise<string> {
   const projects = await readProjects(config), project = projects.find(p => p.id === projectId);
   if (!project) throw new Error('プロジェクトが見つかりません');
-  return buildReferencesText(config, project, referenceEntries(config, await readEffectiveInputs(config)), projects.find(p => p.id === mergeTargets(projects).get(projectId)));
+  const marks = effectiveReferenceMarks((await readReferenceMarks(new Vault(config))).records);
+  return buildReferencesText(config, project, referenceEntries(config, await readEffectiveInputs(config), marks), projects.find(p => p.id === mergeTargets(projects).get(projectId)));
+}
+
+const indexEntrySchema = z.object({
+  input_id: z.string(), label: z.string(), title: z.string().nullable(), ai_summary: z.string().nullable(),
+  added_by: z.enum(['person', 'ai']), unorganized: z.boolean(), urls: z.array(z.string()), skipped_urls: z.number().int().min(0),
+  projects: z.array(z.string()), project: z.string().nullable(), corrected: z.boolean(), pending_correction: z.boolean(), occurred_at: z.string(),
+}).strict();
+const removedEntrySchema = z.object({
+  input_id: z.string(), label: z.string(), title: z.string().nullable(), projects: z.array(z.string()), project: z.string().nullable(), removed_at: z.string(), occurred_at: z.string(),
+}).strict();
+export const referenceIndexSchema = z.object({
+  schema_version: z.literal(1), generated_at: z.string().datetime({ offset: true }),
+  entries: z.array(indexEntrySchema), removed: z.array(removedEntrySchema),
+}).strict();
+export type ReferenceIndex = z.infer<typeof referenceIndexSchema>;
+
+/**
+ * アプリが読む資料の一覧。entriesは資料棚に載る資料（新しい順、件数は打ち切らない）、removedは本人が外した資料（外した日時の新しい順）。
+ * removedのtitleは外す前に本人が付けていた名前で、戻すときに同じ名前を送れるようにする。
+ * projectは本人が指定したプロジェクト、projectsは資料が載るプロジェクト（AIの関連候補を含む）。
+ */
+export function buildReferenceIndex(config: HubConfig, units: EffectiveInput[], entries: ReferenceEntry[], records: ReferenceMark[], marks: ReadonlyMap<string, ReferenceMark>, now = new Date()): ReferenceIndex {
+  const settings = secretSettings(config), byId = new Map(units.map(u => [u.chain.root.id, u]));
+  const removed: ReferenceIndex['removed'] = [];
+  for (const mark of marks.values()) {
+    const unit = byId.get(mark.input_id);
+    if (mark.action !== 'remove' || !unit || (unit.chain.root.kind !== 'memo' && unit.chain.root.kind !== 'work-summary')) continue;
+    // 外す前に付けていた名前（外した記録より前の、最後の加える記録）。
+    const before = records.filter(r => r.input_id === mark.input_id && r.action === 'add' && (Date.parse(r.decided_at) < Date.parse(mark.decided_at) || (r.decided_at === mark.decided_at && r.id < mark.id)))
+      .sort((a, b) => Date.parse(a.decided_at) - Date.parse(b.decided_at) || a.id.localeCompare(b.id)).at(-1);
+    const result = unit.receipt?.result ?? undefined, title = before?.title ?? null;
+    removed.push({
+      input_id: mark.input_id, label: title ?? result?.summary ?? firstLine(redactText(unit.chain.latest.text, settings).text), title,
+      projects: unit.receipt && result ? associatedProjects(unit.chain.root, unit.receipt, config) : unit.chain.root.project ? [unit.chain.root.project] : [],
+      project: unit.chain.root.project ?? null, removed_at: mark.decided_at, occurred_at: unit.chain.root.occurred_at,
+    });
+  }
+  removed.sort((a, b) => Date.parse(b.removed_at) - Date.parse(a.removed_at) || b.input_id.localeCompare(a.input_id));
+  return {
+    schema_version: 1, generated_at: now.toISOString(),
+    entries: entries.map(e => ({
+      input_id: e.input.id, label: e.summary, title: e.title, ai_summary: e.aiSummary, added_by: e.addedByPerson ? 'person' : 'ai', unorganized: e.unorganized,
+      urls: e.urls, skipped_urls: e.skippedUrls, projects: e.projects, project: e.input.project ?? null, corrected: e.corrected, pending_correction: e.pendingCorrection, occurred_at: e.input.occurred_at,
+    })),
+    removed: removed.slice(0, REMOVED_REFERENCES_MAX),
+  };
+}
+/** 資料の一覧を読む。まだ作っていない・読めないときはundefined。 */
+export async function readReferenceIndex(vault: Vault): Promise<ReferenceIndex | undefined> {
+  const raw = await vault.read(referenceIndexPath);
+  if (raw === undefined) return undefined;
+  try { return referenceIndexSchema.parse(JSON.parse(raw)); } catch { return undefined; }
+}
+/** 内容が変わったときだけ書き、同期の無駄な変更を避ける（Writerロック内）。 */
+async function writeReferenceIndexLocked(vault: Vault, index: ReferenceIndex): Promise<void> {
+  const raw = await vault.read(referenceIndexPath);
+  if (raw !== undefined) try { if (JSON.stringify({ ...JSON.parse(raw), generated_at: '' }) === JSON.stringify({ ...index, generated_at: '' })) return; } catch { /* 壊れた一覧は書き直す。 */ }
+  await vault.write(referenceIndexPath, JSON.stringify(index, null, 2) + '\n');
 }

@@ -40,6 +40,7 @@ export * from './item-rereads.js';
 export * from './backup-check.js';
 export * from './history.js';
 export * from './references.js';
+export * from './reference-marks.js';
 export * from './resolution-hints.js';
 export * from './git-drafts.js';
 export * from './digest.js';

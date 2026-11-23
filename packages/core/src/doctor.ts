@@ -34,6 +34,7 @@ import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
 import { historyStopped } from './history.js';
 import { referencesStopped } from './references.js';
+import { readReferenceMarks } from './reference-marks.js';
 import { inspectPeople, readPersonChanges, stoppedPeoplePages } from './people.js';
 import type { HubConfig, Input } from './types.js';
 import { readIdeaLinks } from './idea-links.js';
@@ -77,6 +78,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { for (const path of (await readItemContexts(vault)).problems) issues.push(`場所・道具の札の記録が不正です: ${path}`); } catch { issues.push('場所・道具の札の記録を走査できません'); }
   try { for (const path of (await readItemWaits(vault)).problems) issues.push(`連絡待ちの記録が不正です: ${path}`); } catch { issues.push('連絡待ちの記録を走査できません'); }
   try { for (const path of [...(await readItemSomedays(vault)).problems, ...(await readSomedayReviews(vault)).problems]) issues.push(`「いつかやる」の記録が不正です: ${path}`); } catch { issues.push('「いつかやる」の記録を走査できません'); }
+  try { for (const path of (await readReferenceMarks(vault)).problems) issues.push(`資料の記録が不正です: ${path}`); } catch { issues.push('資料の記録を走査できません'); }
   try { for (const path of (await readWeeklyReviews(vault)).problems) issues.push(`週次レビューの記録が不正です: ${path}`); } catch { issues.push('週次レビューの記録を走査できません'); }
   try { for (const path of (await readItemOccurrences(vault)).problems) issues.push(`定例の回の記録が不正です: ${path}`); } catch { issues.push('定例の回の記録を走査できません'); }
   try { for (const path of (await readAskRecords(vault)).problems) issues.push(`記録に聞くの問いと答えの記録が不正です: ${path}`); } catch { issues.push('記録に聞くの問いと答えの記録を走査できません'); }
