@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { inputIdSchema, readInputs } from './capture.js';
-import type { HubConfig } from './types.js';
+import { findSecrets, secretSettings } from './secrets.js';
+import type { HubConfig, Input, OrganizeResult } from './types.js';
 
 /**
  * 本人が資料棚に載せる・外す記録（90_system/reference-marks/REFM-*.json）。
@@ -10,7 +11,8 @@ import type { HubConfig } from './types.js';
  *   名前を変えるのも、外した資料を戻すのも、変更後の全体をaddで記録する。
  * - remove: AIが参考資料に分類したメモも含めて、資料棚から外す。メモ自体と整理結果は変えない。
  * 同じメモの記録は、本人が判断した日時（decided_at）の順で最後のものを有効にする。記録のないメモは、AIの分類（reference）で決まる。
- * 原文（00_inbox）は書き換えない。本文やURLを直すときは、今の訂正（correct）を使う。
+ * 原文（00_inbox）と整理の記録（receipts）は書き換えない。本文やURLを直すときは、今の訂正（correct）を使う。
+ * 資料棚に加えたメモは、読むときにAIの読み取りへ重ねて（asPersonReference）タスク・問い・提案の行を作らない。外すと元の読み取りに戻る。
  */
 export const REFERENCE_TITLE_CHARS = 100;
 export const referenceMarkIdSchema = z.string().regex(/^REFM-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -19,7 +21,7 @@ export type ReferenceMarkAction = typeof referenceMarkActions[number];
 export const referenceMarkActionSchema = z.enum(referenceMarkActions);
 /** 資料の名前。1行で、前後に空白を付けない。 */
 export const referenceTitleSchema = z.string().min(1, '資料の名前が空です').max(REFERENCE_TITLE_CHARS, `資料の名前は${REFERENCE_TITLE_CHARS}文字以内にしてください`)
-  .regex(/^[^\p{Cc}\p{Zl}\p{Zp}‪-‮⁦-⁩]+$/u, '資料の名前は1行で書いてください（制御文字は使えません）').refine(v => v.trim() === v, '資料の名前の前後に空白は付けられません');
+  .regex(/^[^\p{Cc}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]+$/u, '資料の名前は1行で書いてください（制御文字は使えません）').refine(v => v.trim() === v, '資料の名前の前後に空白は付けられません');
 const timestamp = z.string().datetime({ offset: true });
 export const referenceMarkSchema = z.object({
   schema_version: z.literal(1), id: referenceMarkIdSchema,
@@ -27,7 +29,7 @@ export const referenceMarkSchema = z.object({
   action: referenceMarkActionSchema,
   /** 本人が付けた資料の名前。外す記録と、名前を付けていない資料ではnull。 */ title: referenceTitleSchema.nullable(),
   /** 本人が判断した日時（アプリの依頼の発生日時、CLIは実行日時）。 */ decided_at: timestamp,
-  source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(200).optional(), created_at: timestamp,
+  source: z.string().min(1).max(200), source_event_id: z.string().min(1).max(1000).optional(), created_at: timestamp,
 }).strict().refine(v => v.action === 'add' || v.title === null, '外す記録には名前を付けません');
 export type ReferenceMark = z.infer<typeof referenceMarkSchema>;
 
@@ -61,12 +63,32 @@ export function onReferenceShelf(category: string | undefined, mark: ReferenceMa
   return mark ? mark.action === 'add' : category === 'reference';
 }
 
-export type ReferenceRefusalCause = 'missing' | 'kind';
-export const referenceRefusalCauses = ['missing', 'kind'] as const satisfies readonly ReferenceRefusalCause[];
+/**
+ * 本人が資料棚に加えたメモのAIの読み取りを、資料として読む（読むときに重ね、整理の記録は書き換えない）。
+ * メモはタスク・問い・提案・未解決の行を作らない（分類を資料にし、抽出と次の一手の提案を空にする）。
+ * 作業要約は現在地・次の一手の根拠なので、分類だけを資料にする。
+ */
+export function asPersonReference(result: OrganizeResult, kind: Input['kind']): OrganizeResult {
+  return kind === 'memo'
+    ? { ...result, category: 'reference', next_action_suggestions: [], extracted: { current: [], next: [], open: [] } }
+    : { ...result, category: 'reference' };
+}
+
+export type ReferenceRefusalCause = 'missing' | 'kind' | 'secret';
+export const referenceRefusalCauses = ['missing', 'kind', 'secret'] as const satisfies readonly ReferenceRefusalCause[];
 export function referenceMessage(reason: { cause: ReferenceRefusalCause }): string {
   return reason.cause === 'missing'
     ? '資料にするメモが見つかりません。同期してから、メモを確かめ直してください。'
-    : '資料にできるのはメモと作業要約だけです（本人が追加した行動と訂正は資料にできません）。';
+    : reason.cause === 'secret'
+      ? '資料の名前に秘密情報らしい文字列があります。名前を変えてから、もう一度依頼してください。'
+      : '資料にできるのはメモと作業要約だけです（本人が追加した行動と訂正は資料にできません）。';
+}
+
+/** 資料の名前は資料棚・HOMEにそのまま載るため、秘密情報らしい文字列があれば断る（秘密情報の検出を止める設定では調べない）。 */
+export function assertReferenceTitleSafe(config: HubConfig, title: string | null | undefined): void {
+  if (!title) return;
+  const settings = secretSettings(config);
+  if (settings.enabled && findSecrets(title, settings).length) throw new ReferenceMarkError({ code: 'reference-refused', cause: 'secret' });
 }
 export class ReferenceMarkError extends Error {
   constructor(readonly reason: { code: 'reference-refused'; cause: ReferenceRefusalCause }) {
@@ -82,7 +104,7 @@ export interface ReferenceMarkRequest {
 export interface ReferenceMarkResult { inputId: string; action: ReferenceMarkAction; markId: string; deduped: boolean }
 const requestSchema = z.object({
   inputId: inputIdSchema, action: referenceMarkActionSchema, title: referenceTitleSchema.nullable().optional(),
-  source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(200).optional(),
+  source: z.string().min(1).max(200), sourceEventId: z.string().min(1).max(1000).optional(),
   decidedAt: z.string().refine(v => /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(v) && Number.isFinite(Date.parse(v))).optional(),
 }).strict().refine(r => r.action === 'add' || r.title === undefined || r.title === null, '外すときは名前を指定しません');
 
@@ -99,10 +121,12 @@ export async function writeReferenceMarkLocked(vault: Vault, request: ReferenceM
       return { inputId: previous.input_id, action: previous.action, markId: previous.id, deduped: true };
     }
   }
+  // 時計の進んだ端末の判断で、後からの判断を覆さないよう、判断した日時は記録した時刻より後にしない。
+  const now = Date.now(), decided = Math.min(r.decidedAt ? Date.parse(r.decidedAt) : now, now);
   const record: ReferenceMark = {
     schema_version: 1, id: `REFM-${ulid()}`, input_id: r.inputId, action: r.action, title,
-    decided_at: new Date(r.decidedAt ?? Date.now()).toISOString(),
-    source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date().toISOString(),
+    decided_at: new Date(decided).toISOString(),
+    source: r.source, ...(r.sourceEventId ? { source_event_id: r.sourceEventId } : {}), created_at: new Date(now).toISOString(),
   };
   if (!await vault.create(markPath(record.id), JSON.stringify(record, null, 2) + '\n')) throw new Error('資料の記録が競合しました');
   return { inputId: record.input_id, action: record.action, markId: record.id, deduped: false };
@@ -114,6 +138,7 @@ export async function writeReferenceMarkLocked(vault: Vault, request: ReferenceM
  */
 export async function setReferenceMark(config: HubConfig, request: ReferenceMarkRequest): Promise<ReferenceMarkResult> {
   const r = requestSchema.parse(request), vault = new Vault(config);
+  assertReferenceTitleSafe(config, r.title);
   return vault.withLock(async () => {
     // 再送は、記録の後にメモが見えなくなっていても同じ結果を返す。
     if (r.sourceEventId && (await readReferenceMarks(vault)).records.some(x => x.source === r.source && x.source_event_id === r.sourceEventId)) return writeReferenceMarkLocked(vault, r);

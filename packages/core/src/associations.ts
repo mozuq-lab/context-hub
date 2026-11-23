@@ -7,6 +7,7 @@ import { readProjects, mergeTargets, outcomeForPrompt } from './projects.js';
 import { candidateProjects,lifecycleOf } from './project-status.js';
 import { readEffectiveInputs, type EffectiveInput } from './effective-inputs.js';
 import { appliedReread, overlayReread, readExclusionOverlays, wrongProjectsFor, type ExclusionOverlays } from './item-rereads.js';
+import { asPersonReference, effectiveReferenceMarks, readReferenceMarks, type ReferenceMark } from './reference-marks.js';
 import type { HubConfig, LlmClient, OrganizeResult, Project } from './types.js';
 
 const candidatesSchema=z.array(z.object({id:z.string().regex(/^[a-z0-9][a-z0-9-]{1,40}$/),confidence:z.number().min(0).max(1)}).strict()).max(10);
@@ -76,11 +77,14 @@ export async function associationEligible(config:HubConfig,vault:Vault,effective
  * 有効解釈へ、再関連付けと本人の「誤りとして外す」記録を反映する。
  * 読み直し（item-rereads）は要約・帰属候補・抽出を重ね、読み直しより古い再関連付けは使わない（読み直しは今の定義一覧を見ている）。
  * 本人が「別のプロジェクトの話」として外したプロジェクトは、AIが推定した帰属候補から必ず外す。本人の判断をAIの推定で覆さない。
+ * 本人が資料棚に加えたメモは、読み直しの後でも資料として読む（asPersonReference）。
  */
 export async function applyAssociations(config:HubConfig,effective:EffectiveInput[],projects?:Project[]):Promise<EffectiveInput[]>{
  const registry=projects??await readProjects(config),vault=new Vault(config),result:EffectiveInput[]=[];
  // 外す記録が壊れていても、検索・HOME・経緯は元の解釈で続ける（壊れた記録はNOWの作り直しとdoctorが示す）。
  let overlays:ExclusionOverlays;try{overlays=await readExclusionOverlays(vault);}catch{overlays={exclusions:[],wrongProjects:new Map(),rereads:new Map(),problems:[]};}
+ // 資料の記録が壊れていても、ほかの記録で続ける（不正な記録はHOMEとdoctorが示す）。
+ let marks:Map<string,ReferenceMark>;try{marks=effectiveReferenceMarks((await readReferenceMarks(vault)).records);}catch{marks=new Map();}
  // 外す記録は統合先のプロジェクトのものとして読むため、帰属候補も統合先へ読み替えてから比べる。
  const targets=mergeTargets(registry),registryHash=projectRegistryHash(registry);
  let index:Awaited<ReturnType<typeof associationIndex>>|undefined;
@@ -106,6 +110,7 @@ export async function applyAssociations(config:HubConfig,effective:EffectiveInpu
    withResult(r=>({...r,project_candidates:record.project_candidates}));
   }
   if(wrong.size)withResult(r=>({...r,project_candidates:r.project_candidates.filter(c=>!wrong.has(targets.get(c.id)??c.id))}));
+  if(marks.get(item.chain.root.id)?.action==='add')withResult(r=>asPersonReference(r,item.chain.root.kind));
   result.push(unit);
  }
  return targets.size?result.map(item=>redirectMerged(item,targets)):result;

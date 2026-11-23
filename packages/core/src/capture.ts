@@ -112,7 +112,7 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     if (request.kind === 'action') throw new Error('行動は資料として保存できません');
     if (request.reference !== true) throw new Error('資料の名前は資料として保存するときだけ付けられます');
     // reference-marks.tsはこのファイルを読むため、循環を避けて遅延読込する。
-    if (request.referenceTitle !== undefined) { const { referenceTitleSchema } = await import('./reference-marks.js'); const title = referenceTitleSchema.safeParse(request.referenceTitle); if (!title.success) throw new Error(title.error.issues[0]?.message ?? '資料の名前が不正です'); }
+    if (request.referenceTitle !== undefined) { const { referenceTitleSchema, assertReferenceTitleSafe } = await import('./reference-marks.js'); const title = referenceTitleSchema.safeParse(request.referenceTitle); if (!title.success) throw new Error(title.error.issues[0]?.message ?? '資料の名前が不正です'); assertReferenceTitleSafe(config, title.data); }
   }
   if (request.happenedOn !== undefined) calendarDateSchema.parse(request.happenedOn);
   if (request.continues !== undefined) {

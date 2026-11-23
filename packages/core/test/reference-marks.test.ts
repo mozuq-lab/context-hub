@@ -10,7 +10,8 @@ import { runCycle } from '../src/cycle.js';
 import { find } from '../src/retrieve.js';
 import { doctor } from '../src/doctor.js';
 import { ingest, intakeFeatures } from '../src/intake.js';
-import { readReceipts } from '../src/views.js';
+import { readReceipts, rebuildNow } from '../src/views.js';
+import { readEffectiveInputs } from '../src/effective-inputs.js';
 import { rebuildDashboard } from '../src/dashboard.js';
 import { buildReferences, rebuildReferences, readReferenceIndex, referenceIndexPath } from '../src/references.js';
 import { ReferenceMarkError, readReferenceMarks, setReferenceMark } from '../src/reference-marks.js';
@@ -39,14 +40,16 @@ test('資料として保存したメモは、AIが読み取る前から名前付
   expect(index.entries).toEqual([expect.objectContaining({ input_id: saved.inputId, label: '同期の手法の記事', title: '同期の手法の記事', ai_summary: null, added_by: 'person', unorganized: true, projects: ['hub'], project: 'hub' })]);
 
   await organize(config, new MockLlm());
+  // 整理の記録にはAIの読み取りをそのまま残し、読むときに資料として扱う。アイデアのファイルは作らない。
   const receipt = (await readReceipts(config)).find(r => r.input_id === saved.inputId)!;
-  expect(receipt.result?.category).toBe('reference');
+  expect(receipt.result?.category).toBe('idea');
+  expect((await readEffectiveInputs(config)).find(u => u.chain.root.id === saved.inputId)?.receipt?.result?.category).toBe('reference');
   expect(await vault.files('20_ideas')).toEqual([]);
   await rebuildReferences(config);
   text = await buildReferences(config, 'hub');
   expect(text).not.toContain('AIの読み取り待ち');
   index = (await readReferenceIndex(vault))!;
-  expect(index.entries[0]).toMatchObject({ label: '同期の手法の記事', ai_summary: expect.stringContaining('同期の手法を試したい'), unorganized: false });
+  expect(index.entries[0]).toMatchObject({ label: '同期の手法の記事', ai_summary: expect.stringContaining('同期の手法を試したい'), unorganized: false, failed: false, mark_id: expect.stringMatching(/^REFM-/) });
   // 検索の「資料」の絞り込みにも入る。
   expect(await find(config, '', { kinds: ['reference'] })).toContain(saved.inputId);
 });
@@ -163,4 +166,58 @@ test('不正な資料の記録は無いものとして資料棚を作り、HOME�
   await rebuildReferences(config);
   expect(await vault.read(referenceIndexPath)).toBe(before);
   expect(new Vault(config)).toBeDefined();
+});
+
+test('資料に加えたメモは、整理の記録を変えずにタスク・問い・提案の行を作らず、外すと元の読み取りに戻る', async () => {
+  const { config } = await fixture();
+  const memo = await capture(config, { source: 'cli', project: 'hub', ...at('2026-11-01T01:00:00Z'), text: '集約の進め方はどうする？' });
+  await organize(config, new MockLlm([{ category: 'question', summary: '集約の進め方はどうする？', project_candidates: [], next_action_suggestions: ['集約の担当を決める'], extracted: { current: [], next: [], open: [{ text: '集約の進め方', status: 'confirmed' }] }, knowledge_candidate: null, new_project_hint: null }]));
+  const now = async () => { await rebuildNow(config, 'hub'); return (await new Vault(config).read('10_projects/hub/NOW.md'))!; };
+  let text = await now();
+  expect(text).toContain('集約の担当を決める');
+  expect(text).toContain('集約の進め方はどうする？');
+  await setReferenceMark(config, { inputId: memo.inputId, action: 'add', source: 'test' });
+  text = await now();
+  expect(text).not.toContain('集約の担当を決める');
+  expect(text).not.toContain('集約の進め方はどうする？');
+  expect((await readReceipts(config)).find(r => r.input_id === memo.inputId)?.result?.category).toBe('question');
+  await setReferenceMark(config, { inputId: memo.inputId, action: 'remove', source: 'test' });
+  text = await now();
+  expect(text).toContain('集約の担当を決める');
+});
+
+test('資料として保存したメモからはプロジェクト案を作らず、整理に失敗した資料は失敗と示す', async () => {
+  const { config, vault } = await fixture();
+  const hinted = await capture(config, { source: 'cli', ...at('2026-11-01T01:00:00Z'), text: '新しい取り組みの資料', reference: true });
+  const broken = await capture(config, { source: 'cli', project: 'hub', ...at('2026-11-02T01:00:00Z'), text: '集約の資料', reference: true });
+  await organize(config, new MockLlm([
+    { category: 'reference', summary: '新しい取り組みの資料', project_candidates: [], next_action_suggestions: [], extracted: { current: [], next: [], open: [] }, knowledge_candidate: null, new_project_hint: null, project_proposal: { title: '新しい取り組み', aliases: [], keywords: [], rationale: '資料が増えている' } },
+    new Error('失敗'),
+  ]));
+  expect(hinted.inputId).toMatch(/^IN-/);
+  expect(await vault.files('90_system/project-candidates')).toEqual([]);
+  await rebuildReferences(config);
+  const entry = (await readReferenceIndex(vault))!.entries.find(e => e.input_id === broken.inputId)!;
+  expect({ unorganized: entry.unorganized, failed: entry.failed }).toEqual({ unorganized: false, failed: true });
+  expect(await buildReferences(config, 'hub')).toContain('AIの読み取りに失敗');
+});
+
+test('時計の進んだ判断は記録した時刻に丸め、秘密情報らしい名前は断る。長い受付IDでも保存と資料の記録がそろう', async () => {
+  const { config, vault } = await fixture();
+  const memo = await capture(config, { source: 'cli', project: 'hub', ...at('2026-11-01T01:00:00Z'), text: '集約の設計メモ' });
+  const future = await setReferenceMark(config, { inputId: memo.inputId, action: 'add', source: 'test', decidedAt: '2099-01-01T00:00:00Z' });
+  const record = (await readReferenceMarks(vault)).records.find(r => r.id === future.markId)!;
+  expect(Date.parse(record.decided_at)).toBeLessThanOrEqual(Date.parse(record.created_at));
+  await setReferenceMark(config, { inputId: memo.inputId, action: 'remove', source: 'test' });
+  await rebuildReferences(config);
+  expect((await readReferenceIndex(vault))!.entries).toEqual([]);
+
+  const secret = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123';
+  await expect(setReferenceMark(config, { inputId: memo.inputId, action: 'add', title: `鍵 ${secret}`, source: 'test' })).rejects.toBeInstanceOf(ReferenceMarkError);
+  const before = (await readInputs(config)).length;
+  await expect(capture(config, { source: 'cli', project: 'hub', ...at('2026-11-02T01:00:00Z'), text: '資料', reference: true, referenceTitle: `鍵 ${secret}` })).rejects.toThrow('秘密情報');
+  expect(await readInputs(config)).toHaveLength(before);
+
+  const long = await capture(config, { source: 'cli', project: 'hub', ...at('2026-11-02T02:00:00Z'), text: '長い受付IDの資料', reference: true, sourceEventId: 'e'.repeat(600) });
+  expect((await readReferenceMarks(vault)).records.some(r => r.input_id === long.inputId)).toBe(true);
 });
