@@ -100,7 +100,8 @@ async function collectDocs(config: HubConfig) {
     for (const input of [unit.chain.root,...unit.chain.revisions]) assigned.set(input.id,{owned,estimated});
   }
   // atは表示用、whenは期間と新しい順の判定用。NOWは最終根拠、アイデアは元のメモの発生日時で判断し、再生成や整理の遅れに左右されないようにする。
-  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,display:inputWhen(i, displayTime),source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind,...(references.has(i.id)?{reference:true}:{})}));
+  // 添えたファイルの名前でも見つけられるよう、本文の後ろに名前を足して探す。
+  const docs: Doc[] = inputs.map(i=>({path:i.path,text:i.attachment?`${i.text}\nファイル: ${i.attachment.name}`:i.text,id:i.id,at:i.occurred_at,when:i.occurred_at,display:inputWhen(i, displayTime),source:`${i.source} / ${i.origin}`,ids:[i.id],kind:i.kind,...(references.has(i.id)?{reference:true}:{})}));
   // frontmatterを読めないファイル（手で壊したNOWやアイデアなど）は飛ばし、結果に件数とパスを示す。
   const unreadable: string[] = [];
   for (const dir of ['20_ideas','30_knowledge','10_projects']) for(const path of await vault.files(dir)) {

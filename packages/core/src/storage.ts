@@ -154,6 +154,31 @@ export function releaseLocksOnSignal(): void {
 }
 
 /** ロックを待ち時間内に取れなかったこと。一時的な混雑として、呼び出し側が次回へ回せるように区別する。 */
+/** ファイルの複製（Vault.copyFileIn）を止めた理由。not-fileは通常のファイルでない、existsは同じ場所に別の内容がある。 */
+export class FileCopyError extends Error {
+  constructor(readonly code: 'not-file' | 'too-large' | 'mismatch' | 'exists') {
+    super(`ファイルを複製できません: ${code}`);
+    this.name = 'FileCopyError';
+  }
+}
+/** ファイルの大きさとSHA-256。symlinkは辿らない。無ければundefined、上限を超えればFileCopyError。 */
+export async function fileDigest(path: string, maxBytes: number): Promise<{ bytes: number; sha256: string } | undefined> {
+  let handle;
+  try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) { if (missing(error)) return undefined; throw error; }
+  try {
+    if (!(await handle.stat()).isFile()) throw new FileCopyError('not-file');
+    const digest = createHash('sha256'), buffer = Buffer.alloc(1 << 20); let size = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      size += bytesRead;
+      if (size > maxBytes) throw new FileCopyError('too-large');
+      digest.update(buffer.subarray(0, bytesRead));
+    }
+    return { bytes: size, sha256: digest.digest('hex') };
+  } finally { await handle.close(); }
+}
 export class LockTimeoutError extends Error {
   constructor(readonly scope: LockScope) {
     super(scope === 'organize' ? '別の整理処理が実行中か、整理ロックの残骸があります。ctx doctorで確認してください' : '別のWriterまたはロック残骸があります。ctx doctorで確認してください');
@@ -234,6 +259,56 @@ export class Vault {
       await syncDirectory(dirname(target));
       return true;
     } finally { await unlink(temp).catch(error => { if (!missing(error)) throw error; }); }
+  }
+  /**
+   * ファイル（Vaultの外、またはVault内の絶対パス）を、Vault内の新しいファイルとして複製する。読みながら大きさとSHA-256を求め、
+   * 上限を超える・expectedと違うときは公開せずに止める（FileCopyError）。既に同じパスがあれば、内容が同じときだけ既存として扱う（再送）。
+   * 元のファイルはsymlinkを辿らずに開く。Writerロック内で使う。
+   */
+  async copyFileIn(rel: string, source: string, options: { maxBytes: number; expected?: { bytes: number; sha256: string } }): Promise<{ bytes: number; sha256: string; created: boolean }> {
+    forgetReads(this.config.vaultPath, rel);
+    try { return await this.copyFile(rel, source, options); } finally { forgetReads(this.config.vaultPath, rel); }
+  }
+  private async copyFile(rel: string, source: string, options: { maxBytes: number; expected?: { bytes: number; sha256: string } }): Promise<{ bytes: number; sha256: string; created: boolean }> {
+    const { maxBytes, expected } = options;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('複製の上限が不正です');
+    const input = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let temp: string | undefined;
+    try {
+      const target = await this.path(rel, true);
+      temp = join(dirname(target), `.ctx-tmp-${randomUUID()}`);
+      const info = await input.stat();
+      if (!info.isFile()) throw new FileCopyError('not-file');
+      if (info.size > maxBytes) throw new FileCopyError('too-large');
+      const output = await open(temp, 'wx', 0o600), digest = createHash('sha256'), buffer = Buffer.alloc(1 << 20);
+      let size = 0;
+      try {
+        for (;;) {
+          const { bytesRead } = await input.read(buffer, 0, buffer.length, null);
+          if (!bytesRead) break;
+          size += bytesRead;
+          if (size > maxBytes) throw new FileCopyError('too-large');
+          digest.update(buffer.subarray(0, bytesRead));
+          for (let offset = 0; offset < bytesRead;) offset += (await output.write(buffer, offset, bytesRead - offset)).bytesWritten;
+        }
+        await output.sync();
+      } finally { await output.close(); }
+      const sha256 = digest.digest('hex');
+      if (expected && (expected.bytes !== size || expected.sha256 !== sha256)) throw new FileCopyError('mismatch');
+      await this.path(rel);
+      try { await link(temp, target); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const existing = await fileDigest(target, maxBytes);
+        if (existing?.bytes !== size || existing.sha256 !== sha256) throw new FileCopyError('exists');
+        return { bytes: size, sha256, created: false };
+      }
+      await syncDirectory(dirname(target));
+      return { bytes: size, sha256, created: true };
+    } finally {
+      await input.close();
+      if (temp !== undefined) await unlink(temp).catch(error => { if (!missing(error)) throw error; });
+    }
   }
   async write(rel: string, text: string): Promise<void> { await this.atomic(rel, text, false); }
   async create(rel: string, text: string): Promise<boolean> { return this.atomic(rel, text, true); }

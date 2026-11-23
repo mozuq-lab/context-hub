@@ -57,7 +57,7 @@ test('受付ファイルの続きを受け付け、端末に欄の対応を知�
   const { config } = await workflowSetup(roots);
   await addProject(config, { id: 'hub', title: '集約ツール' });
   const first = await capture(config, { source: 'cli', text: '会議メモ', project: 'hub', occurredAt: at(1) });
-  expect(intakeFeatures(config).capture_fields).toEqual(['happened_on', 'continues', 'reference', 'reference_title']);
+  expect(intakeFeatures(config).capture_fields).toEqual(['happened_on', 'continues', 'reference', 'reference_title', 'attachment']);
   const p = await packet(config, { continues: first.inputId }, '会議メモの続き');
   // 行動に前のメモは付けられない。
   await packet(config, { kind: 'action', project: 'hub', continues: first.inputId }, '行動');

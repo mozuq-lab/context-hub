@@ -4,7 +4,7 @@ export interface HubConfig {
   statePath: string;
   timezone: string;
   policy: { projectRoots: {path:string;projectId:string}[]; /** 採用した方針（判断・好み）を、採用か前回「まだ有効」と確かめてからこの日数でHOMEの見直しに出す。0で出さない。既定90。 */ reviewDays?: number };
-  capture: { maxInputChars: number; allowedSenderIds: string[]; /** 出来事の日付として受け付ける、記録した日からの日数の上限（既定365）。 */ maxBackdateDays?: number };
+  capture: { maxInputChars: number; allowedSenderIds: string[]; /** 出来事の日付として受け付ける、記録した日からの日数の上限（既定365）。 */ maxBackdateDays?: number; /** メモに添えられるファイルの大きさの上限（バイト。既定25MiB、最大200MiB）。 */ maxFileBytes?: number };
   organize: {
     maxItemsPerRun: number; maxAttempts: number; timeoutSec: number; projectThreshold: number; /** 非推奨・未使用。旧設定の互換のため受け付ける。 */ lockStaleSec?: number;
     llm: { provider: 'mock' | 'openclaw-infer'; model: string | null; maxOutputChars: number; executable: string; agent?: string; thinking?: ThinkingLevel };
@@ -51,6 +51,11 @@ export interface CaptureRequest {
   effort?: 'quick' | 'hour' | 'half-day'; contexts?: string[];
   /** メモ・作業要約を資料として保存する（AIの分類に関係なく資料棚に載せる）。referenceTitleは本人が付ける資料の名前。資料の記録（reference-marks）として書く。 */
   reference?: boolean; referenceTitle?: string;
+  /**
+   * メモに添えるファイル（referenceと一緒に使う）。fileは複製する元のファイルの絶対パス、nameはVaultに置く名前。
+   * bytesとsha256は端末が送った値で、あれば複製した内容と比べ、違えば断る。
+   */
+  attachment?: { file: string; name: string; bytes?: number; sha256?: string };
 }
 export interface CaptureResult { inputId: string; deduped: boolean; path: string; receivedAt: string }
 export interface Input {
@@ -61,6 +66,8 @@ export interface Input {
   happened_on?: string; recorded_at?: string;
   /** 本人が「続き」として書いたときの前のメモ（訂正を除いた元の入力）のID。 */
   continues_input_id?: string;
+  /** メモに添えたファイル（Vault内の場所・名前・大きさ・SHA-256）。 */
+  attachment?: { path: string; name: string; bytes: number; sha256: string };
 }
 export interface Project {
   id: string; title: string; aliases: string[]; keywords: string[]; status: string;

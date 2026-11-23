@@ -54,6 +54,12 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
     try { inputs.push(parseInput(path,(await vault.read(path))!)); }
     catch { issues.push(`不正な入力: ${path}`); }
   }} catch { issues.push('入力の走査に失敗しました'); }
+  // メモに添えたファイルが05_filesにあり、大きさが記録と同じか（中身のハッシュは、ファイルが多いと重いため確かめない）。
+  for (const input of inputs) {
+    if (!input.attachment) continue;
+    try { const info = await lstat(await vault.path(input.attachment.path)); if (!info.isFile() || info.size !== input.attachment.bytes) issues.push(`添えたファイルが記録と一致しません: ${input.attachment.path}（${input.id}）`); }
+    catch { issues.push(`添えたファイルがありません: ${input.attachment.path}（${input.id}）`); }
+  }
   // 定義が壊れていると、候補・再関連付けの確認は登録簿を読めずに失敗する。その失敗は定義の不正の結果として示す。
   let definitionsBroken = false;
   try { for (const issue of (await inspectProjects(config)).issues) { definitionsBroken = true; issues.push(`プロジェクト定義が不正です: ${describeProjectIssue(issue)}`); } } catch { definitionsBroken = true; issues.push('プロジェクト定義が不正です'); }

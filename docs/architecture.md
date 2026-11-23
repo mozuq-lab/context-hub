@@ -13,7 +13,9 @@ ContextHubはCapture、Organize、Writer、Retrieveを分けます。coreはOpen
 
 ```text
 Input/                         端末が追加する不変の受付ファイル
+Input/files/<受付ID>            依頼に添えるファイルの写し（受け付けた後に本体が消す）
 00_inbox/                      正式原文・訂正原文
+05_files/<年-月>/<キー>/<名前>    メモに添えたファイル（PDF・画像など。メモのattachmentが指す）
 10_projects/<id>/project.md     プロジェクト定義
 10_projects/<id>/NOW.md         現在地・次の一手・未解決の生成ビュー
 10_projects/<id>/HISTORY.md     月ごとの経緯の生成ビュー

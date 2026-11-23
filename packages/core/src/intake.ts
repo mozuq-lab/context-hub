@@ -39,6 +39,7 @@ import { ACTION_TEXT_CHARS } from './actions.js';
 import { setItemSteps,stepsIdSchema,ItemStepsError,itemStepsMessage,itemStepsRefusalCauses,ITEM_STEPS_MIN,ITEM_STEPS_MAX } from './item-steps.js';
 import { areaSchema,AREA_CHARS,AREA_VOCABULARY_MAX } from './areas.js';
 import { setReferenceMark,ReferenceMarkError,referenceMarkIdSchema,referenceMarkActions,referenceMessage,referenceRefusalCauses,REFERENCE_TITLE_CHARS } from './reference-marks.js';
+import { AttachmentError,attachmentMessage,attachmentRefusalCauses,attachmentTransportPath,ATTACHMENT_TRANSPORT_DIR,FILE_NAME_BYTES,maxFileBytes,transportState } from './attachments.js';
 import type { HubConfig } from './types.js';
 export interface IntakeRunResult { accepted:number; rejected:number; deferred:number; deduped:number; conflicts:string[]; requestIds:string[]; dryRun:boolean }
 const digest=z.string().regex(/^[a-f0-9]{64}$/);
@@ -60,9 +61,10 @@ export const INTAKE_FEATURES_PATH='90_system/intake-features.json';
  * project_areasは、プロジェクトの領域の依頼（project-area、project-createのarea）の領域の文字数の上限と、アプリの好み（client-preferences）でそろえる領域の語彙（areas）の上限。
  * item_contextsは、場所・道具の札の依頼（item-contexts）の上限（1項目の札の数・札の文字数）と、アプリの好み（client-preferences）でそろえる札の語彙（contexts）の上限。
  * referencesは、資料の依頼（reference-mark、captureのreference・reference_title）の資料の名前の文字数の上限。
+ * attachmentsは、メモに添えるファイル（captureのattachment。ファイルはInput/files/<request_id>に置く）の大きさの上限（バイト）とファイル名の上限（UTF-8のバイト数）。
  * item_schedule_fieldsは期日の依頼に添えられる欄（repeatは定例）。item_effortsは手間の目安の依頼（item-effort）で選べる値。askは「記録に聞く」を本人が設定で有効にしているかと、問いの上限の文字数。
  */
-export function intakeFeatures(config:Pick<HubConfig,'capture'|'calendar'|'ask'>){return{schema_version:1 as const,operations:[...operations.options],capture_fields:['happened_on','continues','reference','reference_title'],capture_kinds:['memo','work-summary','action'],action_scopes:[UNASSIGNED_SCOPE],action_moves:true,project_outcome:{max_chars:PROJECT_OUTCOME_CHARS,max_lines:PROJECT_OUTCOME_LINES},item_scopes:[UNASSIGNED_SCOPE],item_record_scopes:[UNASSIGNED_SCOPE],review_rejects:['stale'],item_schedule_fields:['repeat'],item_efforts:[...itemEfforts],action_fields:['effort','contexts'],item_contexts:{max_tags:CONTEXT_TAGS_MAX,max_chars:CONTEXT_TAG_CHARS,vocabulary_max:CONTEXT_VOCABULARY_MAX},project_areas:{max_chars:AREA_CHARS,vocabulary_max:AREA_VOCABULARY_MAX},item_steps:{min:ITEM_STEPS_MIN,max:ITEM_STEPS_MAX,max_chars:ACTION_TEXT_CHARS},someday_review_days:SOMEDAY_REVIEW_DAYS,references:{title_max_chars:REFERENCE_TITLE_CHARS},ask:{enabled:config.ask.enabled,max_question_chars:ASK_QUESTION_CHARS},max_backdate_days:config.capture.maxBackdateDays??DEFAULT_MAX_BACKDATE_DAYS,calendar_titles:config.calendar?.titles??'item'};}
+export function intakeFeatures(config:Pick<HubConfig,'capture'|'calendar'|'ask'>){return{schema_version:1 as const,operations:[...operations.options],capture_fields:['happened_on','continues','reference','reference_title','attachment'],capture_kinds:['memo','work-summary','action'],action_scopes:[UNASSIGNED_SCOPE],action_moves:true,project_outcome:{max_chars:PROJECT_OUTCOME_CHARS,max_lines:PROJECT_OUTCOME_LINES},item_scopes:[UNASSIGNED_SCOPE],item_record_scopes:[UNASSIGNED_SCOPE],review_rejects:['stale'],item_schedule_fields:['repeat'],item_efforts:[...itemEfforts],action_fields:['effort','contexts'],item_contexts:{max_tags:CONTEXT_TAGS_MAX,max_chars:CONTEXT_TAG_CHARS,vocabulary_max:CONTEXT_VOCABULARY_MAX},project_areas:{max_chars:AREA_CHARS,vocabulary_max:AREA_VOCABULARY_MAX},item_steps:{min:ITEM_STEPS_MIN,max:ITEM_STEPS_MAX,max_chars:ACTION_TEXT_CHARS},someday_review_days:SOMEDAY_REVIEW_DAYS,references:{title_max_chars:REFERENCE_TITLE_CHARS},attachments:{max_bytes:maxFileBytes(config),name_max_bytes:FILE_NAME_BYTES},ask:{enabled:config.ask.enabled,max_question_chars:ASK_QUESTION_CHARS},max_backdate_days:config.capture.maxBackdateDays??DEFAULT_MAX_BACKDATE_DAYS,calendar_titles:config.calendar?.titles??'item'};}
 export async function writeIntakeFeaturesLocked(config:Pick<HubConfig,'capture'|'calendar'|'ask'>,vault:Vault):Promise<void>{const raw=JSON.stringify(intakeFeatures(config),null,2)+'\n';if(await vault.read(INTAKE_FEATURES_PATH)!==raw)await vault.write(INTAKE_FEATURES_PATH,raw);}
 const pendingSchema=z.object({schema_version:z.literal(1),request_id:requestIdSchema,request_hash:digest,path:z.string(),raw:z.string()}).strict();
 const intakeReasonSchema=z.discriminatedUnion('code',[
@@ -94,6 +96,7 @@ const intakeReasonSchema=z.discriminatedUnion('code',[
  z.object({code:z.literal('steps-refused'),cause:z.enum(itemStepsRefusalCauses)}).strict(),
  z.object({code:z.literal('organize-retry-refused'),cause:z.enum(organizeRetryRefusalCauses)}).strict(),
  z.object({code:z.literal('reference-refused'),cause:z.enum(referenceRefusalCauses)}).strict(),
+ z.object({code:z.literal('attachment-refused'),cause:z.enum(attachmentRefusalCauses),max_bytes:z.number().int().min(1).optional()}).strict(),
  z.object({code:z.literal('project-merge-refused'),cause:z.enum(['missing','same','already-merged','target-merged','has-sources','not-merged','target-mismatch']),project_id:projectIdSchema.optional()}).strict(),
 ]);
 export const intakeErrorSchema=z.object({schema_version:z.literal(1),path:z.string(),file_hash:z.string(),status:z.enum(['error','conflict']),code:z.string(),updated_at:z.string().datetime({offset:true}),reason:intakeReasonSchema.optional()}).strict();
@@ -127,12 +130,14 @@ export function intakeErrorMessage(record:z.infer<typeof intakeErrorSchema>):str
  if(record.reason?.code==='organize-retry-refused')return organizeRetryMessage(record.reason);
  if(record.reason?.code==='steps-refused')return itemStepsMessage(record.reason);
  if(record.reason?.code==='reference-refused')return referenceMessage(record.reason);
+ if(record.reason?.code==='attachment-refused')return attachmentMessage(record.reason);
  return record.code;
 }
 const ackPath=(id:string)=>`90_system/intake/${id}.json`,pendingPath=(id:string)=>`90_system/intake/pending/${id}.json`;
 export async function intakePaths(vault:Vault):Promise<string[]>{
  let entries;try{entries=await readdir(await vault.path('Input'),{withFileTypes:true});}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return[];throw error;}
- return entries.filter(e=>!e.name.startsWith('.')&&!e.name.endsWith('.tmp')).map(e=>`Input/${e.name}`).sort();
+ // Input/filesは、依頼に添えるファイルを端末が置くフォルダー（依頼の受付で読む）。
+ return entries.filter(e=>!e.name.startsWith('.')&&!e.name.endsWith('.tmp')&&!(e.isDirectory()&&`Input/${e.name}`===ATTACHMENT_TRANSPORT_DIR)).map(e=>`Input/${e.name}`).sort();
 }
 export async function readIntakeReceipts(config:HubConfig){const vault=new Vault(config),result:z.infer<typeof intakeReceiptSchema>[]=[];for(const path of await vault.files('90_system/intake'))if(/^90_system\/intake\/REQ-[A-Za-z0-9]{32}\.json$/.test(path)){const receipt=intakeReceiptSchema.parse(JSON.parse((await vault.read(path))!));if(path!==ackPath(receipt.request_id)||receipt.path!==`Input/${receipt.request_id}.md`)throw new Error('受付記録とパスが一致しません');result.push(receipt);}return result;}
 export function parseIntakePending(path:string,raw:string,max:number){const snapshot=pendingSchema.parse(JSON.parse(raw));const packet=parseIntake(snapshot.path,snapshot.raw,max);if(path!==pendingPath(packet.request_id)||snapshot.request_id!==packet.request_id||snapshot.request_hash!==hash(snapshot.raw))throw new Error('受付の停止回復記録が一致しません');return{snapshot,packet};}
@@ -167,6 +172,11 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   });}
   catch(error){if(!(error instanceof LockTimeoutError))throw error;/* Writerの混雑で片付けられない回は、次の受付で片付ける。 */}
  };
+ // 依頼に添えたファイル（Input/files/<受付ID>）は、受け付けた・理由付きで断った後は要らないため片付ける。
+ // 片付けられない回（Writerの混雑・フォルダーの異常）は、次の受付で片付ける（受付の結果は変えない）。
+ const dropTransport=async(id:string)=>{if(options.dryRun)return;try{await vault.withLock(()=>vault.remove(attachmentTransportPath(id)));}catch{/* 次の受付で片付ける。 */}};
+ // 今の内容への理由付きの拒否の記録があるか（同じ内容で送り直しても結果は変わらない）。
+ const refused=async(path:string,requestHash:string)=>{const raw=await vault.read(`90_system/intake-errors/${hash(path)}.json`);if(raw===undefined)return false;try{const error=intakeErrorSchema.parse(JSON.parse(raw));return error.file_hash===requestHash&&isIntakeRefusal(error);}catch{return false;}};
  const done=new Set<string>();
  for(const path of await intakePaths(vault)){
   if(path.includes('.sync-conflict-')){await problem(path,'sync-conflict','conflict','同期の競合コピーです。通常受付から除外しました');continue;}
@@ -179,6 +189,9 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    const id=path.slice('Input/'.length,-'.md'.length);if(await acked(id,path,hash(raw))){done.add(id);outcome.deduped++;continue;}
    const packet=parseIntake(path,raw,config.capture.maxInputChars),again=await vault.readBytes(path,maxBytes);
    if(!again||hash(decodeIntake(again))!==hash(raw)){outcome.deferred++;continue;}
+   // ファイルを添えた依頼は、端末が置いたファイルが届いて大きさがそろうまで保留する（届く前に受け付けて断らない）。
+   // 理由付きで断った依頼は、ファイルを片付けた後も断ったままにする（保留に戻さない）。
+   if(packet.operation==='capture'&&packet.attachment&&!await refused(path,hash(raw))&&await transportState(await vault.path(attachmentTransportPath(packet.request_id)),packet.attachment.bytes)==='waiting'){outcome.deferred++;continue;}
    work.set(packet.request_id,{packet,raw,path,recovery:false});
   }catch{await problem(path,raw===undefined?'unreadable':hash(raw),'error','受付形式・容量・UTF-8・パスを確認してください');}
  }
@@ -202,7 +215,7 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
   let permanent=false;
   if(raw)try{const error=intakeErrorSchema.parse(JSON.parse(raw));if(error.file_hash===hash(item.raw)&&error.status==='error'){failedAt=Date.parse(error.updated_at);permanent=error.reason!==undefined;}}catch{ /* 不正な記録は通常受付で検証・報告する。 */ }
   // 理由付きの拒否（古い訂正対象・既にあるプロジェクトなど）は、同じ内容で再実行しても同じ結果になる。内容が変われば再び受け付ける。
-  if(permanent){outcome.deduped++;await dropPending(item.packet.request_id,item.path,hash(item.raw));continue;}
+  if(permanent){outcome.deduped++;await dropPending(item.packet.request_id,item.path,hash(item.raw));if(item.packet.operation==='capture'&&item.packet.attachment)await dropTransport(item.packet.request_id);continue;}
   ordered.push({...item,failedAt});
  }
  // 未試行を先に受け付け、失敗の再試行は古い試行から順に回す。
@@ -223,12 +236,12 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
    if(options.dryRun)continue;
    let result:z.infer<typeof intakeReceiptSchema>['result'];
    if(packet.operation==='capture'){
-    result=await capture(config,{source:packet.source,sourceEventId:id,text:packet.text,kind:packet.kind,occurredAt:packet.occurred_at,project:packet.project,tool:packet.tool,meta:packet.meta,happenedOn:packet.happened_on,...(packet.continues!==undefined?{continues:packet.continues}:{}),...(packet.effort!==undefined?{effort:packet.effort}:{}),...(packet.contexts!==undefined?{contexts:packet.contexts}:{}),...(packet.reference?{reference:true}:{}),...(packet.reference_title!==undefined?{referenceTitle:packet.reference_title}:{})});
+    result=await capture(config,{source:packet.source,sourceEventId:id,text:packet.text,kind:packet.kind,occurredAt:packet.occurred_at,project:packet.project,tool:packet.tool,meta:packet.meta,happenedOn:packet.happened_on,...(packet.continues!==undefined?{continues:packet.continues}:{}),...(packet.effort!==undefined?{effort:packet.effort}:{}),...(packet.contexts!==undefined?{contexts:packet.contexts}:{}),...(packet.reference?{reference:true}:{}),...(packet.reference_title!==undefined?{referenceTitle:packet.reference_title}:{}),...(packet.attachment?{attachment:{file:await vault.path(attachmentTransportPath(id)),name:packet.attachment.name,bytes:packet.attachment.bytes,sha256:packet.attachment.sha256}}:{})});
     // 保存された原文1件だけを読み、依頼と一致するかを確かめる。
     const inputId=result.inputId,stored=await vault.read(result.path),saved=stored===undefined?undefined:parseInput(result.path,stored);if(saved&&saved.id!==inputId)throw new Error('event-conflict');
     // 出来事の日付を付けた原文は、occurred_atがその日の正午になり、送った日時はrecorded_atに残る。
     // 続きの原文は、前のメモが見つからなければつながず、プロジェクトを省いた続きは前のメモのプロジェクトを引き継ぐ。
-    if(!saved||saved.text!==packet.text||saved.kind!==packet.kind||(saved.recorded_at??saved.occurred_at)!==packet.occurred_at||saved.happened_on!==effectiveHappenedOn(packet.happened_on,packet.occurred_at,config.timezone)||(saved.continues_input_id!==undefined&&packet.continues===undefined)||(saved.project!==packet.project&&!(packet.project===undefined&&saved.continues_input_id!==undefined))||saved.tool!==packet.tool||!isDeepStrictEqual(saved.meta,packet.meta))throw new Error('event-conflict');
+    if(!saved||saved.text!==packet.text||saved.kind!==packet.kind||(saved.recorded_at??saved.occurred_at)!==packet.occurred_at||saved.happened_on!==effectiveHappenedOn(packet.happened_on,packet.occurred_at,config.timezone)||(saved.continues_input_id!==undefined&&packet.continues===undefined)||(saved.project!==packet.project&&!(packet.project===undefined&&saved.continues_input_id!==undefined))||saved.tool!==packet.tool||!isDeepStrictEqual(saved.meta,packet.meta)||(packet.attachment?saved.attachment?.name!==packet.attachment.name||saved.attachment.bytes!==packet.attachment.bytes||saved.attachment.sha256!==packet.attachment.sha256:saved.attachment!==undefined))throw new Error('event-conflict');
    }else if(packet.operation==='correct')result=await correctInput(config,packet.target_id,{source:packet.source,sourceEventId:id,text:packet.text,occurredAt:packet.occurred_at});
    else if(packet.operation==='knowledge-retire')result=await retireKnowledge(config,packet.target_id,packet.target_hash);
    else if(packet.operation==='knowledge-approve')result=await approve(config,packet.candidate_id,packet.candidate_hash,packet.scope==='global'?{scope:'global'}:{scope:'project',projectId:packet.project_id,projectHash:packet.project_hash});
@@ -268,16 +281,23 @@ export async function ingest(config:HubConfig,options:{limit?:number;dryRun?:boo
     const existing=intakeReceiptSchema.parse(JSON.parse((await vault.read(ackPath(id)))!));if(existing.request_hash!==requestHash)throw new Error('conflict');await vault.remove(pendingPath(id));return false;
    });
    if(accepted)outcome.accepted++;else outcome.deduped++;
+   if(packet.operation==='capture'&&packet.attachment)await dropTransport(id);
   }catch(error){
    // Writerの混雑でロックを取れなかった回は、依頼の誤りではないため記録せず保留にする（停止回復記録があれば次回に続ける）。
    if(error instanceof LockTimeoutError){outcome.deferred++;continue;}
    // NOWの項目の状態による拒否は、codeにも本人向けの文を入れる（理由を知らない版のアプリはcodeをそのまま示すため）。
    const conflict=error instanceof Error&&(error.message==='conflict'||error.message==='event-conflict');
-   const reason=error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof InsightReactionError||error instanceof HappenedOnError||error instanceof PolicyReviewError||error instanceof ProjectMergeError||error instanceof ProjectMergedError||error instanceof ItemTargetError||error instanceof OccurrenceError||error instanceof PreferencesError||error instanceof AskError||error instanceof PersonDefinitionError||error instanceof SomedayError||error instanceof OrganizeRetryError||error instanceof ItemStepsError||error instanceof ReferenceMarkError?error.reason:undefined;
-   await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':error instanceof ItemTargetError?itemTargetMessage(error.reason):error instanceof PersonDefinitionError?personReasonMessage(error.reason):error instanceof OccurrenceError?occurrenceMessage(error.reason):error instanceof PreferencesError?preferencesMessage(error.reason):error instanceof AskError?askReasonMessage(error.reason):error instanceof HappenedOnError||error instanceof PolicyReviewError||error instanceof SomedayError||error instanceof OrganizeRetryError||error instanceof ItemStepsError||error instanceof ReferenceMarkError?error.message:'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,reason);
+   const reason=error instanceof CorrectionTargetError||error instanceof ProjectCreateError||error instanceof ConflictResolveError||error instanceof IdeaLinkError||error instanceof InsightReactionError||error instanceof HappenedOnError||error instanceof PolicyReviewError||error instanceof ProjectMergeError||error instanceof ProjectMergedError||error instanceof ItemTargetError||error instanceof OccurrenceError||error instanceof PreferencesError||error instanceof AskError||error instanceof PersonDefinitionError||error instanceof SomedayError||error instanceof OrganizeRetryError||error instanceof ItemStepsError||error instanceof ReferenceMarkError||error instanceof AttachmentError?error.reason:undefined;
+   await problem(path,requestHash,conflict?'conflict':'error',conflict?'同じ受付IDの内容またはイベントが一致しません':error instanceof ItemTargetError?itemTargetMessage(error.reason):error instanceof PersonDefinitionError?personReasonMessage(error.reason):error instanceof OccurrenceError?occurrenceMessage(error.reason):error instanceof PreferencesError?preferencesMessage(error.reason):error instanceof AskError?askReasonMessage(error.reason):error instanceof HappenedOnError||error instanceof PolicyReviewError||error instanceof SomedayError||error instanceof OrganizeRetryError||error instanceof ItemStepsError||error instanceof ReferenceMarkError||error instanceof AttachmentError?error.message:'受付操作が未完了です。対象・確認情報・停止回復をdoctorで確認してください',attempted,reason);
    // 理由付きの拒否は同じ内容では結果が変わらず、停止回復も要らない。停止回復記録を残すと「回復待ち」がdoctorに残り続けるため片付ける。
-   if(reason&&!conflict)await dropPending(id,path,requestHash);
+   if(reason&&!conflict){await dropPending(id,path,requestHash);if(packet.operation==='capture'&&packet.attachment)await dropTransport(id);}
   }
+ }
+ // 受領記録がある依頼のファイルが残っていれば片付ける（受領の直後に停止した場合など）。
+ if(!options.dryRun){
+  let names:string[]=[];
+  try{names=await readdir(await vault.path(ATTACHMENT_TRANSPORT_DIR));}catch{/* フォルダーがない・読めないときは片付けない。 */}
+  for(const name of names)if(requestIdSchema.safeParse(name).success&&await vault.read(ackPath(name))!==undefined)await dropTransport(name);
  }
  return outcome;
 }
