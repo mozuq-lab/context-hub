@@ -13,11 +13,13 @@ ContextHubはCapture、Organize、Writer、Retrieveを分けます。coreはOpen
 
 ```text
 Input/                         端末が追加する不変の受付ファイル
+Input/files/<受付ID>            依頼に添えるファイルの写し（受け付けた後に本体が消す）
 00_inbox/                      正式原文・訂正原文
+05_files/<年-月>/<キー>/<名前>    メモに添えたファイル（PDF・画像など。メモのattachmentが指す）
 10_projects/<id>/project.md     プロジェクト定義
 10_projects/<id>/NOW.md         現在地・次の一手・未解決の生成ビュー
 10_projects/<id>/HISTORY.md     月ごとの経緯の生成ビュー
-10_projects/<id>/REFERENCES.md  参考資料に分類されたメモとURLの生成ビュー（資料があるプロジェクトだけ）
+10_projects/<id>/REFERENCES.md  本人が資料にしたメモ・参考資料に分類されたメモとURLの生成ビュー（資料があるプロジェクトだけ）
 20_ideas/                      AI整理済みアイデア
 30_knowledge/                  共通へ採用した正式知識・方針
 40_people/<id>/person.md        本人が登録した人の定義（名前・呼び名）
@@ -46,6 +48,8 @@ POLICY.md                      共通の有効方針（派生集約）
 90_system/someday-reviews/     アイデアを「いつかやる」に置く・見直す・外す、休止中のプロジェクトを見直した記録
 90_system/someday.json         「いつかやる」の一覧（派生。アプリが読む）
 90_system/weekly-reviews/      本人が週次レビューを終えた（見直した）記録
+90_system/reference-marks/     本人が資料棚に加えた・外した記録（資料の名前を含む）
+90_system/references.json      資料棚に載る資料と本人が外した資料の一覧（派生。アプリが読む）
 90_system/weekly-review.json   週次レビューの点検の一覧（派生。アプリが読む）
 90_system/answers/             記録に聞くの問いと答え（30日で片付ける）
 90_system/client-preferences.json アプリの好み（ピン留め・ひな形・文脈かごの上限・場所・道具の札の語彙）を端末間でそろえる共有の記録
@@ -69,7 +73,7 @@ _ContextHub/                   共有する入力ツールとテンプレート
 - 前のメモが見つからない（同期が遅れて届いていない、行動を指しているなど）ときは、本文を失わないよう、つながない普通のメモとして保存します。メモと作業要約にだけ付けられ、行動には付けられません。
 - 束ねた資料（`bundle`）では「前のメモの続き」としてリンクを示します。
 
-HOMEを作るたびに`90_system/intake-features.json`へ、受け付ける依頼の種類（`operations`）、メモに付けられる項目（`capture_fields`。`happened_on`は出来事の日付、`continues`は続き）、送れる入力の種類（`capture_kinds`。`action`は本人が次の一手に直接足す行動）、プロジェクトを指定せずに行動を足せる置き場（`action_scopes`。`_unassigned`はプロジェクト未定の次の一手）、本人が追加した行動を別の置き場へ移せるか（`action_moves`）、プロジェクトの望む結果を送れるかとその上限（`project_outcome`。`max_chars`・`max_lines`）、出来事の日付をさかのぼれる日数（`max_backdate_days`）、期日のカレンダーの件名の設定（`calendar_titles`）、期日の依頼に添えられる欄（`item_schedule_fields`。`repeat`は定例）、手間の目安の依頼で選べる値（`item_efforts`）、行動の追加に添えて付けられる欄（`action_fields`。`effort`は手間の目安、`contexts`は場所・道具の札）、場所・道具の札の上限と、アプリの好みでそろえる札の語彙の上限（`item_contexts`。`max_tags`・`max_chars`・`vocabulary_max`）、次の一手の手順の数の下限・上限と1つの文字数（`item_steps`。`min`・`max`・`max_chars`）、プロジェクトの領域の文字数と、アプリの好みでそろえる領域の語彙の上限（`project_areas`。`max_chars`・`vocabulary_max`）、「いつかやる」で見直していないとみなす日数（`someday_review_days`）、完了・却下を受け付けるプロジェクト以外の置き場（`item_scopes`。`_unassigned`はプロジェクト未定の次の一手）、期日・定例の回・手間の目安・場所・道具の札・連絡待ち・「いつかやる」・手順を受け付けるプロジェクト以外の置き場（`item_record_scopes`。`_unassigned`はプロジェクト未定の本人が追加した行動）、確認待ち以外で却下を受け付ける候補の状態（`review_rejects`。`stale`は古くなった候補）、「記録に聞く」が有効かと問いの上限の文字数（`ask`）を書きます。端末はこれを読んで、古い本体が受け付けない依頼を出さず、本体の設定に合わせます。
+HOMEを作るたびに`90_system/intake-features.json`へ、受け付ける依頼の種類（`operations`）、メモに付けられる項目（`capture_fields`。`happened_on`は出来事の日付、`continues`は続き、`reference`・`reference_title`は資料として保存と資料の名前）、送れる入力の種類（`capture_kinds`。`action`は本人が次の一手に直接足す行動）、プロジェクトを指定せずに行動を足せる置き場（`action_scopes`。`_unassigned`はプロジェクト未定の次の一手）、本人が追加した行動を別の置き場へ移せるか（`action_moves`）、プロジェクトの望む結果を送れるかとその上限（`project_outcome`。`max_chars`・`max_lines`）、出来事の日付をさかのぼれる日数（`max_backdate_days`）、期日のカレンダーの件名の設定（`calendar_titles`）、期日の依頼に添えられる欄（`item_schedule_fields`。`repeat`は定例）、手間の目安の依頼で選べる値（`item_efforts`）、行動の追加に添えて付けられる欄（`action_fields`。`effort`は手間の目安、`contexts`は場所・道具の札）、場所・道具の札の上限と、アプリの好みでそろえる札の語彙の上限（`item_contexts`。`max_tags`・`max_chars`・`vocabulary_max`）、次の一手の手順の数の下限・上限と1つの文字数（`item_steps`。`min`・`max`・`max_chars`）、プロジェクトの領域の文字数と、アプリの好みでそろえる領域の語彙の上限（`project_areas`。`max_chars`・`vocabulary_max`）、「いつかやる」で見直していないとみなす日数（`someday_review_days`）、資料の名前の文字数の上限（`references`。`title_max_chars`）、完了・却下を受け付けるプロジェクト以外の置き場（`item_scopes`。`_unassigned`はプロジェクト未定の次の一手）、期日・定例の回・手間の目安・場所・道具の札・連絡待ち・「いつかやる」・手順を受け付けるプロジェクト以外の置き場（`item_record_scopes`。`_unassigned`はプロジェクト未定の本人が追加した行動）、確認待ち以外で却下を受け付ける候補の状態（`review_rejects`。`stale`は古くなった候補）、「記録に聞く」が有効かと問いの上限の文字数（`ask`）を書きます。端末はこれを読んで、古い本体が受け付けない依頼を出さず、本体の設定に合わせます。
 
 モデルは保存先やIDを決めません。結果はスキーマで検証し、出典・日時・未検証表示を維持します。分類不能のunclassifiedは正常な結果であり、処理成功と内容の確認済みは別です。
 

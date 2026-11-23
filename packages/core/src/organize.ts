@@ -21,6 +21,7 @@ import { completeRedacted, redactText, secretSettings } from './secrets.js';
 import { shortMemoText } from './short-memo.js';
 import { evidenceBound } from './happened.js';
 import { pendingOrganizeRetries, readOrganizeRetries } from './organize-retries.js';
+import { effectiveReferenceMarks, readReferenceMarks } from './reference-marks.js';
 
 export interface OrganizeOptions { limit?: number; dryRun?: boolean; retryFailed?: boolean; id?: string }
 export interface OrganizeRunResult { processed: number; failed: number; skipped: number; conflicts: string[]; dryRun: boolean; inputIds: string[]; recovered?:number; reassociated?:number; /** 本人が誤りとして外した項目の入力を読み直した件数。 */ reread?:number }
@@ -166,7 +167,7 @@ async function loadState(config: HubConfig): Promise<OrganizeState> {
   return { chains, inputs: chains.flatMap(c => [c.root, ...c.revisions]), receipts, byId: new Map(receipts.map((receipt) => [receipt.input_id, receipt])), projects: await readProjects(config) };
 }
 /** ロック内で確定した整理対象。新規はロック外でモデルを呼び、journalがあれば呼ばずに確定する。 */
-interface OrganizePlan { chain: CorrectionChain; input: Input; projects: Project[]; registry: string; receipt: Receipt; resumed: boolean; policyText: string; policyRevision?: string; openItems: OpenItemRef[]; excluded: ExclusionContext; previous?: PreviousMemoRef }
+interface OrganizePlan { chain: CorrectionChain; input: Input; projects: Project[]; registry: string; receipt: Receipt; resumed: boolean; policyText: string; policyRevision?: string; openItems: OpenItemRef[]; excluded: ExclusionContext; previous?: PreviousMemoRef; /** 本人が資料棚に加えているメモ。分類を資料（reference）にする。 */ reference?: boolean }
 /**
  * 本人の「誤りとして外す」記録から、この入力の整理でモデルへ渡す資料を選ぶ。記録を読めないときは資料なしで整理を続ける。
  * 処理記録は書き換えられないので、「別のプロジェクトの話」として外したプロジェクトも帰属候補から除かずに記録する
@@ -250,13 +251,18 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         const policies = await readPolicies(config,resolveProject(projects,chain.root.project));
         // 外した項目の例は補助なので、記録が壊れていても整理は止めない（壊れた記録はNOWの作り直しとdoctorで示す）。
         let overlays: ExclusionOverlays | undefined; try { overlays = await readExclusionOverlays(vault); } catch { overlays = undefined; }
-        return { chain, input, projects, registry, receipt, resumed: false, policyText: formatPolicies(policies), policyRevision: policies.revision, openItems: await openItemsFor(vault, chain, projects, inputs), excluded: exclusionContext(overlays, chain, projects), previous: previousMemoFor(config, chains, chain) };
+        // 本人が資料にしたメモ（整理の時点で資料棚に加えている）は、アイデアのファイルとプロジェクト案を作らない。
+        // 整理の記録にはAIの読み取りをそのまま残し、タスク・問い・提案の行は読むときに外す（外せば元に戻る）。記録を読めないときは分類のまま（doctorで示す）。
+        let reference = false; try { reference = effectiveReferenceMarks((await readReferenceMarks(vault)).records).get(chain.root.id)?.action === 'add'; } catch { reference = false; }
+        return { chain, input, projects, registry, receipt, resumed: false, policyText: formatPolicies(policies), policyRevision: policies.revision, openItems: await openItemsFor(vault, chain, projects, inputs), excluded: exclusionContext(overlays, chain, projects), previous: previousMemoFor(config, chains, chain), reference };
       });
       if (!plan) { outcome.skipped++; continue; }
       const { input, receipt } = plan;
       // writerロックの外でモデルを呼ぶ。実行側が報告したモデル名を記録し、報告がなければ設定値、それもなければ未検証の継承を明示する。
       if (!plan.resumed) {
-        try { const classified = await classify(config, llm, input, plan.projects, plan.chain, plan.policyText, plan.openItems, plan.excluded, plan.previous); receipt.result = classified.result; if (classified.model) receipt.llm.model = classified.model; }
+        try {
+          const classified = await classify(config, llm, input, plan.projects, plan.chain, plan.policyText, plan.openItems, plan.excluded, plan.previous); receipt.result = classified.result; if (classified.model) receipt.llm.model = classified.model;
+        }
         catch (error) { receipt.status = 'failed'; receipt.error = error instanceof InvalidOrganizeOutput ? 'invalid-output' : error instanceof LlmTimeout ? 'timeout' : error instanceof PromptTooLargeError ? 'prompt-too-large' : 'llm-error'; }
       }
       const committed = await vault.withLock(async (): Promise<boolean> => {
@@ -282,8 +288,8 @@ export async function organize(config: HubConfig, llm: LlmClient, options: Organ
         const now = receipt.organized_at;
         const meta = { schema_version: 1, generated_by: { model: receipt.llm.model, prompt_version: 1 }, generated_at: now, input_ids: [chain.root,...chain.revisions].map(i=>i.id), source: chain.root.source, occurred_at: chain.root.occurred_at, origin: chain.root.origin, verified: false };
         const recordWrite = (write: { path: string; conflict?: string }): void => { receipt.writes.push(write.conflict ?? write.path); if (write.conflict) outcome.conflicts.push(write.conflict); };
-        const projectCandidate=await saveProjectCandidateLocked(config,vault,chain,receipt);if(projectCandidate)receipt.writes.push(projectCandidate);
-        if (result.category === 'idea') {
+        const projectCandidate=plan.reference?undefined:await saveProjectCandidateLocked(config,vault,chain,receipt);if(projectCandidate)receipt.writes.push(projectCandidate);
+        if (result.category === 'idea' && !plan.reference) {
           const id = `IDEA-${chain.root.id.slice(3)}`;
           const text = `# アイデア（AI生成・未検証）\n\n${result.summary}\n\n${evidenceText(input, config, '../')}\n帰属候補: ${result.project_candidates.map((candidate) => `${candidate.id} (${candidate.confidence})`).join(', ') || 'なし'}\n`;
           recordWrite(await writeGeneratedLocked(vault, `20_ideas/${id}.md`, generatedMarkdown({ ...meta, id, category: 'idea', project_candidates: result.project_candidates }, text)));

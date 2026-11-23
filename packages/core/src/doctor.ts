@@ -8,7 +8,7 @@ import { readProjects,inspectProjects,describeProjectIssue,mergeIssues,normalize
 import { readProjectMerges } from './project-merges.js';
 import { readEffectiveInputs } from './effective-inputs.js';
 import { listProjectCandidates,readProjectCoverage,recoverProjectApprovalsLocked } from './project-proposals.js';
-import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths,isIntakeRefusal,refusalNoticeVisible } from './intake.js';
+import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths,isIntakeRefusal,refusalNoticeVisible,attachmentTransportNotices } from './intake.js';
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
 import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
@@ -34,6 +34,7 @@ import { readProjectCreations } from './project-creations.js';
 import { readProjectDefinitionChanges } from './project-definition.js';
 import { historyStopped } from './history.js';
 import { referencesStopped } from './references.js';
+import { readReferenceMarks } from './reference-marks.js';
 import { inspectPeople, readPersonChanges, stoppedPeoplePages } from './people.js';
 import type { HubConfig, Input } from './types.js';
 import { readIdeaLinks } from './idea-links.js';
@@ -53,6 +54,12 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
     try { inputs.push(parseInput(path,(await vault.read(path))!)); }
     catch { issues.push(`不正な入力: ${path}`); }
   }} catch { issues.push('入力の走査に失敗しました'); }
+  // メモに添えたファイルが05_filesにあり、大きさが記録と同じか（中身のハッシュは、ファイルが多いと重いため確かめない）。
+  for (const input of inputs) {
+    if (!input.attachment) continue;
+    try { const info = await lstat(await vault.path(input.attachment.path)); if (!info.isFile() || info.size !== input.attachment.bytes) issues.push(`添えたファイルが記録と一致しません: ${input.attachment.path}（${input.id}）`); }
+    catch { issues.push(`添えたファイルがありません: ${input.attachment.path}（${input.id}）`); }
+  }
   // 定義が壊れていると、候補・再関連付けの確認は登録簿を読めずに失敗する。その失敗は定義の不正の結果として示す。
   let definitionsBroken = false;
   try { for (const issue of (await inspectProjects(config)).issues) { definitionsBroken = true; issues.push(`プロジェクト定義が不正です: ${describeProjectIssue(issue)}`); } } catch { definitionsBroken = true; issues.push('プロジェクト定義が不正です'); }
@@ -77,6 +84,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { for (const path of (await readItemContexts(vault)).problems) issues.push(`場所・道具の札の記録が不正です: ${path}`); } catch { issues.push('場所・道具の札の記録を走査できません'); }
   try { for (const path of (await readItemWaits(vault)).problems) issues.push(`連絡待ちの記録が不正です: ${path}`); } catch { issues.push('連絡待ちの記録を走査できません'); }
   try { for (const path of [...(await readItemSomedays(vault)).problems, ...(await readSomedayReviews(vault)).problems]) issues.push(`「いつかやる」の記録が不正です: ${path}`); } catch { issues.push('「いつかやる」の記録を走査できません'); }
+  try { for (const path of (await readReferenceMarks(vault)).problems) issues.push(`資料の記録が不正です: ${path}`); } catch { issues.push('資料の記録を走査できません'); }
   try { for (const path of (await readWeeklyReviews(vault)).problems) issues.push(`週次レビューの記録が不正です: ${path}`); } catch { issues.push('週次レビューの記録を走査できません'); }
   try { for (const path of (await readItemOccurrences(vault)).problems) issues.push(`定例の回の記録が不正です: ${path}`); } catch { issues.push('定例の回の記録を走査できません'); }
   try { for (const path of (await readAskRecords(vault)).problems) issues.push(`記録に聞くの問いと答えの記録が不正です: ${path}`); } catch { issues.push('記録に聞くの問いと答えの記録を走査できません'); }
@@ -146,7 +154,9 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   }catch{issues.push(`生成物走査失敗: ${dir}`);}
   try{const paths=await knowledgePaths(vault);for(const path of paths){const id=path.split('/').at(-1)!.slice(0,-3);const record=await readKnowledge(vault,id,paths);if(!record||!isGeneratedIntact(record.raw))issues.push(`知識の整合性不正: ${path}`);}}catch{issues.push('知識の採用先・保存先・ID重複が不正です');}
   // 見つからない作業フォルダーの対応付けは、外付けを外しただけでも起こり、方針の読取も止めないため、異常（issues）ではなく注意に示す。
-  const notices=[...await policyRootProblems(config),...refusals];
+  // 添えたファイルの受け渡しの注意（届かない依頼・依頼のないファイル・一時ファイル）。Vaultの異常ではないため注意に示す。
+  let transport:string[]=[];try{transport=await attachmentTransportNotices(config);}catch{transport=['添えたファイルの受け渡しを確かめられません'];}
+  const notices=[...await policyRootProblems(config),...refusals,...transport];
   try{await readPolicies(config);}catch{issues.push(definitionsBroken?afterDefinitions('方針の同期・集約を確認できません'):'方針manifest・正本・停止記録の同期または集約が未完了です');}
   try{await readIdeaLinks(vault);}catch(error){issues.push(error instanceof Error?error.message:'アイデアの束ねの記録が不正です');}
   try {const home=await vault.read('HOME.md');if(home!==undefined&&!isGeneratedIntact(home))issues.push('HOMEの手動変更・形式不正');}catch{issues.push('HOME読み取り失敗');}

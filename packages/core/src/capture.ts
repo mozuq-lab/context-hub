@@ -1,11 +1,12 @@
 import { ulid } from 'ulid';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { logOperation } from './logger.js';
 import { z } from 'zod';
-import { Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
+import { FileCopyError, Vault, hash, markdown, parseMarkdown, readOncePerLock } from './storage.js';
 import { readProjects, projectIdSchema, assertNotMerged, resolveProject } from './projects.js';
 import { actionSource, actionTextSchema, assertActionMeta } from './actions.js';
+import { AttachmentError, assertFileNameSafe, attachmentPath, attachmentSchema, fileNameSchema, maxFileBytes } from './attachments.js';
 import { DEFAULT_MAX_BACKDATE_DAYS, HappenedOnError, calendarDateSchema, effectiveHappenedOn, happenedOnProblem, localNoon } from './happened.js';
 import type { CaptureRequest, CaptureResult, HubConfig, Input } from './types.js';
 export const inputIdSchema = z.string().regex(/^IN-[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -18,6 +19,8 @@ export const inputSchema = z.object({ schema_version: z.literal(1), id: inputIdS
   happened_on: calendarDateSchema.optional(), recorded_at: timestamp.optional(),
   // 本人が「続き」として書いたときの前のメモ（訂正を除いた元の入力のID）。メモと作業要約にだけ付く。
   continues_input_id: inputIdSchema.optional(),
+  // 本人がメモに添えたファイル（Vault内の場所・名前・大きさ・SHA-256）。メモにだけ付く（attachments.ts）。
+  attachment: attachmentSchema.optional(),
 }).strict();
 export function parseInput(path: string, content: string): Input {
   const { meta, text } = parseMarkdown(content);
@@ -25,6 +28,7 @@ export function parseInput(path: string, content: string): Input {
   if ((input.kind === 'correction') !== (input.corrects_input_id !== undefined)) throw new Error('訂正の参照と種別が一致しません');
   if ((input.happened_on === undefined) !== (input.recorded_at === undefined) || (input.happened_on !== undefined && input.kind === 'correction')) throw new Error('出来事の日付と記録日時が一致しません');
   if (input.continues_input_id !== undefined && ((input.kind !== 'memo' && input.kind !== 'work-summary') || input.continues_input_id === input.id)) throw new Error('続きの参照と種別が一致しません');
+  if (input.attachment !== undefined && input.kind !== 'memo') throw new Error('ファイルを添えられるのはメモだけです');
   if (!path.endsWith(`_${input.id}.md`)) throw new Error('入力IDとファイル名が一致しません');
   return input;
 }
@@ -93,6 +97,27 @@ async function continuationTarget(vault: Vault, inbox: string[], id: string): Pr
   }
   return undefined;
 }
+/**
+ * 添えるファイルをVaultの05_filesへ複製する。原文より先に置き、置き場所は出典と受付IDで決まるため、
+ * 原文の保存前に止まっても同じ依頼の再送で同じ場所を使う（内容が同じなら置き直さない）。
+ * 大きさの上限とファイル名の秘密情報らしい文字列は、再送の判定の後で確かめる（保存済みのメモの再送を、後から変えた設定で断らない）。
+ */
+async function copyAttachmentLocked(config: HubConfig, vault: Vault, attachment: NonNullable<CaptureRequest['attachment']>, source: string, eventId: string, month: string): Promise<NonNullable<Input['attachment']>> {
+  const max = maxFileBytes(config), expected = attachment.bytes !== undefined && attachment.sha256 !== undefined ? { bytes: attachment.bytes, sha256: attachment.sha256 } : undefined;
+  if (attachment.bytes !== undefined && attachment.bytes > max) throw new AttachmentError({ code: 'attachment-refused', cause: 'too-large', max_bytes: max });
+  assertFileNameSafe(config, attachment.name);
+  const rel = attachmentPath(source, eventId, month, attachment.name);
+  try {
+    const copied = await vault.copyFileIn(rel, attachment.file, { maxBytes: max, ...(expected ? { expected } : {}) });
+    return { path: rel, name: attachment.name, bytes: copied.bytes, sha256: copied.sha256 };
+  } catch (error) {
+    if (error instanceof FileCopyError && error.code === 'too-large') throw new AttachmentError({ code: 'attachment-refused', cause: 'too-large', max_bytes: max });
+    if (error instanceof FileCopyError && error.code === 'mismatch') throw new AttachmentError({ code: 'attachment-refused', cause: 'mismatch' });
+    if (error instanceof FileCopyError && error.code === 'not-file') throw new Error('添えるファイルが通常のファイルではありません');
+    if (error instanceof FileCopyError && error.code === 'exists') throw new Error('添えるファイルの置き場所に別の内容があります。doctorで確認してください');
+    throw error;
+  }
+}
 /** Writerロックを持つ呼び出し元から使う原文保存。同じ出典・イベントIDの再送では既存の入力を返す。 */
 export async function captureLocked(config: HubConfig, vault: Vault, request: CaptureRequest): Promise<CaptureResult> {
   if (!request.text?.trim() || request.text.length > config.capture.maxInputChars) throw new Error('本文が空か文字数上限を超えています');
@@ -108,6 +133,20 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     const tags = actionTagsSchema.safeParse({ effort: request.effort, contexts: request.contexts });
     if (!tags.success) throw new Error(tags.error.issues[0]?.message ?? '手間の目安か札が不正です');
   } else if (request.effort !== undefined || request.contexts !== undefined) throw new Error('手間の目安と札は行動にだけ付けられます');
+  if (request.reference !== undefined || request.referenceTitle !== undefined) {
+    if (request.kind === 'action') throw new Error('行動は資料として保存できません');
+    if (request.reference !== true) throw new Error('資料の名前は資料として保存するときだけ付けられます');
+    // reference-marks.tsはこのファイルを読むため、循環を避けて遅延読込する。
+    if (request.referenceTitle !== undefined) { const { referenceTitleSchema, assertReferenceTitleSafe } = await import('./reference-marks.js'); const title = referenceTitleSchema.safeParse(request.referenceTitle); if (!title.success) throw new Error(title.error.issues[0]?.message ?? '資料の名前が不正です'); assertReferenceTitleSafe(config, title.data); }
+  }
+  if (request.attachment !== undefined) {
+    // ファイルを添えたメモは資料として保存する。元のファイルの場所は呼び出し側（CLI・受付）が決める。
+    if ((request.kind ?? 'memo') !== 'memo') throw new Error('ファイルを添えられるのはメモだけです');
+    if (request.reference !== true) throw new Error('ファイルを添えたメモは資料として保存します（referenceが必要です）');
+    const name = fileNameSchema.safeParse(request.attachment.name);
+    if (!name.success) throw new Error(name.error.issues[0]?.message ?? 'ファイル名が不正です');
+    if (!isAbsolute(request.attachment.file)) throw new Error('添えるファイルは絶対パスで指定してください');
+  }
   if (request.happenedOn !== undefined) calendarDateSchema.parse(request.happenedOn);
   if (request.continues !== undefined) {
     inputIdSchema.parse(request.continues);
@@ -163,6 +202,7 @@ export async function captureLocked(config: HubConfig, vault: Vault, request: Ca
     if (meta.kind === 'action' && request.project) assertNotMerged(await readProjects(config), request.project);
     const date = new Intl.DateTimeFormat('sv-SE', { timeZone: config.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(meta.occurred_at));
     const path = `00_inbox/${date}_${meta.id}.md`;
+    if (request.attachment !== undefined) meta.attachment = await copyAttachmentLocked(config, vault, request.attachment, meta.source, meta.source_event_id, date.slice(0, 7));
     if (!await vault.create(path, markdown(meta, request.text))) throw new Error('入力IDが競合しました。再送してください');
     if (!await vault.create(marker, `${meta.id}\n`)) throw new Error('イベント記録が競合しました。再送してください');
     return { inputId: meta.id, deduped: false, path, receivedAt: meta.received_at };
@@ -175,6 +215,11 @@ export async function capture(config: HubConfig, request: CaptureRequest): Promi
     // 本人が追加した行動を指す行動（別の置き場へ移す依頼）は、元の行動を確かめてから保存する。
     const movedKey = request.kind === 'action' ? await (await import('./take-over-records.js')).movedActionSourceLocked(config, vault, request) : undefined;
     const saved = await captureLocked(config, vault, request);
+    // 資料として保存したメモは、資料の記録を一緒に書く（資料棚はcycleが作り直す）。再送では同じ受付IDの記録があれば書かない。
+    if (request.reference === true) {
+      const { writeReferenceMarkLocked } = await import('./reference-marks.js');
+      await writeReferenceMarkLocked(vault, { inputId: saved.inputId, action: 'add', title: request.referenceTitle ?? null, source: request.source, sourceEventId: request.sourceEventId ?? `capture:${saved.inputId}`, decidedAt: request.occurredAt });
+    }
     // 行動はモデルの整理を待たずにNOWへ載せる。保存の後、NOWの再生成前に停止しても、同じイベントの再送で再生成だけを行う。
     if (request.kind === 'action') {
       // NOWの再生成はviews.tsに依存するため、循環を避けて遅延読込する。

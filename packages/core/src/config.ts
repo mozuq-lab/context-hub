@@ -6,6 +6,7 @@ import { z, ZodError } from 'zod';
 import { issuePaths } from './error-message.js';
 import { dartPatternProblem } from './secrets.js';
 import type { HubConfig } from './types.js';
+import { MAX_FILE_BYTES_LIMIT } from './attachments.js';
 
 export function expandPath(value: string): string {
   return resolve(value === '~' ? homedir() : value.startsWith('~/') ? join(homedir(), value.slice(2)) : value);
@@ -34,7 +35,7 @@ const positive = z.number().int().min(1).max(1_000_000);
 const configSchema = z.object({
   schema_version: z.literal(1), vaultPath: z.string().min(1), statePath: z.string().min(1), timezone: z.literal('Asia/Tokyo'),
   policy: z.object({projectRoots:z.array(z.object({path:z.string().refine(isAbsolute,'絶対パスが必要です'),projectId:projectIdSchema}).strict()).max(1000),reviewDays:z.number().int().min(0).max(3650).optional()}).strict(),
-  capture: z.object({ maxInputChars: positive.max(100_000), allowedSenderIds: z.array(z.string()), maxBackdateDays: positive.max(3650).optional() }).strict(),
+  capture: z.object({ maxInputChars: positive.max(100_000), allowedSenderIds: z.array(z.string()), maxBackdateDays: positive.max(3650).optional(), maxFileBytes: z.number().int().min(1).max(MAX_FILE_BYTES_LIMIT).optional() }).strict(),
   organize: z.object({ maxItemsPerRun: positive.max(1000), maxAttempts: positive.max(10), timeoutSec: positive.max(600), projectThreshold: z.number().min(0).max(1),
     // 旧版の設定を読めるよう受け付けるが使わない。ロックは自動回収せず、ctx doctor --unlock で明示的に回収する。
     lockStaleSec: positive.optional(),
