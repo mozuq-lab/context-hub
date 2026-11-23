@@ -209,6 +209,7 @@ const removedEntrySchema = z.object({
 }).strict();
 export const referenceIndexSchema = z.object({
   schema_version: z.literal(1), generated_at: z.string().datetime({ offset: true }),
+  /** 一覧に反映した資料の記録のうち、最も新しい作成日時（記録がなければnull）。 */ marks_through: z.string().datetime({ offset: true }).nullable(),
   entries: z.array(indexEntrySchema), removed: z.array(removedEntrySchema),
 }).strict();
 export type ReferenceIndex = z.infer<typeof referenceIndexSchema>;
@@ -217,6 +218,8 @@ export type ReferenceIndex = z.infer<typeof referenceIndexSchema>;
  * アプリが読む資料の一覧。entriesは資料棚に載る資料（新しい順、件数は打ち切らない）、removedは本人が外した資料（外した日時の新しい順）。
  * removedのtitleは外す前に本人が付けていた名前で、戻すときに同じ名前を送れるようにする。
  * projectは本人が指定したプロジェクト、projectsは資料が載るプロジェクト（AIの関連候補を含む）。
+ * marks_throughは反映した記録の最新の作成日時。後から届いた古い判断のように資料棚が変わらない記録でも一覧を書き直し、
+ * アプリが「記録の作成より後に一覧を書いた」ことで依頼の反映を確かめられるようにする。
  */
 export function buildReferenceIndex(config: HubConfig, units: EffectiveInput[], entries: ReferenceEntry[], records: ReferenceMark[], marks: ReadonlyMap<string, ReferenceMark>, now = new Date()): ReferenceIndex {
   const settings = secretSettings(config), byId = new Map(units.map(u => [u.chain.root.id, u]));
@@ -237,6 +240,7 @@ export function buildReferenceIndex(config: HubConfig, units: EffectiveInput[], 
   removed.sort((a, b) => Date.parse(b.removed_at) - Date.parse(a.removed_at) || b.input_id.localeCompare(a.input_id));
   return {
     schema_version: 1, generated_at: now.toISOString(),
+    marks_through: records.reduce<string | null>((latest, r) => latest === null || Date.parse(r.created_at) > Date.parse(latest) ? r.created_at : latest, null),
     entries: entries.map(e => ({
       input_id: e.input.id, label: e.summary, title: e.title, ai_summary: e.aiSummary, added_by: e.addedByPerson ? 'person' : 'ai', unorganized: e.unorganized,
       urls: e.urls, skipped_urls: e.skippedUrls, projects: e.projects, project: e.input.project ?? null, corrected: e.corrected, pending_correction: e.pendingCorrection, occurred_at: e.input.occurred_at,

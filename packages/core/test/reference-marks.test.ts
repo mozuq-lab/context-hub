@@ -86,7 +86,16 @@ test('同じメモの記録は判断した日時の順で最後のものが効�
   await setReferenceMark(config, { inputId: memo.inputId, action: 'add', title: '後の判断', source: 'test', decidedAt: '2026-11-05T00:00:00Z' });
   await setReferenceMark(config, { inputId: memo.inputId, action: 'remove', source: 'test', decidedAt: '2026-11-04T00:00:00Z' });
   await rebuildReferences(config);
-  expect((await readReferenceIndex(vault))!.entries.map(e => e.label)).toEqual(['後の判断']);
+  const first = (await readReferenceIndex(vault))!;
+  expect(first.entries.map(e => e.label)).toEqual(['後の判断']);
+  // 後から届いた古い判断は資料棚を変えないが、一覧は書き直し、記録の反映を示す。
+  const late = await setReferenceMark(config, { inputId: memo.inputId, action: 'remove', source: 'test', decidedAt: '2026-11-03T00:00:00Z' });
+  await rebuildReferences(config);
+  const second = (await readReferenceIndex(vault))!;
+  expect(second.entries.map(e => e.label)).toEqual(['後の判断']);
+  const record = JSON.parse((await vault.read(`90_system/reference-marks/${late.markId}.json`))!);
+  expect(second.marks_through).toBe(record.created_at);
+  expect(Date.parse(second.generated_at)).toBeGreaterThanOrEqual(Date.parse(record.created_at));
 });
 
 test('見つからないメモと、行動・訂正は資料にできない。同じ受付IDの再送は記録を重ねない', async () => {
