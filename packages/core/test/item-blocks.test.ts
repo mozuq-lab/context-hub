@@ -13,6 +13,10 @@ import { hash } from '../src/storage.js';
 import { readNowItems, setItemResolution } from '../src/item-resolutions.js';
 import { setItemWait } from '../src/item-waits.js';
 import { ItemBlocksError, readItemBlocks, setItemBlocks } from '../src/item-blocks.js';
+import { moveAction } from '../src/action-moves.js';
+import { mergeProjects } from '../src/project-merges.js';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))));
 const clock = new Date('2026-11-24T03:00:00Z');
@@ -40,7 +44,7 @@ test('先に済ませることを付けると先待ちにまとまり、先の�
   const first = await setItemBlocks(config, { projectId: 'hub', itemKey: order.key, after: [{ projectId: 'shop', itemKey: quote.key }, { projectId: 'shop', itemKey: budget.key }], source: 'cli' });
   expect(first.blocksId).toMatch(/^BLK-/);
   const listed = (await readNowItems(vault, 'hub'))!.items.find(i => i.key === order.key)!;
-  expect(listed.after).toEqual({ id: first.blocksId, items: [{ project_id: 'shop', item_key: quote.key, section: 'next', text: '見積もりを受け取る' }, { project_id: 'shop', item_key: budget.key, section: 'next', text: '予算を確かめる' }] });
+  expect(listed.after).toEqual({ id: first.blocksId, items: [{ project_id: 'shop', item_key: quote.key, section: 'next', text: '見積もりを受け取る', input_id: quote.input_id }, { project_id: 'shop', item_key: budget.key, section: 'next', text: '予算を確かめる', input_id: budget.input_id }] });
   // NOWは件数だけを示し、別のプロジェクトの項目の本文は載せない（別AI向けの資料の元になるため）。
   const now = (await vault.read('10_projects/hub/NOW.md'))!;
   expect(now).toMatch(/- 発注する \[IN-[^\n]+ — 先に済ませること 2件\n/);
@@ -164,4 +168,51 @@ test('同じ本文の新しい項目へ引き継ぎ、先の項目の本文が�
   const shown = await home(vault);
   expect(shown).not.toContain('## 先待ち');
   expect(shown).toContain('次の一手: 発注する（先の項目が片付きました（「見積もりを受け取る」（発注）は見当たりません。付け直すか、印を外してください））');
+});
+
+test('互いに待つかは、いまの一覧に効いている印でたどる（キーが変わった項目も追い、片付いた項目の先はたどらない）', async () => {
+  const { config, vault, order, doc } = await fixture();
+  await setItemBlocks(config, { projectId: 'hub', itemKey: order.key, after: [{ projectId: 'hub', itemKey: doc.key }], source: 'cli' });
+  // 同じ本文の作業要約が届いて項目のキーが変わっても、印は引き継がれ、互いに待つ組として断る。
+  await capture(config, { source: 'file', kind: 'work-summary', project: 'hub', occurredAt: '2026-11-22T00:00:00Z', receivedAt: '2026-11-22T00:00:00Z', text: '## 次の一手\n- [確認済み] 発注する\n- [確認済み] 説明を書く\n## 未解決\n- 置き場所が決まっていない' });
+  await organize(config, new MockLlm());
+  const hub = (await readNowItems(vault, 'hub'))!.items, find = (text: string) => hub.find(i => i.text === text)!;
+  const again = find('発注する'), doc2 = find('説明を書く'), open2 = find('置き場所が決まっていない');
+  expect(again.key).not.toBe(order.key);
+  expect(doc2.key).not.toBe(doc.key);
+  expect(again.after?.items.map(i => i.text)).toEqual(['説明を書く']);
+  const cause = async (projectId: string, itemKey: string, after: { projectId: string; itemKey: string }[]) => ((await setItemBlocks(config, { projectId, itemKey, after, source: 'cli' }).catch(e => e)) as ItemBlocksError).reason?.cause;
+  expect(await cause('hub', doc2.key, [{ projectId: 'hub', itemKey: again.key }])).toBe('cycle');
+  // 置き場所→発注する→説明を書く。発注するを完了にすると、説明を書く→置き場所は互いに待たない。
+  await setItemBlocks(config, { projectId: 'hub', itemKey: open2.key, after: [{ projectId: 'hub', itemKey: again.key }], source: 'cli' });
+  expect(await cause('hub', doc2.key, [{ projectId: 'hub', itemKey: open2.key }])).toBe('cycle');
+  await setItemResolution(config, { projectId: 'hub', itemKey: again.key, action: 'resolve', source: 'cli' });
+  await expect(setItemBlocks(config, { projectId: 'hub', itemKey: doc2.key, after: [{ projectId: 'hub', itemKey: open2.key }], source: 'cli' })).resolves.toMatchObject({ deduped: false });
+});
+
+test('先の項目の置き場が変わっても（行動を移した・プロジェクトを統合した）、残っている間は先待ちのまま', async () => {
+  const { config, vault, order, doc, quote } = await fixture();
+  const added = await capture(config, { source: 'cli', kind: 'action', occurredAt: '2026-11-22T00:00:00Z', text: '銀行に電話する' });
+  await rebuildDashboard(config, { now: clock });
+  const action = (await readNowItems(vault, '_unassigned'))!.items.find(i => i.input_id === added.inputId)!;
+  await setItemBlocks(config, { projectId: 'hub', itemKey: order.key, after: [{ projectId: '_unassigned', itemKey: action.key }], source: 'cli' });
+  await setItemBlocks(config, { projectId: 'hub', itemKey: doc.key, after: [{ projectId: 'shop', itemKey: quote.key }], source: 'cli' });
+  await moveAction(config, { from: '_unassigned', itemKey: action.key, to: 'shop', source: 'cli', occurredAt: '2026-11-23T00:00:00Z' });
+  await addProject(config, { id: 'ops', title: '運用' });
+  const projectHash = async (id: string) => hash(await readFile(join(config.vaultPath, `10_projects/${id}/project.md`), 'utf8'));
+  await mergeProjects(config, { fromId: 'shop', intoId: 'ops', fromHash: await projectHash('shop'), intoHash: await projectHash('ops'), source: 'cli' });
+  await rebuildDashboard(config, { now: clock });
+  const shown = await home(vault);
+  expect(shown).toContain('## 先待ち（2件）');
+  expect(shown).toContain('次の一手: 発注する（先に: 「銀行に電話する」（運用））');
+  expect(shown).toContain('次の一手: 説明を書く（先に: 「見積もりを受け取る」（運用））');
+  expect(shown).not.toContain('### 動けるようになった項目');
+});
+
+test('受付で、同じ項目を2回選んだ依頼は受け付ける前に断る（停止回復の記録を残さない）', async () => {
+  const { config, vault, order, quote } = await fixture();
+  await packet(config, { operation: 'item-blocks', project_id: 'hub', item_key: order.key, after: [{ project_id: 'shop', item_key: quote.key }, { project_id: 'shop', item_key: quote.key }], confirmed: true }, '');
+  expect((await ingest(config)).rejected).toBe(1);
+  expect(await vault.files('90_system/intake/pending')).toEqual([]);
+  expect((await readItemBlocks(vault)).records).toHaveLength(0);
 });

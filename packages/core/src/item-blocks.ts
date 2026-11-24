@@ -3,7 +3,7 @@ import { ulid } from 'ulid';
 import { Vault } from './storage.js';
 import { ItemTargetError, UNASSIGNED_SCOPE, activeResolutions, itemMergeTargets, itemScopeSchema, itemSections, readItemResolutions, readNowItems, retargetItemRecord, settleItemRecords, type ItemResolution, type ItemSection, type NowItem } from './item-resolutions.js';
 import { effectiveItemRecords, itemRecordScope } from './item-schedules.js';
-import { projectIdSchema } from './projects.js';
+import { inspectProjects, projectIdSchema } from './projects.js';
 import type { HubConfig } from './types.js';
 
 /**
@@ -38,7 +38,7 @@ export const blocksPath = (id: string) => `${blocksDir}/${id}.json`;
 export const blocksCleared = (r: Pick<ItemBlockRecord, 'after'>) => r.after === null;
 
 /** 項目一覧（now-items）に載せる先の項目。idは効いている記録。先の項目の今の状態は、読む側が先の項目の一覧から決める。 */
-export interface NowItemAfter { id: string; items: { project_id: string; item_key: string; section: ItemSection; text: string }[] }
+export interface NowItemAfter { id: string; items: { project_id: string; item_key: string; section: ItemSection; text: string; input_id: string }[] }
 
 /**
  * 記録と、読めなかった記録のパス。不正な記録があってもNOWやHOMEの生成は止めず、HOMEとdoctorで示す。
@@ -67,7 +67,7 @@ export async function readItemBlocks(vault: Vault, options: { raw?: boolean } = 
  */
 export function effectiveBlocks(records: ItemBlockRecord[], projectId: string, items: Parameters<typeof effectiveItemRecords>[2], resolvedKeys: { has(key: string): boolean }): Map<string, NowItemAfter> {
   const { byKey } = effectiveItemRecords(records, projectId, items, resolvedKeys, blocksCleared);
-  return new Map([...byKey].flatMap(([key, r]) => r.after ? [[key, { id: r.id, items: r.after.map(a => ({ project_id: a.project_id, item_key: a.item_key, section: a.section, text: a.text })) }] as const] : []));
+  return new Map([...byKey].flatMap(([key, r]) => r.after ? [[key, { id: r.id, items: r.after.map(a => ({ project_id: a.project_id, item_key: a.item_key, section: a.section, text: a.text, input_id: a.input_id })) }] as const] : []));
 }
 
 /** NOWの行末に付ける表示。先の項目の本文は載せない（別のプロジェクトの項目のことがあり、NOWは別AI向けの資料の元になるため）。 */
@@ -76,10 +76,12 @@ export const blockedLabel = (after: Pick<NowItemAfter, 'items'>): string => `先
 /**
  * 先の項目の今の状態。open: まだ残っている（待つ） / done: 完了・解決した / dropped: 誤りとして外した /
  * missing: 一覧に見当たらない（本文が変わった・NOWから外れたなど。待たずに、付け直しを促す）。
- * 項目はキー、行動に引き取った元の行のキー、同じ欄・同じ本文の順に探す（本文が同じ項目が2件以上あれば決めない）。
+ * 統合したプロジェクトの項目は、統合先の項目として探す（targets。統合元→統合先）。項目はキー、行動に引き取った元の行のキー（ほかの置き場へ移した・
+ * 引き取った行動も探す）、同じ欄・同じ本文の順に探す（本文が同じ項目が2件以上あれば決めない）。
  * 見当たらないときは、本人の完了・外す記録（resolutions。省略可）から決める。
  */
 export type PrerequisiteState = 'open' | 'done' | 'dropped' | 'missing';
+type PrerequisiteRef = Pick<BlockRef, 'project_id' | 'item_key' | 'section' | 'text' | 'input_id'>;
 export function findPrerequisite(ref: Pick<BlockRef, 'item_key' | 'section' | 'text'>, items: readonly NowItem[] | undefined): NowItem | undefined {
   if (!items) return undefined;
   const direct = items.find(i => i.key === ref.item_key) ?? items.find(i => i.action?.from?.key === ref.item_key);
@@ -87,10 +89,23 @@ export function findPrerequisite(ref: Pick<BlockRef, 'item_key' | 'section' | 't
   const same = items.filter(i => i.section === ref.section && i.text === ref.text);
   return same.length === 1 ? same[0] : undefined;
 }
-export function prerequisiteState(ref: Pick<BlockRef, 'project_id' | 'item_key' | 'section' | 'text'>, lists: ReadonlyMap<string, readonly NowItem[]>, resolutions?: ReadonlyMap<string, ReadonlyMap<string, ItemResolution>>): PrerequisiteState {
-  const found = findPrerequisite(ref, lists.get(ref.project_id));
-  const closed = found ? found.resolution : resolutions?.get(ref.project_id)?.get(ref.item_key);
-  if (found && closed === null) return 'open';
+/** 先の項目を、いまの置き場の一覧から探す。見つかれば置き場と項目、見つからなければ探した置き場とキー（統合先へ読み替えたもの）を返す。 */
+export function locatePrerequisite(ref: PrerequisiteRef, lists: ReadonlyMap<string, readonly NowItem[]>, targets?: ReadonlyMap<string, string>): { scope: string; key: string; item?: NowItem } {
+  const r = targets?.size ? retargetItemRecord(ref, targets as Map<string, string>) : ref, own = lists.get(r.project_id);
+  const direct = own?.find(i => i.key === r.item_key);
+  if (direct) return { scope: r.project_id, key: direct.key, item: direct };
+  // 行動に引き取った元の行のキー。引き取った行動はほかの置き場にあることがある（プロジェクト未定の行動をプロジェクトへ移したなど）。
+  for (const scope of [r.project_id, ...[...lists.keys()].filter(s => s !== r.project_id)]) {
+    const moved = lists.get(scope)?.find(i => i.action?.from?.key === ref.item_key || i.action?.from?.key === r.item_key);
+    if (moved) return { scope, key: moved.key, item: moved };
+  }
+  const same = own?.filter(i => i.section === r.section && i.text === r.text) ?? [];
+  return same.length === 1 ? { scope: r.project_id, key: same[0]!.key, item: same[0]! } : { scope: r.project_id, key: r.item_key };
+}
+export function prerequisiteState(ref: PrerequisiteRef, lists: ReadonlyMap<string, readonly NowItem[]>, resolutions?: ReadonlyMap<string, ReadonlyMap<string, ItemResolution>>, targets?: ReadonlyMap<string, string>): PrerequisiteState {
+  const found = locatePrerequisite(ref, lists, targets);
+  const closed = found.item ? found.item.resolution : resolutions?.get(found.scope)?.get(found.key);
+  if (found.item && closed === null) return 'open';
   if (!closed) return 'missing';
   return closed.action === 'exclude' ? 'dropped' : 'done';
 }
@@ -99,9 +114,9 @@ export const prerequisiteStateLabels: Record<Exclude<PrerequisiteState, 'open'>,
 export const blockSettled = (states: readonly PrerequisiteState[]): boolean => states.every(s => s !== 'open');
 
 /**
- * 先の項目を判断するための、置き場ごとの項目一覧と完了・外す記録。プロジェクトとプロジェクト未定の一覧を読む（読めない一覧は無いものとして扱う）。
+ * 先の項目を判断するための、置き場ごとの項目一覧と完了・外す記録、統合先。プロジェクトとプロジェクト未定の一覧を読む（読めない一覧は無いものとして扱う）。
  */
-export async function prerequisiteLists(vault: Vault, scopes: Iterable<string>): Promise<{ lists: Map<string, NowItem[]>; resolutions: Map<string, Map<string, ItemResolution>> }> {
+export async function prerequisiteLists(vault: Vault, scopes: Iterable<string>): Promise<{ lists: Map<string, NowItem[]>; resolutions: Map<string, Map<string, ItemResolution>>; targets: Map<string, string> }> {
   const lists = new Map<string, NowItem[]>(), resolutions = new Map<string, Map<string, ItemResolution>>();
   let records: ItemResolution[] = [];
   try { records = await readItemResolutions(vault); } catch { /* 解決記録の不正はHOMEとdoctorで示す。 */ }
@@ -109,7 +124,7 @@ export async function prerequisiteLists(vault: Vault, scopes: Iterable<string>):
     try { const list = await readNowItems(vault, scope); if (list) lists.set(scope, list.items); } catch { /* 不正な一覧はHOMEで示す。 */ }
     resolutions.set(scope, activeResolutions(records, scope));
   }
-  return { lists, resolutions };
+  return { lists, resolutions, targets: await itemMergeTargets(vault) };
 }
 
 /**
@@ -191,7 +206,7 @@ export async function setItemBlocks(config: HubConfig, request: ItemBlocksReques
     }
     if (r.after === null && !current) throw new Error('この項目に先に済ませることは付いていません');
     if (unchanged) throw new Error('この項目には既に同じ先に済ませることが付いています');
-    if (refs.length && waitsOn(records, refs, refKey(r.projectId, r.itemKey))) throw new ItemBlocksError({ code: 'blocks-refused', cause: 'cycle' });
+    if (refs.length && waitsOn(await prerequisiteLists(vault, [...(await inspectProjects(config)).projects.map(p => p.id), UNASSIGNED_SCOPE]), refs, { scope: r.projectId, key: r.itemKey })) throw new ItemBlocksError({ code: 'blocks-refused', cause: 'cycle' });
     // 引き継いだ印を外すときは、引き継ぎ元の記録を外す（項目のキーで外しても引き継ぎ元が残るため）。
     const target = r.after === null && current && current.item_key !== r.itemKey ? { key: current.item_key, section: current.section, text: current.text, input_id: current.input_id } : item;
     const record: ItemBlockRecord = {
@@ -205,19 +220,19 @@ export async function setItemBlocks(config: HubConfig, request: ItemBlocksReques
 }
 
 /**
- * 先の項目のどれかが、記録をたどってtargetを待っているか（互いに待つ組になるか）。項目ごとに最後の記録だけを使う。
- * 本文の引き継ぎで指すキーが変わった記録は追えないため、記録に残したキーでたどる（追えない組は、HOMEの「先待ち」で本人が気づける）。
+ * 先の項目のどれかが、ほかの項目を通してtargetを待っているか（互いに待つ組になるか）。いまの一覧（NOWと同時に書く項目一覧）に効いている
+ * 先の項目をたどる（本文の引き継ぎでキーが変わった項目も、一覧のキーでたどれる）。片付いた・見当たらない項目は待たないので、その先はたどらない。
  */
-function waitsOn(records: ItemBlockRecord[], start: BlockRef[], target: string): boolean {
-  const latest = new Map<string, ItemBlockRecord>();
-  for (const r of records) latest.set(refKey(r.project_id, r.item_key), r);
-  const seen = new Set<string>(), queue = start.map(x => refKey(x.project_id, x.item_key));
+function waitsOn(prerequisites: Awaited<ReturnType<typeof prerequisiteLists>>, start: PrerequisiteRef[], target: { scope: string; key: string }): boolean {
+  const seen = new Set<string>(), queue = [...start];
   while (queue.length) {
-    const key = queue.shift()!;
-    if (key === target) return true;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    for (const next of latest.get(key)?.after ?? []) queue.push(refKey(next.project_id, next.item_key));
+    const found = locatePrerequisite(queue.shift()!, prerequisites.lists, prerequisites.targets);
+    if (found.scope === target.scope && found.key === target.key) return true;
+    if (!found.item || found.item.resolution !== null || prerequisites.resolutions.get(found.scope)?.has(found.key)) continue;
+    const id = refKey(found.scope, found.key);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    queue.push(...found.item.after?.items ?? []);
   }
   return false;
 }

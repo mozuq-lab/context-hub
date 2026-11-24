@@ -9,7 +9,7 @@ import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } f
 import { effortLabel,type ItemEffort } from './item-efforts.js';
 import { stepsLabel,type ItemStepsValue } from './item-steps.js';
 import { readItemWaits,waitingDays } from './item-waits.js';
-import { blockSettled,prerequisiteLists,prerequisiteState,readItemBlocks,type NowItemAfter } from './item-blocks.js';
+import { blockSettled,locatePrerequisite,prerequisiteLists,prerequisiteState,readItemBlocks,type NowItemAfter } from './item-blocks.js';
 import { dayNoteSection,readDayCloses } from './day-closes.js';
 import { readItemSomedays,orphanedSomedays } from './item-somedays.js';
 import { readSomedayReviews,rebuildSomedayLocked,somedaySection } from './someday.js';
@@ -23,7 +23,7 @@ import { readProjects,inspectProjects,projectIssueFields,mergeTargets,mergeIssue
 import {buildReviewIndex,writeReviewIndexLocked,type ReviewCandidate} from './candidate-review.js';
 import { readEffectiveInputs,correctionNotice } from './effective-inputs.js';
 import { readReceipts,generatedMarkdown,writeGeneratedLocked,dateLabel,lastEvidenceAt } from './views.js';
-import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage,writeIntakeFeaturesLocked,isIntakeRefusal,refusalNoticeVisible,REFUSAL_NOTICE_DAYS } from './intake.js';
+import { intakePaths,readIntakeReceipts,intakeErrorSchema,intakeErrorMessage,writeIntakeFeaturesLocked,isIntakeRefusal,withdrawnIntake,refusalNoticeVisible,REFUSAL_NOTICE_DAYS } from './intake.js';
 import { listConflicts } from './conflicts.js';
 import { historyStopped,historyPath } from './history.js';
 import { actionSource, movedActionIds } from './actions.js';
@@ -124,8 +124,8 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const blocked:{at:number;id:string;row:string}[]=[],ready:{at:number;id:string;row:string}[]=[];
   const placeTitle=(scope:string)=>scope===UNASSIGNED_SCOPE?UNASSIGNED_TITLE:plain(projects.find(p=>p.id===scope)?.title??scope);
   const blockNote=(owner:string,after:NowItemAfter)=>{
-   const states=after.items.map(a=>({a,state:prerequisiteState(a,prerequisites.lists,prerequisites.resolutions)}));
-   const name=(a:NowItemAfter['items'][number])=>`「${clip(a.text,60)}」${a.project_id===owner?'':`（${placeTitle(a.project_id)}）`}`;
+   const states=after.items.map(a=>({a,state:prerequisiteState(a,prerequisites.lists,prerequisites.resolutions,prerequisites.targets)}));
+   const name=(a:NowItemAfter['items'][number])=>{const scope=locatePrerequisite(a,prerequisites.lists,prerequisites.targets).scope;return`「${clip(a.text,60)}」${scope===owner?'':`（${placeTitle(scope)}）`}`;};
    const open=states.filter(x=>x.state==='open'),missing=states.filter(x=>x.state==='missing');
    return{settled:blockSettled(states.map(x=>x.state)),text:open.length?`先に: ${open.map(x=>name(x.a)).join('、')}`:`先の${states.filter(x=>x.state!=='missing').map(x=>name(x.a)).join('、')||'項目'}が片付きました${missing.length?`（${missing.map(x=>name(x.a)).join('、')}は見当たりません。付け直すか、印を外してください）`:''}`};
   };
@@ -210,7 +210,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   const checkPart=[readyPart,waitCheckPart].filter(Boolean).join('\n');
   const datedPart=!usesDates?(checkPart?`${checkPart}\n### プロジェクトごと\n`:''):`${checkPart?checkPart+'\n':''}期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
   const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOW・プロジェクト未定の一覧とアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
-  const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size&&!checkPart?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates||checks.length?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
+  const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size&&!checkPart?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates||checkPart?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
   const projectSections=`## プロジェクト一覧\n${rows.join('\n')||(listed.length?'進行中で最近動いたプロジェクトはありません。':'プロジェクトはまだありません。')}${staleRows.length?`\n\n## 停滞しているプロジェクト（${staleRows.length}件）\n最終根拠から${config.retrieve.staleDays}日を超えて新しい入力がない進行中のプロジェクトです。再開するか、休止・完了にするかを判断してください。\n${staleRows.join('\n')}`:''}${inactiveRows.length?`\n\n## 休止・完了（${inactiveRows.length}件）\n${inactiveRows.join('\n')}`:''}${mergedRows.length?`\n\n## 統合済み（${mergedRows.length}件）\n本人が別のプロジェクトへまとめたプロジェクトです。統合元の入力・完了報告・日付は統合先のものとして読み替えており、原文と記録は動かしていません。取り消すにはアプリのプロジェクト画面か\`ctx project unmerge\`を使います。\n${mergedRows.join('\n')}`:''}`;
   // 本人が設定したリポジトリのコミットから作った下書きのうち、未確認のもの。
   const draftRecords=await readGitDraftRecords(config),drafts=draftRecords.drafts.filter(d=>d.status==='pending'),gitProblems=await readGitCollectProblems(vault);
@@ -272,10 +272,10 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   try{ideaText=ideaSection(await rebuildIdeaIndexLocked(config,vault,clock));}catch(error){ideaProblem=error instanceof Error?error.message:String(error);}
   const errors:string[]=[];
   if(ideaProblem)errors.push(`- ${plain(ideaProblem)}（似ているアイデアの一覧を更新できません。\`ctx doctor\`で確認してください）`);
-  // 依頼のファイルがもうない受付失敗（受け付ける前に端末が取り下げた・本人が消した）は、示し続けない。
+  // 依頼のファイルがもうない受付失敗（受け付ける前に端末が取り下げた・本人が消した）は、示し続けない（withdrawnIntake）。
   // 理由付きの拒否は依頼への答えなので、ファイルがなくても数日だけ示す。競合は示す。
   const intakeNow=new Set(await intakePaths(vault));
-  for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){try{const e=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(e.status==='error'&&(acks.some(a=>a.path===e.path)||(!isIntakeRefusal(e)&&!intakeNow.has(e.path))))continue;
+  for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){try{const e=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(e.status==='error'&&(acks.some(a=>a.path===e.path)||await withdrawnIntake(vault,e,intakeNow)))continue;
    // 理由付きの拒否は依頼への答え。異常ではないので、拒否から数日だけ示して消す（記録は依頼の結果として残る）。
    if(isIntakeRefusal(e)&&!refusalNoticeVisible(e,clock.getTime()))continue;
    errors.push(`- [${plain(e.path)}](${e.path}): ${e.status==='conflict'?'競合':isIntakeRefusal(e)?`断った依頼（${REFUSAL_NOTICE_DAYS}日間表示）`:'受付失敗'} / ${plain(intakeErrorMessage(e))} / 記録: [詳細](${path})`);}catch{errors.push(`- 受付エラー記録不正: ${plain(path)}`);}}

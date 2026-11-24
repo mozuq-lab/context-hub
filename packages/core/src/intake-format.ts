@@ -12,7 +12,7 @@ import { contextTagsSchema } from './item-contexts.js';
 import { itemStepsValueSchema } from './item-steps.js';
 import { itemWaitingSchema } from './item-waits.js';
 import { ITEM_BLOCKS_MAX } from './item-blocks.js';
-import { DAY_NOTE_CHARS, dayCloseIdSchema } from './day-closes.js';
+import { dayCloseIdSchema, dayNoteSchema, normalizeDayNote } from './day-closes.js';
 import { itemSomedaySchema } from './item-somedays.js';
 import { somedayReviewActions, somedayTargets } from './someday.js';
 import { parseMarkdown } from './storage.js';
@@ -67,7 +67,7 @@ const itemContexts=z.object({...base,operation:z.literal('item-contexts'),projec
 // 次の一手の手順。stepsは変更後の全体（手順と終えた数）で、nullは手順を外す依頼。進める・戻すのも全体を送る。
 const itemSteps=z.object({...base,operation:z.literal('item-steps'),project_id:itemScopeSchema,item_key:itemKeySchema,steps:itemStepsValueSchema.nullable(),expected:itemStepsValueSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 // 先に済ませること。afterは変更後の全体（先の項目の置き場とキー。1〜3件、先に済ませる順）で、nullは外す依頼。付けられるのはプロジェクトの項目だけ。
-const itemBlocks=z.object({...base,operation:z.literal('item-blocks'),project_id:projectIdSchema,item_key:itemKeySchema,after:z.array(z.object({project_id:itemScopeSchema,item_key:itemKeySchema}).strict()).min(1).max(ITEM_BLOCKS_MAX).nullable(),confirmed:z.literal(true),text:z.string()}).strict();
+const itemBlocks=z.object({...base,operation:z.literal('item-blocks'),project_id:projectIdSchema,item_key:itemKeySchema,after:z.array(z.object({project_id:itemScopeSchema,item_key:itemKeySchema}).strict()).min(1).max(ITEM_BLOCKS_MAX).nullable(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.after===null||new Set(v.after.map(a=>`${a.project_id}\n${a.item_key}`)).size===v.after.length,'同じ項目を2回選んでいます');
 // 1日の締め。closeはonの日を締め、本文を明日へのひとこと（任意・空なら付けない）として残す。dismissは表示中のひとこと（close_idの締め）を消す（本文は空）。
 const dayClose=z.object({...base,operation:z.literal('day-close'),action:z.enum(['close','dismiss']),on:scheduleDateSchema.optional(),close_id:dayCloseIdSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='close'?v.on!==undefined&&v.close_id===undefined:v.on===undefined&&v.close_id!==undefined,'締めには日付を、消すときは締めのIDを指定します');
 const itemWait=z.object({...base,operation:z.literal('item-wait'),project_id:itemScopeSchema,item_key:itemKeySchema,waiting:itemWaitingSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
@@ -123,7 +123,12 @@ export function parseIntake(path: string, content: string, maxInputChars: number
   } else if (packet.operation === 'client-preferences') {
     parsePreferencesPayload(text);
   } else if (packet.operation === 'day-close') {
-    if (packet.action === 'dismiss' ? text.trim() !== '' : text.length > DAY_NOTE_CHARS * 4) throw new Error(packet.action === 'dismiss' ? 'ひとことを消す依頼に本文は指定できません' : '明日へのひとことが文字数上限を超えています');
+    if (packet.action === 'dismiss') { if (text.trim() !== '') throw new Error('ひとことを消す依頼に本文は指定できません'); }
+    else {
+      // ひとことの上限・使えない文字は、受け付ける前にここで断る（記録の段階で断ると、理由のない失敗として再試行し続けるため）。
+      const note = normalizeDayNote(text);
+      if (note !== null) { const checked = dayNoteSchema.safeParse(note); if (!checked.success) throw new Error(checked.error.issues[0]?.message ?? '明日へのひとことが不正です'); }
+    }
   } else if (packet.operation === 'project-create') {
     if (text.length > maxInputChars) throw new Error('最初のメモが文字数上限を超えています');
   } else if (text.trim()) throw new Error('承認操作に本文は指定できません');

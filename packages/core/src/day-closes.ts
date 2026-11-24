@@ -8,7 +8,7 @@ import type { HubConfig } from './types.js';
 /**
  * 1日の締め。本人がその日を締めた記録と、翌日の自分へ残す「明日へのひとこと」（任意・1〜3行）。
  * ひとことは、次に締めるか本人が消すまでHOMEとアプリの先頭に出し、ふりかえりにはその週の締めを日付順に添える。
- * メモ（原文）ではないので整理しない（AIへは渡さない）。今日の成果の集計（完了した項目など）は記録せず、表示のたびに記録から作る。
+ * メモ（原文）ではないので整理しない（整理用のモデルへは渡さない）。今日の成果の集計（完了した項目など）は記録せず、表示のたびに記録から作る。
  */
 export const DAY_NOTE_CHARS = 300;
 export const DAY_NOTE_LINES = 3;
@@ -86,7 +86,7 @@ export function dayClosesWithin(records: DayCloseRecord[], from: string, to: str
 }
 
 /**
- * 締められない・消せない理由。out-of-range: 締める日が先の日か、さかのぼれる日数より前 / missing: 消すひとことが見当たらない（別の端末で締め直したなど）。
+ * 締められない・消せない理由。out-of-range: 締める日が先の日か、さかのぼれる日数より前 / missing: 消すひとことが見当たらない（締めのIDが違う・その締めにひとことがない）。
  */
 export const dayCloseRefusalCauses = ['out-of-range', 'missing'] as const;
 export type DayCloseReason = { code: 'day-close-refused'; cause: typeof dayCloseRefusalCauses[number] };
@@ -95,7 +95,7 @@ export class DayCloseError extends Error {
 }
 export function dayCloseMessage(reason: DayCloseReason): string {
   return reason.cause === 'missing'
-    ? '消す明日へのひとことが見当たりませんでした。別の端末で締め直したか、既に消してあります。同期して確かめてください。'
+    ? '消す明日へのひとことが見当たりませんでした。指定した締めがないか、その締めにひとことがありません。同期して確かめてください。'
     : `締める日は、今日から${DAY_CLOSE_BACK_DAYS}日前までの日を選んでください。`;
 }
 
@@ -119,8 +119,6 @@ export async function setDayClose(config: HubConfig, request: DayCloseRequest): 
   if (r.action === 'close') {
     note = r.note === null ? null : normalizeDayNote(r.note);
     if (note !== null) dayNoteSchema.parse(note);
-    const today = todayIn(config.timezone, r.now);
-    if (r.on > addDays(today, 1) || r.on < addDays(today, -DAY_CLOSE_BACK_DAYS)) throw new DayCloseError({ code: 'day-close-refused', cause: 'out-of-range' });
   }
   return vault.withLock(async () => {
     const { records } = await readDayCloses(vault);
@@ -131,6 +129,11 @@ export async function setDayClose(config: HubConfig, request: DayCloseRequest): 
         if (!same) throw new Error('同じ受付IDで別の締めが記録されています');
         return { dayCloseId: previous.id, action: previous.action, deduped: true };
       }
+    }
+    // 締める日の範囲は、同じ依頼の再送かを確かめた後に確かめる（受け付けた後に日をまたいで再送しても、同じ依頼として扱う）。
+    if (r.action === 'close') {
+      const today = todayIn(config.timezone, r.now);
+      if (r.on > addDays(today, 1) || r.on < addDays(today, -DAY_CLOSE_BACK_DAYS)) throw new DayCloseError({ code: 'day-close-refused', cause: 'out-of-range' });
     }
     if (r.action === 'dismiss') {
       const target = records.find(x => x.id === r.closeId);

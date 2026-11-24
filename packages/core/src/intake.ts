@@ -113,6 +113,15 @@ export const intakeErrorSchema=z.object({schema_version:z.literal(1),path:z.stri
  */
 export const REFUSAL_NOTICE_DAYS=7;
 export function isIntakeRefusal(record:z.infer<typeof intakeErrorSchema>):boolean{return record.status==='error'&&record.reason!==undefined;}
+/**
+ * 受け付ける前に端末が取り下げた（本人が消した）依頼の失敗か。Input直下の依頼で、ファイルがもうなく、理由付きの拒否でも停止回復中でもないもの。
+ * 停止回復の記録が残っている依頼は、ファイルがなくても記録の写しから受付を続けるので、失敗を示し続ける。
+ */
+export async function withdrawnIntake(vault:Vault,record:z.infer<typeof intakeErrorSchema>,present:ReadonlySet<string>):Promise<boolean>{
+ if(record.status!=='error'||isIntakeRefusal(record)||present.has(record.path))return false;
+ const m=/^Input\/([^/]+)\.md$/.exec(record.path);
+ return m!==null&&await vault.read(pendingPath(m[1]!))===undefined;
+}
 export function refusalNoticeVisible(record:z.infer<typeof intakeErrorSchema>,now:number):boolean{return now-Date.parse(record.updated_at)<REFUSAL_NOTICE_DAYS*86_400_000;}
 export function intakeErrorMessage(record:z.infer<typeof intakeErrorSchema>):string{
  if(record.reason?.code==='stale-correction-target')return `訂正対象が古くなっています。同期して最新ID ${record.reason.latest_input_id} を対象に新しい訂正を送ってください。`;

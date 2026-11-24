@@ -8,7 +8,7 @@ import { readProjects,inspectProjects,describeProjectIssue,mergeIssues,normalize
 import { readProjectMerges } from './project-merges.js';
 import { readEffectiveInputs } from './effective-inputs.js';
 import { listProjectCandidates,readProjectCoverage,recoverProjectApprovalsLocked } from './project-proposals.js';
-import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths,isIntakeRefusal,refusalNoticeVisible,attachmentTransportNotices } from './intake.js';
+import { readIntakeReceipts,parseIntakePending,intakeErrorSchema,intakeErrorMessage,intakePaths,isIntakeRefusal,withdrawnIntake,refusalNoticeVisible,attachmentTransportNotices } from './intake.js';
 import { associationSchema,associationViewsComplete,projectRegistryHash } from './associations.js';
 import { receiptSchema, autoRegion, isGeneratedIntact } from './views.js';
 import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
@@ -113,7 +113,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
     // 依頼のファイルがもうない受付失敗（受け付ける前に端末が取り下げた・本人が消した）は、異常に数えない。
     // 理由付きの拒否は依頼への答えなので、ファイルがなくても数日だけ注意に示す。競合は示す。
     const intakeNow=new Set(await intakePaths(vault));
-    for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){const record=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(record.status!=='conflict'&&(acks.some(a=>a.path===record.path)||(!isIntakeRefusal(record)&&!intakeNow.has(record.path))))continue;
+    for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){const record=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(record.status!=='conflict'&&(acks.some(a=>a.path===record.path)||await withdrawnIntake(vault,record,intakeNow)))continue;
       // 理由付きの拒否は依頼への答えで、Vaultの異常ではない。異常（終了コード1）にせず、直近だけ注意に示す。
       if(isIntakeRefusal(record)){if(refusalNoticeVisible(record,Date.now()))refusals.push(`断った依頼: ${record.path} / ${intakeErrorMessage(record)}`);continue;}
       issues.push(`受付${record.status==='conflict'?'競合':'失敗'}: ${record.path} / ${intakeErrorMessage(record)}`);}

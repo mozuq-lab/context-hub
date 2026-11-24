@@ -118,3 +118,19 @@ test('受け付ける前に取り下げた（消した）依頼は、失敗と�
   expect(await ingest(config)).toMatchObject({ accepted: 0, rejected: 0 });
   expect((await readIntakeReceipts(config)).some(r => r.request_id === withdrawn.requestId)).toBe(false);
 });
+
+test('受付で、ひとことの上限・使えない文字は受け付ける前に断り、停止回復中の依頼の失敗は示し続ける', async () => {
+  const { config, vault } = await fixture();
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: config.timezone }).format(new Date());
+  for (const note of ['あ'.repeat(301), '1\n2\n3\n4', 'タブ\tは不可']) {
+    await packet(config, { operation: 'day-close', action: 'close', on: today, confirmed: true }, note);
+    expect((await ingest(config)).rejected).toBe(1);
+  }
+  expect(await vault.files('90_system/intake/pending')).toEqual([]);
+  expect((await readDayCloses(vault)).records).toHaveLength(0);
+  // 壊れた停止回復の記録の失敗は、依頼のファイルがなくても示す（Input直下の依頼ではないため）。
+  await vault.write('90_system/intake/pending/REQ-0123456789abcdef0123456789abcdef.json', '{');
+  await ingest(config);
+  await rebuildDashboard(config);
+  expect(await vault.read('HOME.md') ?? '').toContain('90_system/intake/pending/REQ-0123456789abcdef0123456789abcdef.json');
+});

@@ -307,7 +307,7 @@ const weekly=program.command('weekly-review').description(`週次レビュー: �
 weekly.command('show').description('点検の一覧（モデルを使わずに作る。アプリとREVIEW.mdの「週次レビューの点検」と同じ）').action(async()=>{const c=await config(),list=await buildWeeklyReview(c,new Vault(c));output({...list,days_since_last_review:daysSinceWeeklyReview(list,todayIn(c.timezone))});});
 weekly.command('done').description('週次レビューを終えた（見直した）と記録し、HOMEとふりかえりを作り直す。同じ日の記録が既にあれば増やさない').option('--on <date>','見直した日（YYYY-MM-DD。既定は今日）').requiredOption('--confirm','点検を終えた本人による報告')
   .action(async opts=>{const c=await config(),on=opts.on??todayIn(c.timezone);const result=await setWeeklyReview(c,{on,source:'cli',sourceEventId:`cli:weekly-review:${on}`});await rebuildDigest(c);await rebuildDashboard(c);output(result);});
-const day=program.command('day').description(`1日の締め: その日を締め、明日へのひとこと（任意・${DAY_NOTE_LINES}行・${DAY_NOTE_CHARS}文字以内）を残す。ひとことは次に締めるか消すまでHOMEの先頭に出て、ふりかえりにも載る。AIへは渡さない`);
+const day=program.command('day').description(`1日の締め: その日を締め、明日へのひとこと（任意・${DAY_NOTE_LINES}行・${DAY_NOTE_CHARS}文字以内）を残す。ひとことは次に締めるか消すまでHOMEの先頭に出て、ふりかえりにも載る。整理用のモデルへは渡さない`);
 day.command('close').description(`その日を締める。同じ日を締め直すと、最後の締めがその日の締めになる（${DAY_CLOSE_BACK_DAYS}日前までさかのぼれる）`).option('--on <date>','締める日（YYYY-MM-DD。既定は今日）').option('--note <text>','明日へのひとこと（改行は\\nではなく、実際の改行で書く）').requiredOption('--confirm','その日を締めた本人による報告')
   .action(async opts=>{const c=await config(),vault=new Vault(c),on=opts.on??todayIn(c.timezone),note=opts.note===undefined?null:String(opts.note),last=(await readDayCloses(vault)).records.at(-1);
    // 直前の記録を含めて受付IDにする。同じ内容の再実行は同じ受付IDになり、記録を増やさない。
