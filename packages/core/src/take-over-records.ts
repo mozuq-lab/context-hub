@@ -11,13 +11,15 @@ import { contextCleared, contextPath, contextTagsSchema, readItemContexts, type 
 import { readItemWaits, waitCleared, waitPath, type ItemWaitRecord } from './item-waits.js';
 import { readItemSomedays, somedayCleared, somedayPath, type ItemSomedayRecord } from './item-somedays.js';
 import { readItemSteps, stepsCleared, stepsPath, type ItemStepsRecord } from './item-steps.js';
+import { blocksCleared, blocksPath, readItemBlocks, type ItemBlockRecord } from './item-blocks.js';
 import type { HubConfig } from './types.js';
 
 /** 引き取った行動。scopeは行動の置き場のプロジェクト（省略はプロジェクト未定）、textは保存した行動の本文。 */
 export interface TakenOverAction { inputId: string; scope?: string; text: string; fromKey: string; source: string }
 
 /**
- * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、場所・道具の札、連絡待ちの印、「いつかやる」、手順を、行動の記録として写す（Writerロック内）。
+ * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、場所・道具の札、連絡待ちの印、「いつかやる」、手順、
+ * 先に済ませること（行動をプロジェクトに置くときだけ）を、行動の記録として写す（Writerロック内）。
  * 元の行と行動は置き場もキーも違うことがあり（別のプロジェクト・プロジェクト未定）、元の行の日付は作業要約が届くたびに別のキーの記録から引き継がれているため、
  * 読むたびに元の行をたどるのではなく、引き取った時点で効いている記録を行動の記録にする。
  * 写した記録の受付IDは元の記録のIDを含み（takeOverEvent）、元の記録は引き取られた記録として、元の置き場では外した記録と同じに扱う（同じ本文の行が後から出直しても日付を二重に付けない）。
@@ -52,6 +54,14 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
   if (step && !steps.records.some(r => r.source_event_id === takeOverEvent(action.inputId, step.id))) {
     const record: ItemStepsRecord = { ...base, id: `STP-${ulid()}`, steps: step.steps, source_event_id: takeOverEvent(action.inputId, step.id) };
     if (!await vault.create(stepsPath(record.id), JSON.stringify(sorted(record, stepsOrder), null, 2) + '\n')) throw new Error('手順の記録が競合しました');
+  }
+  // 先に済ませることは、プロジェクトの項目にだけ付けられる（プロジェクト未定へ引き取った行動には写さない）。
+  if (scope !== UNASSIGNED_SCOPE) {
+    const blocks = await readItemBlocks(vault), block = effectiveItemRecords(blocks.records, source.scope, source.items, resolved, blocksCleared).byKey.get(action.fromKey);
+    if (block && !blocks.records.some(r => r.source_event_id === takeOverEvent(action.inputId, block.id))) {
+      const record: ItemBlockRecord = { ...base, id: `BLK-${ulid()}`, after: block.after, source_event_id: takeOverEvent(action.inputId, block.id) };
+      if (!await vault.create(blocksPath(record.id), JSON.stringify(sorted(record, blocksOrder), null, 2) + '\n')) throw new Error('先に済ませることの記録が競合しました');
+    }
   }
   const somedays = await readItemSomedays(vault), someday = effectiveItemRecords(somedays.records, source.scope, source.items, resolved, somedayCleared).byKey.get(action.fromKey);
   if (someday && !somedays.records.some(r => r.source_event_id === takeOverEvent(action.inputId, someday.id))) {
@@ -125,6 +135,7 @@ async function findSourceRow(config: HubConfig, vault: Vault, key: string): Prom
 const scheduleOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'due', 'review_after', 'repeat', 'source', 'source_event_id', 'created_at'];
 const stepsOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'steps', 'source', 'source_event_id', 'created_at'];
 const somedayOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'someday', 'source', 'source_event_id', 'created_at'];
+const blocksOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'after', 'source', 'source_event_id', 'created_at'];
 const waitOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'waiting', 'source', 'source_event_id', 'created_at'];
 const contextOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'contexts', 'source', 'source_event_id', 'created_at'];
 const effortOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'effort', 'source', 'source_event_id', 'created_at'];

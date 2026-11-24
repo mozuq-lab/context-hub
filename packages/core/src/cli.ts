@@ -27,6 +27,8 @@ import { setItemEffort,readItemEfforts,itemEfforts,itemEffortLabels,type ItemEff
 import { setItemSteps,readItemSteps,stepsLabel,ITEM_STEPS_MIN,ITEM_STEPS_MAX } from './item-steps.js';
 import { setItemContexts,readItemContexts,CONTEXT_TAGS_MAX,CONTEXT_TAG_CHARS } from './item-contexts.js';
 import { setItemWait,readItemWaits,effectiveWaits,WAIT_WHO_CHARS,type ItemWaiting } from './item-waits.js';
+import { setItemBlocks,readItemBlocks,ITEM_BLOCKS_MAX } from './item-blocks.js';
+import { setDayClose,readDayCloses,currentDayNote,dayClosesByDate,DAY_NOTE_CHARS,DAY_NOTE_LINES,DAY_CLOSE_BACK_DAYS } from './day-closes.js';
 import { setItemSomeday,readItemSomedays,effectiveSomedays,type ItemSomeday } from './item-somedays.js';
 import { buildSomedayList,setSomedayReview,somedayStale,readSomedayReviews,SOMEDAY_REVIEW_DAYS,type SomedayReviewAction } from './someday.js';
 import { buildWeeklyReview,daysSinceWeeklyReview,setWeeklyReview,WEEKLY_REVIEW_INTERVAL_DAYS } from './weekly-review.js';
@@ -225,6 +227,14 @@ const waiting:ItemWaiting|null=opts.clear?null:{...(who!==undefined?{who}:{}),si
 const tag=waiting?hash(JSON.stringify(waiting)).slice(0,16):'none';
 const last=records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.source_event_id?.startsWith(`cli:${key}:wait:${tag}:`)?last.source_event_id:`cli:${key}:wait:${tag}:${last?.id??'none'}`;
 const result=await setItemWait(c,{projectId:id,itemKey:key,waiting,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,waiting});});
+item.command('after <project> <key>').description(`項目に「先に済ませること」を付ける（別の項目が済むまで手を付けられない）。先の項目が残っている間はHOMEの「次の一手」から外れて「先待ち」にまとまり、すべて片付くと「動けるようになった項目」に出る。付けられるのはプロジェクトの項目だけ。AIは付けない`).option('--on <items...>',`先に済ませる項目（<置き場>:<キー>。置き場はプロジェクトIDか${UNASSIGNED_SCOPE}。1〜${ITEM_BLOCKS_MAX}件、ctx item listで確認）`).option('--clear','印を外して、ふつうの次の一手に戻す').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
+if(!!opts.clear===!!opts.on?.length)throw new Error('--onか--clearのどちらか一方を指定してください');
+const after:{projectId:string;itemKey:string}[]|null=opts.clear?null:(opts.on as string[]).map(ref=>{const at=ref.lastIndexOf(':');if(at<1)throw new Error(`先の項目は<置き場>:<キー>で指定してください: ${ref}`);return{projectId:ref.slice(0,at),itemKey:ref.slice(at+1)};});
+const c=await config(),vault=new Vault(c),records=(await readItemBlocks(vault)).records;
+// 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する。
+const tag=after?hash(JSON.stringify(after)).slice(0,16):'none';
+const last=records.filter(r=>r.project_id===id&&r.item_key===key).at(-1);const event=last&&last.source==='cli'&&last.source_event_id?.startsWith(`cli:${key}:after:${tag}:`)?last.source_event_id:`cli:${key}:after:${tag}:${last?.id??'none'}`;
+const result=await setItemBlocks(c,{projectId:id,itemKey:key,after,source:'cli',sourceEventId:event});await rebuildDashboard(c);output({...result,after});});
 item.command('someday <project> <key>').description(`項目を「いつかやる」へ移す（今はやらないが残しておく）。移した項目はHOMEの「次の一手」の一覧・件数・期日の欄から外れ、「いつかやる」の一覧で${SOMEDAY_REVIEW_DAYS}日ごとに見直す。AIは移さない`).option('--keep','見直したが今は始めない（そのまま）。移した日は変えず、見直した日を今日にする').option('--clear','元の欄へ戻す（始める）').requiredOption('--confirm','項目を確認した本人による操作').action(async(id,key,opts)=>{
 if(opts.keep&&opts.clear)throw new Error('--keepと--clearは同時に指定できません');
 const c=await config(),vault=new Vault(c),records=(await readItemSomedays(vault)).records,today=todayIn(c.timezone);
@@ -297,6 +307,16 @@ const weekly=program.command('weekly-review').description(`週次レビュー: �
 weekly.command('show').description('点検の一覧（モデルを使わずに作る。アプリとREVIEW.mdの「週次レビューの点検」と同じ）').action(async()=>{const c=await config(),list=await buildWeeklyReview(c,new Vault(c));output({...list,days_since_last_review:daysSinceWeeklyReview(list,todayIn(c.timezone))});});
 weekly.command('done').description('週次レビューを終えた（見直した）と記録し、HOMEとふりかえりを作り直す。同じ日の記録が既にあれば増やさない').option('--on <date>','見直した日（YYYY-MM-DD。既定は今日）').requiredOption('--confirm','点検を終えた本人による報告')
   .action(async opts=>{const c=await config(),on=opts.on??todayIn(c.timezone);const result=await setWeeklyReview(c,{on,source:'cli',sourceEventId:`cli:weekly-review:${on}`});await rebuildDigest(c);await rebuildDashboard(c);output(result);});
+const day=program.command('day').description(`1日の締め: その日を締め、明日へのひとこと（任意・${DAY_NOTE_LINES}行・${DAY_NOTE_CHARS}文字以内）を残す。ひとことは次に締めるか消すまでHOMEの先頭に出て、ふりかえりにも載る。整理用のモデルへは渡さない`);
+day.command('close').description(`その日を締める。同じ日を締め直すと、最後の締めがその日の締めになる（${DAY_CLOSE_BACK_DAYS}日前までさかのぼれる）`).option('--on <date>','締める日（YYYY-MM-DD。既定は今日）').option('--note <text>','明日へのひとこと（改行は\\nではなく、実際の改行で書く）').requiredOption('--confirm','その日を締めた本人による報告')
+  .action(async opts=>{const c=await config(),vault=new Vault(c),on=opts.on??todayIn(c.timezone),note=opts.note===undefined?null:String(opts.note),last=(await readDayCloses(vault)).records.at(-1);
+   // 直前の記録を含めて受付IDにする。同じ内容の再実行は同じ受付IDになり、記録を増やさない。
+   const tag=`cli:day-close:${on}:${hash(JSON.stringify(note)).slice(0,16)}:`,event=last?.source==='cli'&&last.source_event_id?.startsWith(tag)?last.source_event_id:`${tag}${last?.id??'none'}`;
+   const result=await setDayClose(c,{action:'close',on,note,source:'cli',sourceEventId:event});
+   await rebuildDigest(c);await rebuildDashboard(c);output(result);});
+day.command('dismiss').description('表示中の明日へのひとことを消す（HOMEの先頭から外す。締めの記録は残る）').requiredOption('--confirm','ひとことを読んだ本人による操作')
+  .action(async()=>{const c=await config(),current=currentDayNote((await readDayCloses(new Vault(c))).records);if(!current)throw new Error('消す明日へのひとことはありません');const result=await setDayClose(c,{action:'dismiss',closeId:current.id,source:'cli',sourceEventId:`cli:day-dismiss:${current.id}`});await rebuildDashboard(c);output(result);});
+day.command('list').description('締めた日とひとことの一覧（新しい順）と、いまHOMEに出ているひとこと').option('--limit <n>','件数（既定14）','14').action(async opts=>{const c=await config(),records=(await readDayCloses(new Vault(c))).records,limit=Math.max(1,Number(opts.limit)||14);output({current:currentDayNote(records)??null,closes:dayClosesByDate(records).reverse().slice(0,limit)});});
 const conflict=program.command('conflict').description('生成物の競合（手で書き換えたNOW・HOME・REVIEW）を確認し、生成版へ戻す');
 conflict.command('list').description('対象ごとの退避・手で変えた行・確認用ハッシュを表示').action(async()=>output(await listConflicts(await config())));
 conflict.command('resolve <target>').description('手で変えた行をメモとして残し、最新の入力から作り直して退避を片付ける（例: 10_projects/<id>/NOW.md）').requiredOption('--hash <sha256>','conflict listで確認した対象のハッシュ').option('--no-memo','NOWの手で変えた行をメモとして保存しない（置き換えた全文は記録に残る）').requiredOption('--confirm','差分を確認した本人による操作').action(async(target,opts)=>{const c=await config();const result=await resolveConflict(c,{target,expectedHash:opts.hash,source:'cli',sourceEventId:`cli:conflict:${target}:${opts.hash}`,saveManualAsMemo:opts.memo});await rebuildDashboard(c);output(result);});

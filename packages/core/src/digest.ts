@@ -14,6 +14,7 @@ import { WAITING_LONG_DAYS, waitingDays } from './item-waits.js';
 import { buildSomedayList, somedayDigestLines } from './someday.js';
 import { buildWeeklyReview, weeklyReviewDigestLines } from './weekly-review.js';
 import { todayIn } from './item-schedules.js';
+import { dayClosesWithin, readDayCloses } from './day-closes.js';
 import { UNASSIGNED_TITLE } from './unassigned-actions.js';
 import type { HubConfig, Input, ExtractedItem } from './types.js';
 import { inputWhen } from './happened.js';
@@ -195,6 +196,12 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
       lines.push('');
     }
   }
+  // 本人がこの期間に締めた日と、明日へのひとこと（日付の古い順）。締めた日がなければ出さない。
+  try {
+    const today = todayIn(config.timezone, now), from = todayIn(config.timezone, start);
+    const closes = dayClosesWithin((await readDayCloses(vault)).records, from, today).filter(c => c.on > from);
+    if (closes.length) lines.push('## 1日の締め', `- 締めた日: ${closes.length}日（直近${days}日のうち）`, ...closes.map(c => `- ${c.on}: ${c.note ? plain(c.note.split('\n').join(' / ')) : '（ひとことなし）'}`), '');
+  } catch { /* 壊れた記録はHOMEとdoctorで示す。 */ }
   // 「いつかやる」の件数と、長く見直していないもの（移した項目・休止中のプロジェクト・置いたアイデア）。
   try { lines.push(...somedayDigestLines(await buildSomedayList(config, vault, now, projects), todayIn(config.timezone, now))); } catch { /* 壊れた記録はHOMEとdoctorで示す。 */ }
   lines.push('## 確認待ちの候補');
