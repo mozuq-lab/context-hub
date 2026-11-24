@@ -58,6 +58,8 @@ const nowItemSchema = z.object({
   steps: z.object({ id: z.string().regex(/^STP-[0-9A-HJKMNP-TV-Z]{26}$/), items: z.array(z.string().min(1).max(200)).min(2).max(10), done: z.number().int().min(0).max(10) }).strict().optional(),
   // 本人が付けた連絡待ちの印（item-waits）。sinceは頼んだ日、whoは相手（任意）。印のない項目と旧版の一覧にはない。
   waiting: z.object({ id: z.string().regex(/^WAIT-[0-9A-HJKMNP-TV-Z]{26}$/), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), who: z.string().min(1).max(40).optional() }).strict().optional(),
+  // 本人が付けた「先に済ませること」（item-blocks）。itemsは先の項目（置き場・キー・欄・本文）。先の項目の今の状態は、読む側が先の項目の一覧から決める。印のない項目と旧版の一覧にはない。
+  after: z.object({ id: z.string().regex(/^BLK-[0-9A-HJKMNP-TV-Z]{26}$/), items: z.array(z.object({ project_id: itemScopeSchema, item_key: digest, section: z.enum(itemSections), text: z.string().max(4000) }).strict()).min(1).max(3) }).strict().optional(),
   // 本人が「いつかやる」へ移した項目（item-somedays）。sinceは移した日、reviewedは最後に見直した日（見直していなければ移した日）。移していない項目と旧版の一覧にはない。
   someday: z.object({ id: z.string().regex(/^SMD-[0-9A-HJKMNP-TV-Z]{26}$/), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), reviewed: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict().optional(),
   // 本人がプロジェクトを指定したメモから、AIが「片付いたかも」と示したもの。未確認で、完了・解決ではない。片付いていない項目にだけ付く。

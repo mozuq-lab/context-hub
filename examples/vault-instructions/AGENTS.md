@@ -40,7 +40,7 @@ ContextHubのMCPツール（`contexthub_*`）が使える場合は、ファイ�
 | `_ContextHub/docs/`、`_ContextHub/templates/`、`_ContextHub/scripts/submit-input.mjs` | 書式・コマンド・挙動を確認するときだけ |
 | 上記以外の `90_system/`（`receipts/pending/`、`receipts/events/`、`project-confirmations/`、`policies/`、`review/`、`now-generated/`、`conflict-archive/` など）、添付の受け渡し用の `Input/files/`、設定・認証情報・バックアップ・`.obsidian/`・Vault外の会話履歴 | 読まない。利用者が保守調査を明示的に依頼したときだけ、必要な記録に限って読む |
 
-`HISTORY.md`・`REFERENCES.md` は根拠から作り直す生成物です。AIは書き換えません。次の一手・未解決に付ける期日・見直す日・繰り返し・手間の目安・場所や道具の札・連絡待ち・「いつかやる」・手順と、プロジェクトの望む結果・領域は本人が付けるもので、AIは推測して付けたり受付ファイルを代作したりしません。
+`HISTORY.md`・`REFERENCES.md` は根拠から作り直す生成物です。AIは書き換えません。次の一手・未解決に付ける期日・見直す日・繰り返し・手間の目安・場所や道具の札・連絡待ち・「いつかやる」・手順・先に済ませることと、プロジェクトの望む結果・領域、1日の締めと明日へのひとことは本人が付けるもので、AIは推測して付けたり受付ファイルを代作したりしません。受け付ける前の依頼（`Input/REQ-*.md`）の取り下げも本人がアプリで行うもので、AIは受付ファイルを消しません。
 
 NOWの `<!-- ctx:auto:start -->` から `<!-- ctx:auto:end -->` までは生成領域です。手で書き換えるとそのNOWは更新が止まり、HOMEに「NOWの更新が止まっています」と出ます。AIはこの領域を書き換えません。本人のメモは領域の外に書きます。
 

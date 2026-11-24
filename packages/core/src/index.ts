@@ -32,6 +32,8 @@ export * from './item-contexts.js';
 export * from './item-waits.js';
 export * from './item-somedays.js';
 export * from './item-steps.js';
+export * from './item-blocks.js';
+export * from './day-closes.js';
 export * from './someday.js';
 export * from './weekly-review.js';
 export * from './ask.js';

@@ -19,6 +19,8 @@ import { AREA_CHARS, invalidArea } from './areas.js';
 import { readProjectAreaChanges } from './project-areas.js';
 import { readItemContexts } from './item-contexts.js';
 import { readItemWaits } from './item-waits.js';
+import { readItemBlocks } from './item-blocks.js';
+import { readDayCloses } from './day-closes.js';
 import { readItemSomedays } from './item-somedays.js';
 import { readSomedayReviews } from './someday.js';
 import { readWeeklyReviews } from './weekly-review.js';
@@ -83,6 +85,8 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { for (const path of (await readOrganizeRetries(vault)).problems) issues.push(`整理のやり直しの依頼の記録が不正です: ${path}`); } catch { issues.push('整理のやり直しの依頼の記録を走査できません'); }
   try { for (const path of (await readItemContexts(vault)).problems) issues.push(`場所・道具の札の記録が不正です: ${path}`); } catch { issues.push('場所・道具の札の記録を走査できません'); }
   try { for (const path of (await readItemWaits(vault)).problems) issues.push(`連絡待ちの記録が不正です: ${path}`); } catch { issues.push('連絡待ちの記録を走査できません'); }
+  try { for (const path of (await readItemBlocks(vault)).problems) issues.push(`先に済ませることの記録が不正です: ${path}`); } catch { issues.push('先に済ませることの記録を走査できません'); }
+  try { for (const path of (await readDayCloses(vault)).problems) issues.push(`1日の締めの記録が不正です: ${path}`); } catch { issues.push('1日の締めの記録を走査できません'); }
   try { for (const path of [...(await readItemSomedays(vault)).problems, ...(await readSomedayReviews(vault)).problems]) issues.push(`「いつかやる」の記録が不正です: ${path}`); } catch { issues.push('「いつかやる」の記録を走査できません'); }
   try { for (const path of (await readReferenceMarks(vault)).problems) issues.push(`資料の記録が不正です: ${path}`); } catch { issues.push('資料の記録を走査できません'); }
   try { for (const path of (await readWeeklyReviews(vault)).problems) issues.push(`週次レビューの記録が不正です: ${path}`); } catch { issues.push('週次レビューの記録を走査できません'); }
@@ -106,7 +110,10 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
       if('path'in result&&!inputs.some(i=>i.id===result.inputId&&i.path===result.path))issues.push(`受付記録の原文欠損: ${ack.request_id}`);
     }
     for(const path of await vault.files('90_system/intake/pending'))if(path.endsWith('.json')){const{snapshot}=parseIntakePending(path,(await vault.read(path))!,config.capture.maxInputChars);const ack=acks.find(a=>a.request_id===snapshot.request_id);if(ack&&ack.request_hash!==snapshot.request_hash)issues.push(`受付回復と受領記録の不一致: ${path}`);else if(!ack)issues.push(`受付の停止回復待ち: ${snapshot.request_id}`);}
-    for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){const record=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(record.status!=='conflict'&&acks.some(a=>a.path===record.path))continue;
+    // 依頼のファイルがもうない受付失敗（受け付ける前に端末が取り下げた・本人が消した）は、異常に数えない。
+    // 理由付きの拒否は依頼への答えなので、ファイルがなくても数日だけ注意に示す。競合は示す。
+    const intakeNow=new Set(await intakePaths(vault));
+    for(const path of await vault.files('90_system/intake-errors'))if(path.endsWith('.json')){const record=intakeErrorSchema.parse(JSON.parse((await vault.read(path))!));if(record.status!=='conflict'&&(acks.some(a=>a.path===record.path)||(!isIntakeRefusal(record)&&!intakeNow.has(record.path))))continue;
       // 理由付きの拒否は依頼への答えで、Vaultの異常ではない。異常（終了コード1）にせず、直近だけ注意に示す。
       if(isIntakeRefusal(record)){if(refusalNoticeVisible(record,Date.now()))refusals.push(`断った依頼: ${record.path} / ${intakeErrorMessage(record)}`);continue;}
       issues.push(`受付${record.status==='conflict'?'競合':'失敗'}: ${record.path} / ${intakeErrorMessage(record)}`);}

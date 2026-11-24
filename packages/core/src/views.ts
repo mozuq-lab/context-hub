@@ -14,6 +14,7 @@ import { effectiveEfforts, effortLabel, readItemEfforts } from './item-efforts.j
 import { effectiveSteps, nowStepsLabel, readItemSteps } from './item-steps.js';
 import { contextsLabel, effectiveContexts, readItemContexts } from './item-contexts.js';
 import { effectiveWaits, readItemWaits, waitingLabel } from './item-waits.js';
+import { blockedLabel, effectiveBlocks, readItemBlocks } from './item-blocks.js';
 import { effectiveSomedays, readItemSomedays, SOMEDAY_LABEL } from './item-somedays.js';
 import { evidenceBound, inputWhen } from './happened.js';
 import { dismissalKey, readHintDismissals } from './resolution-hints.js';
@@ -201,6 +202,7 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
   const waits = effectiveWaits((await readItemWaits(vault)).records, projectId, [...items.values()], resolved);
   const somedays = effectiveSomedays((await readItemSomedays(vault)).records, projectId, [...items.values()], resolved);
   const steps = effectiveSteps((await readItemSteps(vault)).records, projectId, [...items.values()], resolved);
+  const blocks = effectiveBlocks((await readItemBlocks(vault)).records, projectId, [...items.values()], resolved);
   for (const item of items.values()) {
     const s = scheduled.get(item.key), e = efforts.get(item.key), w = waits.get(item.key), d = somedays.get(item.key);
     if (s) item.schedule = { id: s.id, due: s.due, review_after: s.review_after, ...(s.repeat ? { repeat: s.repeat } : {}) };
@@ -211,10 +213,12 @@ export async function rebuildNowLocked(vault: Vault, config: HubConfig, projectI
     if (d) item.someday = d;
     const p = steps.get(item.key);
     if (p) item.steps = p;
+    const b = blocks.get(item.key);
+    if (b) item.after = b;
   }
   // 連絡待ちの印は行末に示す（相手の名前は載せない。NOWは別AI向けのcontext・bundleの元になるため。相手は項目一覧とHOMEに載せる）。
   // 「いつかやる」へ移した項目も、欄に置いたまま行末に示す（今は取り組まないことを、NOWを読む別AIにも伝える）。
-  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key), e = efforts.get(key), t = contexts.get(key), w = waits.get(key), d = somedays.get(key), p = steps.get(key), label = [d ? SOMEDAY_LABEL : '', w ? waitingLabel(w) : '', s ? scheduleLabel(s) : '', e ? effortLabel(e) : '', t ? contextsLabel(t) : '', p ? nowStepsLabel(p) : ''].filter(Boolean).join('・'); return label ? ` — ${label}` : ''; }));
+  const dated = (rows: string[]) => rows.map(r => r.replace(new RegExp(`${mark}([a-f0-9]{64})$`), (_, key: string) => { const s = scheduled.get(key), e = efforts.get(key), t = contexts.get(key), w = waits.get(key), d = somedays.get(key), p = steps.get(key), b = blocks.get(key), label = [d ? SOMEDAY_LABEL : '', w ? waitingLabel(w) : '', b ? blockedLabel(b) : '', s ? scheduleLabel(s) : '', e ? effortLabel(e) : '', t ? contextsLabel(t) : '', p ? nowStepsLabel(p) : ''].filter(Boolean).join('・'); return label ? ` — ${label}` : ''; }));
   next.splice(0, next.length, ...dated(next)); open.splice(0, open.length, ...dated(open));
   // 「片付いたかも」: 本人がこのプロジェクトを指定したメモの整理で、AIが示した既存項目。片付いていない項目にだけ付け、
   // 訂正が未反映のメモ・本人が「違う」と見送った組・最後の「未解決に戻す」より前の整理からは示さない。
