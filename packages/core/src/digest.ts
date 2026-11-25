@@ -11,6 +11,7 @@ import { lastEvidenceAt } from './views.js';
 import { insightFeedbackSection, insightsSection, readInsights } from './insights.js';
 import { UNASSIGNED_SCOPE, activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions, readNowItems } from './item-resolutions.js';
 import { WAITING_LONG_DAYS, waitingDays } from './item-waits.js';
+import { PROGRESS_STALE_DAYS, progressBeforeResolution, progressDetail, progressStale, readItemProgress } from './item-progress.js';
 import { buildSomedayList, somedayDigestLines } from './someday.js';
 import { buildWeeklyReview, weeklyReviewDigestLines } from './weekly-review.js';
 import { todayIn } from './item-schedules.js';
@@ -193,6 +194,32 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
       const long = waits.filter(w => w.days >= WAITING_LONG_DAYS).length;
       lines.push('## 連絡待ち', `- 連絡待ちの項目: ${waits.length}件（うち${WAITING_LONG_DAYS}日以上 ${long}件）`, '- 長く待っている項目（頼んだ日の古い順に最大5件）:');
       for (const w of waits.sort((a, b) => a.since.localeCompare(b.since)).slice(0, 5)) lines.push(`  - ${w.place} ${w.text}（${w.who ? `相手: ${plain(w.who)}・` : ''}頼んでから${w.days}日）`);
+      lines.push('');
+    }
+  }
+  // 本人が「取りかかり中」の印を付けている次の一手と、期間内に完了した取りかかり中の項目（始めてから何日で済んだか）。どちらもなければ出さない。
+  {
+    const today = todayIn(config.timezone, now), started: { updated: string; since: string; place: string; text: string; note?: string }[] = [], finished: { days: number; place: string; text: string; at: string }[] = [];
+    const lists: { id: string; place: string }[] = [...projects.filter(p => !merged.has(p.id) && lifecycleOf(p) === 'active').map(p => ({ id: p.id, place: `[${plain(p.title)}](10_projects/${p.id}/NOW.md)` })), { id: UNASSIGNED_SCOPE, place: UNASSIGNED_TITLE }];
+    for (const { id, place } of lists) {
+      let list; try { list = await readNowItems(vault, id); } catch { continue; /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
+      for (const i of list?.items ?? []) if (i.resolution === null && i.progress && !i.waiting && !i.someday) started.push({ updated: i.progress.updated, since: i.progress.since, place, text: clip(i.label + i.text), ...(i.progress.note !== undefined ? { note: i.progress.note } : {}) });
+    }
+    let records: Awaited<ReturnType<typeof readItemProgress>>['records'] = [];
+    try { records = (await readItemProgress(vault)).records; } catch { /* 不正な記録はdoctorで示す。 */ }
+    if (records.length) for (const { id, place } of lists) {
+      const closed = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), id);
+      for (const r of closed.values()) {
+        if (r.action !== 'resolve' || r.section !== 'next' || !inWindow(r.created_at)) continue;
+        const progress = progressBeforeResolution(records, { projectId: id, itemKey: r.item_key, section: r.section, text: r.text }, r.created_at);
+        if (progress) finished.push({ days: waitingDays(progress.since, todayIn(config.timezone, new Date(r.created_at))), place, text: clip(r.text), at: r.created_at });
+      }
+    }
+    if (started.length || finished.length) {
+      const stale = started.filter(p => progressStale(p, today)).length;
+      lines.push('## 取りかかり中', `- 取りかかり中の次の一手: ${started.length}件（うち${PROGRESS_STALE_DAYS}日以上更新なし ${stale}件）${finished.length ? ` / 期間内に完了した取りかかり中の項目 ${finished.length}件` : ''}`);
+      for (const p of [...started].sort((a, b) => a.since.localeCompare(b.since)).slice(0, 5)) lines.push(`  - ${p.place} ${p.text}（${progressDetail({ ...p, note: p.note === undefined ? undefined : plain(p.note) }, today)}）`);
+      for (const f of [...finished].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 5)) lines.push(`  - 完了: ${f.place} ${f.text}（始めてから${f.days}日で完了）`);
       lines.push('');
     }
   }

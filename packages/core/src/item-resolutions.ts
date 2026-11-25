@@ -58,6 +58,8 @@ const nowItemSchema = z.object({
   steps: z.object({ id: z.string().regex(/^STP-[0-9A-HJKMNP-TV-Z]{26}$/), items: z.array(z.string().min(1).max(200)).min(2).max(10), done: z.number().int().min(0).max(10) }).strict().optional(),
   // 本人が付けた連絡待ちの印（item-waits）。sinceは頼んだ日、whoは相手（任意）。印のない項目と旧版の一覧にはない。
   waiting: z.object({ id: z.string().regex(/^WAIT-[0-9A-HJKMNP-TV-Z]{26}$/), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), who: z.string().min(1).max(40).optional() }).strict().optional(),
+  // 本人が付けた「取りかかり中」の印（item-progress）。sinceは始めた日、updatedは効いている記録を書いた日、noteはどこまで進んだか（任意）。印のない項目と旧版の一覧にはない。
+  progress: z.object({ id: z.string().regex(/^PROG-[0-9A-HJKMNP-TV-Z]{26}$/), since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), updated: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), note: z.string().min(1).max(80).optional() }).strict().optional(),
   // 本人が付けた「先に済ませること」（item-blocks）。itemsは先の項目（置き場・キー・欄・本文・根拠の入力。根拠は統合先への読み替えに使う）。先の項目の今の状態は、読む側が先の項目の一覧から決める。印のない項目と旧版の一覧にはない。
   after: z.object({ id: z.string().regex(/^BLK-[0-9A-HJKMNP-TV-Z]{26}$/), items: z.array(z.object({ project_id: itemScopeSchema, item_key: digest, section: z.enum(itemSections), text: z.string().max(4000), input_id: inputIdSchema }).strict()).min(1).max(3) }).strict().optional(),
   // 本人が「いつかやる」へ移した項目（item-somedays）。sinceは移した日、reviewedは最後に見直した日（見直していなければ移した日）。移していない項目と旧版の一覧にはない。

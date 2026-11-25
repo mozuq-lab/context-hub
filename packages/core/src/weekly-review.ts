@@ -5,6 +5,7 @@ import { Vault } from './storage.js';
 import { UNASSIGNED_SCOPE, activeResolutions, readItemResolutions, readNowItems, type NowItem } from './item-resolutions.js';
 import { addDays, effectiveSchedules, readItemSchedules, scheduleBucket, scheduleDateSchema, todayIn, type ItemSchedule } from './item-schedules.js';
 import { WAITING_LONG_DAYS, waitingDays } from './item-waits.js';
+import { PROGRESS_STALE_DAYS, progressStale } from './item-progress.js';
 import { SOMEDAY_REVIEW_DAYS, buildSomedayList, somedayStale } from './someday.js';
 import { buildReviewIndex } from './candidate-review.js';
 import { readGitDraftRecords } from './git-drafts.js';
@@ -73,6 +74,8 @@ const lingeringSchema = itemRef.extend({ since: scheduleDateSchema }).strict();
 /** 期限切れ・今日・7日以内の期日の項目（連絡待ち・「いつかやる」・見直す日まで休ませている項目を除く）。 */
 const datedSchema = itemRef.extend({ due: scheduleDateSchema, bucket: z.enum(['overdue', 'today', 'week']), review_after: scheduleDateSchema.nullable() }).strict();
 const waitingSchema = itemRef.extend({ since: scheduleDateSchema, check: z.boolean() }).strict();
+/** 止まった取りかかり中。sinceは始めた日、updatedは印かひとことを最後に更新した日。 */
+const progressStaleSchema = itemRef.extend({ since: scheduleDateSchema, updated: scheduleDateSchema, note: z.string().optional() }).strict();
 /**
  * 進行中のプロジェクト。nextは連絡待ち・「いつかやる」を除いた未完了の次の一手の数（項目一覧を読めないときはnull）、
  * waitingは連絡待ちの次の一手・未解決の数、hintsは「片付いたかも」の付いた項目の数。staleは最終根拠からretrieve.staleDaysを超えたもの。
@@ -107,6 +110,8 @@ export const weeklyReviewListSchema = z.object({
   /** 8. 領域を見渡す。本人がプロジェクトに領域を1つでも付けているときだけある（本人が決めた語彙の順、領域なしは最後）。 */
   areas: z.array(areaRowSchema).optional(),
   area_quiet_days: z.number().int().min(1).optional(),
+  /** 3. 止まった取りかかり中（印もひとことも progress_stale_days 日以上更新していない次の一手。更新の古い順）。1件でもあるときだけある。 */
+  progress_stale: z.array(progressStaleSchema).max(ROWS_MAX).optional(), progress_stale_total: z.number().int().nonnegative().optional(), progress_stale_days: z.number().int().min(1).optional(),
 }).strict();
 export type WeeklyReviewList = z.infer<typeof weeklyReviewListSchema>;
 type ItemRow = z.infer<typeof itemRef>;
@@ -129,7 +134,7 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
   const schedules = await safe(() => readItemSchedules(vault), { records: [], problems: [] } as Awaited<ReturnType<typeof readItemSchedules>>);
   const resolutions = await safe(() => readItemResolutions(vault), [] as Awaited<ReturnType<typeof readItemResolutions>>);
   const ref = (scope: string, i: NowItem): ItemRow => ({ scope, item_key: i.key, section: i.section, label: i.label, text: i.text });
-  const rows: WeeklyReviewList['projects'] = [], lingering: z.infer<typeof lingeringSchema>[] = [], dated: z.infer<typeof datedSchema>[] = [], waiting: z.infer<typeof waitingSchema>[] = [];
+  const rows: WeeklyReviewList['projects'] = [], stalled: z.infer<typeof progressStaleSchema>[] = [], lingering: z.infer<typeof lingeringSchema>[] = [], dated: z.infer<typeof datedSchema>[] = [], waiting: z.infer<typeof waitingSchema>[] = [];
   /** 期日の区分。連絡待ち・「いつかやる」・見直す日まで休ませている項目は呼ぶ側で除く。 */
   const addDated = (scope: string, i: NowItem, schedule: Pick<ItemSchedule, 'due' | 'review_after'> | undefined) => {
     if (!schedule?.due) return;
@@ -138,6 +143,10 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
   };
   const addWaiting = (scope: string, i: NowItem, schedule: Pick<ItemSchedule, 'review_after'> | undefined) => {
     if (i.waiting) waiting.push({ ...ref(scope, i), since: i.waiting.since, check: schedule?.review_after != null && schedule.review_after <= today });
+  };
+  /** 止まった取りかかり中。連絡待ち・「いつかやる」の項目は呼ぶ側で除く。 */
+  const addStalled = (scope: string, i: NowItem) => {
+    if (i.progress && progressStale(i.progress, today)) stalled.push({ ...ref(scope, i), since: i.progress.since, updated: i.progress.updated, ...(i.progress.note !== undefined ? { note: i.progress.note } : {}) });
   };
   const ordered: { row: WeeklyReviewList['projects'][number]; at: number }[] = [];
   for (const project of projects) {
@@ -159,9 +168,11 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
         if (i.waiting) { waits++; addWaiting(project.id, i, schedule); continue; }
         if (i.section === 'next') next++; else open++;
         addDated(project.id, i, schedule);
+        addStalled(project.id, i);
         // 期日・見直す日を付けた項目は本人が時期を決めているため、「長く残っている」には数えない。
+        // 取りかかり中の項目も、本人が進めているところなので数えない（止まっていれば「止まった取りかかり中」に出る）。
         const since = sinceOf.get(i.input_id);
-        if (!schedule && since !== undefined && waitingDays(since, today) >= (i.section === 'next' ? WEEKLY_NEXT_STALE_DAYS : WEEKLY_OPEN_STALE_DAYS)) lingering.push({ ...ref(project.id, i), since });
+        if (!schedule && !i.progress && since !== undefined && waitingDays(since, today) >= (i.section === 'next' ? WEEKLY_NEXT_STALE_DAYS : WEEKLY_OPEN_STALE_DAYS)) lingering.push({ ...ref(project.id, i), since });
       }
     }
     ordered.push({ row: { project_id: project.id, title: project.title, ...(project.area ? { area: project.area } : {}), next, open, waiting: waits, hints, last_evidence: last, stale }, at });
@@ -177,6 +188,7 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
       if (i.waiting) { addWaiting(UNASSIGNED_SCOPE, i, schedule); continue; }
       actions++;
       addDated(UNASSIGNED_SCOPE, i, schedule);
+      addStalled(UNASSIGNED_SCOPE, i);
     }
   } catch { /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
   let someday = { total: 0, stale: 0 };
@@ -199,6 +211,7 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
   lingering.sort((a, b) => a.since.localeCompare(b.since) || a.scope.localeCompare(b.scope) || a.section.localeCompare(b.section) || a.item_key.localeCompare(b.item_key));
   dated.sort((a, b) => order[a.bucket] - order[b.bucket] || a.due.localeCompare(b.due) || a.scope.localeCompare(b.scope) || a.item_key.localeCompare(b.item_key));
   waiting.sort((a, b) => a.since.localeCompare(b.since) || a.scope.localeCompare(b.scope) || a.item_key.localeCompare(b.item_key));
+  stalled.sort((a, b) => a.updated.localeCompare(b.updated) || a.scope.localeCompare(b.scope) || a.item_key.localeCompare(b.item_key));
   return {
     schema_version: 1, generated_at: now.toISOString(),
     interval_days: WEEKLY_REVIEW_INTERVAL_DAYS, next_stale_days: WEEKLY_NEXT_STALE_DAYS, open_stale_days: WEEKLY_OPEN_STALE_DAYS, project_stale_days: config.retrieve.staleDays, someday_review_days: SOMEDAY_REVIEW_DAYS,
@@ -212,6 +225,8 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
     dated_counts: { overdue: dated.filter(d => d.bucket === 'overdue').length, today: dated.filter(d => d.bucket === 'today').length, week: dated.filter(d => d.bucket === 'week').length },
     someday,
     ...(areas ? { areas, area_quiet_days: WEEKLY_AREA_QUIET_DAYS } : {}),
+    // 旧版のアプリ・fixtureと同じ形を保つため、止まった取りかかり中がないときは欄ごと省く。
+    ...(stalled.length ? { progress_stale: stalled.slice(0, ROWS_MAX), progress_stale_total: stalled.length, progress_stale_days: PROGRESS_STALE_DAYS } : {}),
   };
 }
 
@@ -264,6 +279,12 @@ export function weeklyReviewDigestLines(list: WeeklyReviewList, now: Date, timez
     lines.push(`   - 長く残っている項目（根拠の古い順。次の一手${lingNext}件・未解決${lingOpen}件${list.lingering_total > list.lingering.length ? '・一部' : ''}）:`);
     for (const r of list.lingering.slice(0, DIGEST_ROWS)) lines.push(`     - ${place(r.scope, titles)} ${rowText(r)}（根拠から${waitingDays(r.since, today)}日）`);
     lines.push(...more(Math.min(DIGEST_ROWS, list.lingering.length), list.lingering_total).map(l => `  ${l}`));
+  }
+  if (list.progress_stale?.length) {
+    const total = list.progress_stale_total ?? list.progress_stale.length;
+    lines.push(`   - 止まった取りかかり中（${list.progress_stale_days ?? PROGRESS_STALE_DAYS}日以上更新なし ${total}件。続けるならどこまで進んだかを書き直し、手を止めているなら印を外すか「いつかやる」へ移す）:`);
+    for (const r of list.progress_stale.slice(0, DIGEST_ROWS)) lines.push(`     - ${place(r.scope, titles)} ${rowText(r)}（${r.since}から・${waitingDays(r.updated, today)}日更新なし${r.note ? `・どこまで: ${listText(r.note)}` : ''}）`);
+    lines.push(...more(Math.min(DIGEST_ROWS, list.progress_stale.length), total).map(l => `  ${l}`));
   }
   const stale = list.projects.filter(p => p.stale);
   lines.push(`4. 停滞しているプロジェクト: ${stale.length}件（最終根拠から${list.project_stale_days}日超。再開する・休止・完了を選ぶ）`);

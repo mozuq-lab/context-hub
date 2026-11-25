@@ -15,6 +15,7 @@ import { readItemOccurrences, readItemSchedules } from './item-schedules.js';
 import { readItemEfforts } from './item-efforts.js';
 import { readOrganizeRetries } from './organize-retries.js';
 import { readItemSteps } from './item-steps.js';
+import { readItemProgress } from './item-progress.js';
 import { AREA_CHARS, invalidArea } from './areas.js';
 import { readProjectAreaChanges } from './project-areas.js';
 import { readItemContexts } from './item-contexts.js';
@@ -82,6 +83,7 @@ export async function doctor(config: HubConfig): Promise<{issues:string[];notice
   try { for (const path of (await readItemSchedules(vault)).problems) issues.push(`期日・見直す日の記録が不正です: ${path}`); } catch { issues.push('期日・見直す日の記録を走査できません'); }
   try { for (const path of (await readItemEfforts(vault)).problems) issues.push(`手間の目安の記録が不正です: ${path}`); } catch { issues.push('手間の目安の記録を走査できません'); }
   try { for (const path of (await readItemSteps(vault)).problems) issues.push(`手順の記録が不正です: ${path}`); } catch { issues.push('手順の記録を走査できません'); }
+  try { for (const path of (await readItemProgress(vault)).problems) issues.push(`取りかかり中の記録が不正です: ${path}`); } catch { issues.push('取りかかり中の記録を走査できません'); }
   try { for (const path of (await readOrganizeRetries(vault)).problems) issues.push(`整理のやり直しの依頼の記録が不正です: ${path}`); } catch { issues.push('整理のやり直しの依頼の記録を走査できません'); }
   try { for (const path of (await readItemContexts(vault)).problems) issues.push(`場所・道具の札の記録が不正です: ${path}`); } catch { issues.push('場所・道具の札の記録を走査できません'); }
   try { for (const path of (await readItemWaits(vault)).problems) issues.push(`連絡待ちの記録が不正です: ${path}`); } catch { issues.push('連絡待ちの記録を走査できません'); }

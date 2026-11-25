@@ -9,6 +9,7 @@ import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } f
 import { effortLabel,type ItemEffort } from './item-efforts.js';
 import { stepsLabel,type ItemStepsValue } from './item-steps.js';
 import { readItemWaits,waitingDays } from './item-waits.js';
+import { PROGRESS_LIMIT,progressDetail,type NowItemProgress } from './item-progress.js';
 import { blockSettled,locatePrerequisite,prerequisiteLists,prerequisiteState,readItemBlocks,type NowItemAfter } from './item-blocks.js';
 import { dayNoteSection,readDayCloses } from './day-closes.js';
 import { readItemSomedays,orphanedSomedays } from './item-somedays.js';
@@ -109,6 +110,9 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 本人が連絡待ちの印を付けた項目。「次の一手」の一覧・期日の欄・休ませている件数から外し、「連絡待ち」の欄にまとめる。
   // 見直す日が来た連絡待ちは、「次の一手」の先頭に連絡待ちの確認として出す。相手の名前はHOMEとアプリにだけ示す（NOWには載せない）。
   const waiting:{since:string;id:string;place:string;text:string;who?:string;dates:string;check:boolean}[]=[];
+  // 本人が「取りかかり中」の印を付けた次の一手。「次の一手」の一覧・期日の欄から外し、「次の一手」の先頭の「取りかかり中」にまとめる（期日は行に添える）。
+  // ひとことはHOMEとアプリにだけ示す（NOWには載せない）。連絡待ち・いつかやる・先待ちの項目には付けられないが、付けた後にそうなった項目はそちらを優先する。
+  const progressing:{updated:string;id:string;place:string;text:string;progress:NowItemProgress;dates:string}[]=[];
   const waitLabel=(w:{since:string;who?:string},dates:string)=>`${w.who?`相手: ${plain(w.who)}・`:''}${w.since}から${waitingDays(w.since,today)}日${dates?`・${dates}`:''}`;
   // 行動に引き取った行の項目キー。その行の日付は行動へ引き継ぐ（置き場が違っても）ため、元の置き場で付け直しを求めない。
   const takenKeys=new Set<string>();
@@ -157,11 +161,12 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      // 先に済ませることが付いた項目（連絡待ちの項目は連絡待ちとして扱う）。
      const block=i.resolution===null&&!i.waiting&&i.after?blockNote(project.id,i.after):undefined;
      if(block){front.add(i.key);(block.settled?ready:blocked).push({at,id:project.id,row:`- [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}（${block.text}${schedule?`・${scheduleLabel(schedule)}`:''}）`});}
+     if(i.resolution===null&&i.progress&&!i.waiting&&!block){front.add(i.key);progressing.push({updated:i.progress.updated,id:project.id,place:`[${plain(project.title)}](${now})`,text:`次の一手: ${clip(i.label+i.text)}`,progress:i.progress,dates:[schedule?scheduleLabel(schedule):'',i.effort?effortLabel(i.effort):'',i.steps?clip(stepsLabel(i.steps),80):''].filter(Boolean).join('・')});}
      if(i.resolution===null&&i.waiting){front.add(i.key);waiting.push({since:i.waiting.since,id:project.id,place:`[${plain(project.title)}](${now})`,text:`${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}`,...(i.waiting.who?{who:i.waiting.who}:{}),dates:schedule?scheduleLabel(schedule):'',check:schedule?.review_after!=null&&schedule.review_after<=today});}
      if(!schedule)continue;
      calendarItems.push({projectId:project.id,projectTitle:project.title,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedule.created_at});
      // 連絡待ちは期日の欄にも、見直す日まで休ませている件数にも入れない（「連絡待ち」の欄で日付と一緒に示す）。先に済ませることが付いた項目も同じ。
-     if(i.waiting||block)continue;
+     if(i.waiting||block||i.progress)continue;
      const {bucket,hidden}=scheduleBucket(schedule,today);
      if(hidden){resting++;front.add(i.key);}
      else if(bucket==='overdue'||bucket==='today'||bucket==='week'){front.add(i.key);dated.push({bucket,due:schedule.due!,id:project.id,row:`- 期日 ${schedule.due}${schedule.repeat?`（${repeatLabel(schedule.repeat)}）`:''} — [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}${i.steps?`（${clip(stepsLabel(i.steps),80)}）`:''}`});}
@@ -182,11 +187,12 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // プロジェクト未定の行動に本人が付けた期日も、プロジェクトの項目と一緒に期日順で前に出し、見直す日が先の行動はたたむ。
   for(const i of unassignedBuilt.items.items){
    if(!i.action||i.resolution!==null||i.someday)continue;
+   if(i.progress&&!i.waiting)progressing.push({updated:i.progress.updated,id:UNASSIGNED_SCOPE,place:UNASSIGNED_TITLE,text:`次の一手: ${clip(i.label+i.text)}`,progress:i.progress,dates:[i.schedule?scheduleLabel({due:i.schedule.due,review_after:i.schedule.review_after,repeat:i.schedule.repeat??null}):'',i.effort?effortLabel(i.effort):'',i.steps?clip(stepsLabel(i.steps),80):''].filter(Boolean).join('・')});
    if(i.waiting)waiting.push({since:i.waiting.since,id:UNASSIGNED_SCOPE,place:UNASSIGNED_TITLE,text:`次の一手: ${clip(i.label+i.text)}`,...(i.waiting.who?{who:i.waiting.who}:{}),dates:i.schedule?scheduleLabel({due:i.schedule.due,review_after:i.schedule.review_after,repeat:i.schedule.repeat??null}):'',check:i.schedule?.review_after!=null&&i.schedule.review_after<=today});
    if(!i.schedule)continue;
    const schedule={due:i.schedule.due,review_after:i.schedule.review_after},repeat=i.schedule.repeat;
    calendarItems.push({projectId:UNASSIGNED_SCOPE,projectTitle:UNASSIGNED_TITLE,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedules.records.find(r=>r.id===i.schedule!.id)?.created_at??clock.toISOString()});
-   if(i.waiting)continue;
+   if(i.waiting||i.progress)continue;
    const {bucket,hidden}=scheduleBucket(schedule,today);
    if(hidden)resting++;
    else if(bucket==='overdue'||bucket==='today'||bucket==='week'){unassignedFront.add(i.key);dated.push({bucket,due:schedule.due!,id:UNASSIGNED_SCOPE,row:`- 期日 ${schedule.due}${repeat?`（${repeatLabel(repeat)}）`:''} — ${UNASSIGNED_TITLE} 次の一手: ${clip(i.label+i.text)}${schedule.review_after?`（見直す日 ${schedule.review_after}）`:''}${i.effort?`（${effortLabel(i.effort)}）`:''}${i.steps?`（${clip(stepsLabel(i.steps),80)}）`:''}`});}
@@ -207,7 +213,10 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   // 先に済ませることがすべて片付いた項目。プロジェクトの最近動いた順。
   const readyRows=ready.sort((a,b)=>b.at-a.at||a.id.localeCompare(b.id)).map(x=>x.row);
   const readyPart=readyRows.length?`### 動けるようになった項目（${readyRows.length}件）\n先に済ませることが片付いた項目です。取りかかって完了にするか、アプリで「先に済ませること」を外すと、ふつうの次の一手に戻ります。\n${readyRows.join('\n')}\n`:'';
-  const checkPart=[readyPart,waitCheckPart].filter(Boolean).join('\n');
+  // 取りかかり中は、最近更新した順（同じ日は置き場の順）。印を付けた本人が戻ってくる場所なので、確認の欄より前に置く。
+  const progressRows=progressing.sort((a,b)=>b.updated.localeCompare(a.updated)||a.id.localeCompare(b.id)).map(p=>`- ${p.place} ${p.text}（${progressDetail({...p.progress,note:p.progress.note===undefined?undefined:plain(p.progress.note)},today)}${p.dates?`・${p.dates}`:''}）`);
+  const progressPart=progressRows.length?`### 取りかかり中（${progressRows.length}件）\n本人が取りかかり中の印を付けた次の一手です。どこまで進んだかはアプリで書き直せます。済んだら完了にしてください。${progressRows.length>PROGRESS_LIMIT?`\n取りかかり中が${PROGRESS_LIMIT}件を超えています。手を止めている項目は印を外すと、今進めている項目が見つけやすくなります。`:''}\n${progressRows.join('\n')}\n`:'';
+  const checkPart=[progressPart,readyPart,waitCheckPart].filter(Boolean).join('\n');
   const datedPart=!usesDates?(checkPart?`${checkPart}\n### プロジェクトごと\n`:''):`${checkPart?checkPart+'\n':''}期日・見直す日は本人が付けたものです。アプリの次の一手から付けるか、\`ctx item schedule\`を使ってください。\n${(['overdue','today','week'] as const).map(b=>{const r=datedRows.filter(x=>x.bucket===b);return r.length?`\n### ${scheduleBucketLabels[b]}（${r.length}件）\n${r.map(x=>x.row).join('\n')}\n`:'';}).join('')}\n### プロジェクトごと\n`;
   const restingPart=`${resting?`\n\n見直す日まで休ませている項目: ${resting}件（各NOW・プロジェクト未定の一覧とアプリで確認できます）`:''}${orphaned.length?`\n\n日付を付け直す項目（本文が変わったかNOWから外れたため、日付を移していません。${orphaned.length}件。新しい項目に付け直し、この日付は\`ctx item schedule <project> <key> --clear\`で外してください）:\n${orphaned.join('\n')}`:''}`;
   const nextSection=!listed.some(x=>x.group==='active'||x.group==='stale')&&!unassignedFront.size&&!checkPart?'':`## 次の一手（進行中のプロジェクト）\n${datedPart}${nextRows.length?`プロジェクトごとに${NEXT_PER_PROJECT}件まで載せます。終わった項目はアプリで完了を報告するか、\`ctx item list\`でキーを確認して\`ctx item resolve\`を使ってください。\n${nextRows.join('\n')}`:nextUnread.length?'':usesDates||checkPart?'ほかに期日のない次の一手はありません。':'進行中のプロジェクトに次の一手はありません。'}${nextUnread.length?`${nextRows.length?'\n':''}NOW項目の記録を読めないプロジェクト: ${nextUnread.map(plain).join('、')}（cycleを実行するか、失敗と競合を確認してください）`:''}${restingPart}`;
