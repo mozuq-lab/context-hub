@@ -58,7 +58,8 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
   }
   const progress = await readItemProgress(vault), started = effectiveItemRecords(progress.records, source.scope, source.items, resolved, progressCleared).byKey.get(action.fromKey);
   if (started && !progress.records.some(r => r.source_event_id === takeOverEvent(action.inputId, started.id))) {
-    const record: ItemProgressRecord = { ...base, id: `PROG-${ulid()}`, progress: started.progress, source_event_id: takeOverEvent(action.inputId, started.id) };
+    // 書いた日は元の記録のままにする（引き取っただけで印を更新したことにせず、止まった取りかかり中の日数を保つ）。
+    const record: ItemProgressRecord = { ...base, id: `PROG-${ulid()}`, progress: started.progress, source_event_id: takeOverEvent(action.inputId, started.id), created_at: started.created_at };
     if (!await vault.create(progressPath(record.id), JSON.stringify(sorted(record, progressOrder), null, 2) + '\n')) throw new Error('取りかかり中の記録が競合しました');
   }
   // 先に済ませることは、プロジェクトの項目にだけ付けられる（プロジェクト未定へ引き取った行動には写さない）。

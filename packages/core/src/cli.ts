@@ -234,6 +234,7 @@ const c=await config(),vault=new Vault(c),records=(await readItemProgress(vault)
 // 既に印が付いている項目では、省いたひとこと・始めた日は今の印のままにする（ひとことだけ書き直しても始めた日を変えない）。
 const list=(await readNowItems(vault,id))?.items??[],current=list.some(i=>i.key===key)?effectiveProgress(records,id,list,activeResolutions(await readItemResolutions(vault),id),c.timezone).get(key):undefined;
 const note=opts.note===false?undefined:opts.note!==undefined?String(opts.note).trim():current?.note;
+if(typeof opts.note==='string'&&!note)throw new Error('ひとことが空です。ひとことを外すときは--no-noteを指定してください');
 const progress:ItemProgress|null=opts.clear?null:{since:opts.since??current?.since??todayIn(c.timezone),...(note?{note}:{})};
 // 直前の記録を含めて受付IDにする。直前がCLIの同じ内容なら同じ受付IDで再送し、記録後の停止から回復する（受付IDにはひとことではなく、内容の短いハッシュを入れる）。
 const tag=progress?hash(JSON.stringify(progress)).slice(0,16):'none';

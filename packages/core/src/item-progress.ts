@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Vault } from './storage.js';
-import { ItemTargetError, UNASSIGNED_SCOPE, activeResolutions, itemScopeSchema, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemSection, type NowItem } from './item-resolutions.js';
+import { ItemTargetError, UNASSIGNED_SCOPE, activeResolutions, itemScopeSchema, itemSections, readItemResolutions, readNowItems, settleItemRecords, type ItemResolution, type ItemSection, type NowItem } from './item-resolutions.js';
 import { addDays, assertRecordTarget, effectiveItemRecords, itemRecordScope, scheduleDateSchema, todayIn } from './item-schedules.js';
 import { blockSettled, prerequisiteLists, prerequisiteState } from './item-blocks.js';
 import { waitingDays } from './item-waits.js';
@@ -186,11 +186,22 @@ export async function setItemProgress(config: HubConfig, request: ItemProgressRe
 
 /**
  * 片付いた項目について、片付けた時点で効いていた最後の印。ふりかえりで「始めてから何日で済んだか」を示すのに使う。
- * 印は作業要約が届いてキーが変わっても同じ欄・同じ本文で引き継ぐため、キーか本文で探す。
- * 片付けた記録より後に書いた記録（未解決へ戻した後に付け直したもの）は数えない。
+ * 印は作業要約が届いてキーが変わっても同じ欄・同じ本文で引き継ぐため、キーか本文で探す。本人が追加した行動（inputIdを渡す）は、
+ * 文面を直してキーが変わっても同じ行動なので、同じ入力の記録も探す。
+ * 片付けた記録より後に書いた記録（未解決へ戻した後に付け直したもの）は数えない。本文で見つけた別のキーの記録のうち、
+ * その項目自身がその後に片付いたもの（同じ本文の別の項目の印）も数えない。
  */
-export function progressBeforeResolution(records: ItemProgressRecord[], item: { projectId: string; itemKey: string; section: ItemSection; text: string }, resolvedAt: string): ItemProgress | undefined {
+export function progressBeforeResolution(records: ItemProgressRecord[], item: { projectId: string; itemKey: string; section: ItemSection; text: string; inputId?: string }, resolvedAt: string, resolutions: readonly Pick<ItemResolution, 'project_id' | 'item_key' | 'action' | 'created_at'>[] = []): ItemProgress | undefined {
   const at = Date.parse(resolvedAt);
-  const latest = records.filter(r => r.project_id === item.projectId && (r.item_key === item.itemKey || (r.section === item.section && r.text === item.text)) && Date.parse(r.created_at) <= at).at(-1);
+  const closedItself = (r: ItemProgressRecord) => resolutions.some(x => x.project_id === item.projectId && x.item_key === r.item_key && x.action !== 'reopen' && Date.parse(x.created_at) >= Date.parse(r.created_at) && Date.parse(x.created_at) <= at);
+  const latest = records.filter(r => r.project_id === item.projectId && Date.parse(r.created_at) <= at && (r.item_key === item.itemKey || (r.section === item.section && (r.text === item.text || (item.inputId !== undefined && r.input_id === item.inputId)) && !closedItself(r)))).at(-1);
   return latest?.progress ?? undefined;
+}
+
+/** 先に済ませることが残っている項目（先待ち）かを判定する関数。取りかかり中でも、先待ちの間はHOMEと同じく先待ちとして扱う。 */
+/** 行動に引き取った・移した先の項目はほかの置き場にあることがあるため、すべての置き場の一覧から探す。一覧を読めないときは先待ちとしない。 */
+export async function prerequisiteHold(vault: Vault, scopes: Iterable<string>): Promise<(item: Pick<NowItem, 'after'>) => boolean> {
+  let prerequisites: Awaited<ReturnType<typeof prerequisiteLists>>;
+  try { prerequisites = await prerequisiteLists(vault, scopes); } catch { return () => false; }
+  return item => !!item.after && !blockSettled(item.after.items.map(a => prerequisiteState(a, prerequisites.lists, prerequisites.resolutions, prerequisites.targets)));
 }

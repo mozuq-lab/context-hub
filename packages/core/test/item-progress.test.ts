@@ -15,7 +15,8 @@ import { UNASSIGNED_SCOPE, readNowItems, setItemResolution } from '../src/item-r
 import { setItemSchedule } from '../src/item-schedules.js';
 import { setItemWait } from '../src/item-waits.js';
 import { setItemSomeday } from '../src/item-somedays.js';
-import { PROGRESS_LIMIT, progressDetail, readItemProgress, setItemProgress } from '../src/item-progress.js';
+import { PROGRESS_LIMIT, progressBeforeResolution, progressDetail, readItemProgress, setItemProgress } from '../src/item-progress.js';
+import { setItemBlocks } from '../src/item-blocks.js';
 import { buildWeeklyReview, weeklyReviewDigestLines } from '../src/weekly-review.js';
 import { unassignedItemsPath } from '../src/unassigned-actions.js';
 const roots: string[] = [];
@@ -191,4 +192,51 @@ test('印もひとことも14日更新がないと週次レビューとふりか
   const review = (await vault.read('REVIEW.md'))!;
   expect(review).toContain('## 取りかかり中');
   expect(review).toMatch(/- 完了: \[集約ツール\]\(10_projects\/hub\/NOW\.md\) 名前を決める（始めてから\d+日で完了）/);
+});
+
+test('先に済ませることとの組み合わせ: 片付いた後は取りかかり中に出し、残っている間は先待ちとして止まった取りかかり中に数えない', async () => {
+  const { config, vault, items } = await fixture();
+  const show = find(items, '利用者に見せる'), name = find(items, '名前を決める');
+  await setItemBlocks(config, { projectId: 'hub', itemKey: show.key, after: [{ projectId: 'hub', itemKey: name.key }], source: 'cli' });
+  await setItemResolution(config, { projectId: 'hub', itemKey: name.key, action: 'resolve', source: 'cli' });
+  // 14日以上更新していない印（止まった取りかかり中）。
+  await writeOld(vault, show, 'PROG-01JZ0000000000000000000009', { since: '2026-10-01', note: '半分' }, '2026-10-02T00:00:00Z');
+  // 項目一覧を作り直す（別の項目に日付を付ける）。
+  await setItemSchedule(config, { projectId: 'hub', itemKey: find(items, '説明を書く').key, due: null, reviewAfter: '2026-12-01', source: 'cli' });
+  expect((await buildWeeklyReview(config, vault, clock)).progress_stale?.map(r => r.item_key)).toEqual([show.key]);
+  await rebuildDashboard(config, { now: clock });
+  const page = await home(vault);
+  // 動けるようになった項目に取りかかったら、取りかかり中の欄にひとこと付きで出し、動けるようになった項目には重ねない。
+  expect(page).toContain('### 取りかかり中（1件）');
+  expect(page).toContain('どこまで: 半分');
+  expect(page).not.toMatch(/動けるようになった[^\n]*\n[^#]*利用者に見せる/);
+
+  // 先の項目を未解決へ戻すと先待ちになり、14日更新がなくても止まった取りかかり中・ふりかえりの取りかかり中には数えない。
+  await setItemResolution(config, { projectId: 'hub', itemKey: name.key, action: 'reopen', source: 'cli' });
+  expect('progress_stale' in await buildWeeklyReview(config, vault, clock)).toBe(false);
+  await rebuildDashboard(config, { now: clock });
+  expect(await home(vault)).not.toContain('### 取りかかり中');
+});
+
+test('同じ本文の別の項目の印は、その項目が片付いた後ならふりかえりの「何日で完了」に数えない', () => {
+  const base = { schema_version: 1 as const, project_id: 'hub', section: 'next' as const, text: '資料を作る', input_id: 'IN-01JZ0000000000000000000001', source: 'cli' };
+  const k1 = 'a'.repeat(64), k2 = 'b'.repeat(64), k3 = 'c'.repeat(64);
+  const records = [{ ...base, id: 'PROG-01JZ0000000000000000000001', item_key: k1, progress: { since: '2026-11-01' }, created_at: '2026-11-01T00:00:00Z' }];
+  const resolutions = [{ project_id: 'hub', item_key: k1, action: 'resolve' as const, created_at: '2026-11-05T00:00:00Z' }];
+  // K1は片付いた後なので、同じ本文のK2には数えない。
+  expect(progressBeforeResolution(records, { projectId: 'hub', itemKey: k2, section: 'next', text: '資料を作る' }, '2026-11-25T00:00:00Z', resolutions)).toBeUndefined();
+  // K1が片付いていなければ、作業要約でキーが変わった同じ項目として数える。
+  expect(progressBeforeResolution(records, { projectId: 'hub', itemKey: k2, section: 'next', text: '資料を作る' }, '2026-11-25T00:00:00Z', [])).toEqual({ since: '2026-11-01' });
+  // 本人が追加した行動は、文面を直しても同じ入力の印を数える。
+  expect(progressBeforeResolution(records, { projectId: 'hub', itemKey: k3, section: 'next', text: '資料を作って送る', inputId: base.input_id }, '2026-11-25T00:00:00Z', [])).toEqual({ since: '2026-11-01' });
+});
+
+test('連絡待ち・「いつかやる」にした項目は、NOWの行末に取りかかり中を示さない', async () => {
+  const { config, vault, items } = await fixture();
+  const show = find(items, '利用者に見せる');
+  await setItemProgress(config, { projectId: 'hub', itemKey: show.key, progress: { since: '2026-11-18' }, source: 'cli', now: clock });
+  expect(await now(vault)).toContain('取りかかり中 2026-11-18から');
+  await setItemWait(config, { projectId: 'hub', itemKey: show.key, waiting: { since: '2026-11-19' }, source: 'cli', now: clock });
+  expect(await now(vault)).not.toContain('取りかかり中');
+  expect(find((await readNowItems(vault, 'hub'))!.items, '利用者に見せる').progress?.since).toBe('2026-11-18');
 });

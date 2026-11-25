@@ -214,7 +214,7 @@ const clip = (s: string, n = 120) => clipText(s, n);
 const destination = (path: string) => /[\s()]/.test(path) ? `<${path}>` : path;
 /** 行動の行末に付ける、本人が付けた連絡待ち・日付・手間の目安の表示（なければ空文字）。連絡待ちの相手は、呼び出し側が必要なときだけ示す。 */
 export function unassignedItemLabel(item: Pick<NowItem, 'schedule' | 'effort' | 'waiting' | 'someday' | 'steps' | 'progress'>): string {
-  const label = [item.someday ? SOMEDAY_LABEL : '', item.waiting ? waitingLabel(item.waiting) : '', item.progress ? progressLabel(item.progress) : '', item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : '', item.steps ? clipText(stepsLabel(item.steps), 80) : ''].filter(Boolean).join('・');
+  const label = [item.someday ? SOMEDAY_LABEL : '', item.waiting ? waitingLabel(item.waiting) : '', item.progress && !item.waiting && !item.someday ? progressLabel(item.progress) : '', item.schedule ? scheduleLabel({ due: item.schedule.due, review_after: item.schedule.review_after, repeat: item.schedule.repeat ?? null }) : '', item.effort ? effortLabel(item.effort) : '', item.steps ? clipText(stepsLabel(item.steps), 80) : ''].filter(Boolean).join('・');
   return label ? `（${label}）` : '';
 }
 /**

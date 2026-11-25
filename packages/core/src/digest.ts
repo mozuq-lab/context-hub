@@ -11,7 +11,7 @@ import { lastEvidenceAt } from './views.js';
 import { insightFeedbackSection, insightsSection, readInsights } from './insights.js';
 import { UNASSIGNED_SCOPE, activeResolutions, exclusionReasonLabels, itemKey, readItemResolutions, readNowItems } from './item-resolutions.js';
 import { WAITING_LONG_DAYS, waitingDays } from './item-waits.js';
-import { PROGRESS_STALE_DAYS, progressBeforeResolution, progressDetail, progressStale, readItemProgress } from './item-progress.js';
+import { PROGRESS_STALE_DAYS, prerequisiteHold, progressBeforeResolution, progressDetail, progressStale, readItemProgress } from './item-progress.js';
 import { buildSomedayList, somedayDigestLines } from './someday.js';
 import { buildWeeklyReview, weeklyReviewDigestLines } from './weekly-review.js';
 import { todayIn } from './item-schedules.js';
@@ -201,9 +201,13 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
   {
     const today = todayIn(config.timezone, now), started: { updated: string; since: string; place: string; text: string; note?: string }[] = [], finished: { days: number; place: string; text: string; at: string }[] = [];
     const lists: { id: string; place: string }[] = [...projects.filter(p => !merged.has(p.id) && lifecycleOf(p) === 'active').map(p => ({ id: p.id, place: `[${plain(p.title)}](10_projects/${p.id}/NOW.md)` })), { id: UNASSIGNED_SCOPE, place: UNASSIGNED_TITLE }];
+    // 先待ちの項目は、HOMEと同じく先待ちとして扱い、取りかかり中には数えない。
+    const held = await prerequisiteHold(vault, [UNASSIGNED_SCOPE, ...projects.map(p => p.id)]), actions = new Map<string, Map<string, string>>();
     for (const { id, place } of lists) {
       let list; try { list = await readNowItems(vault, id); } catch { continue; /* 壊れた項目一覧はHOMEとdoctorで示す。 */ }
-      for (const i of list?.items ?? []) if (i.resolution === null && i.progress && !i.waiting && !i.someday) started.push({ updated: i.progress.updated, since: i.progress.since, place, text: clip(i.label + i.text), ...(i.progress.note !== undefined ? { note: i.progress.note } : {}) });
+      // 本人が追加した行動の入力（文面を直してキーが変わっても、同じ行動の印を探すため）。
+      actions.set(id, new Map((list?.items ?? []).filter(i => i.action !== undefined).map(i => [i.key, i.input_id])));
+      for (const i of list?.items ?? []) if (i.resolution === null && i.progress && !i.waiting && !i.someday && !held(i)) started.push({ updated: i.progress.updated, since: i.progress.since, place, text: clip(i.label + i.text), ...(i.progress.note !== undefined ? { note: i.progress.note } : {}) });
     }
     let records: Awaited<ReturnType<typeof readItemProgress>>['records'] = [];
     try { records = (await readItemProgress(vault)).records; } catch { /* 不正な記録はdoctorで示す。 */ }
@@ -211,7 +215,8 @@ export async function buildDigest(config: HubConfig, options: DigestOptions = {}
       const closed = activeResolutions(resolutions.filter(r => Date.parse(r.created_at) <= now.getTime()), id);
       for (const r of closed.values()) {
         if (r.action !== 'resolve' || r.section !== 'next' || !inWindow(r.created_at)) continue;
-        const progress = progressBeforeResolution(records, { projectId: id, itemKey: r.item_key, section: r.section, text: r.text }, r.created_at);
+        const inputId = actions.get(id)?.get(r.item_key);
+        const progress = progressBeforeResolution(records, { projectId: id, itemKey: r.item_key, section: r.section, text: r.text, ...(inputId !== undefined ? { inputId } : {}) }, r.created_at, resolutions);
         if (progress) finished.push({ days: waitingDays(progress.since, todayIn(config.timezone, new Date(r.created_at))), place, text: clip(r.text), at: r.created_at });
       }
     }

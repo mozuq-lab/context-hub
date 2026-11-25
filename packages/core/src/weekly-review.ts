@@ -5,7 +5,7 @@ import { Vault } from './storage.js';
 import { UNASSIGNED_SCOPE, activeResolutions, readItemResolutions, readNowItems, type NowItem } from './item-resolutions.js';
 import { addDays, effectiveSchedules, readItemSchedules, scheduleBucket, scheduleDateSchema, todayIn, type ItemSchedule } from './item-schedules.js';
 import { WAITING_LONG_DAYS, waitingDays } from './item-waits.js';
-import { PROGRESS_STALE_DAYS, progressStale } from './item-progress.js';
+import { PROGRESS_STALE_DAYS, prerequisiteHold, progressStale } from './item-progress.js';
 import { SOMEDAY_REVIEW_DAYS, buildSomedayList, somedayStale } from './someday.js';
 import { buildReviewIndex } from './candidate-review.js';
 import { readGitDraftRecords } from './git-drafts.js';
@@ -144,9 +144,10 @@ export async function buildWeeklyReview(config: HubConfig, vault: Vault, now = n
   const addWaiting = (scope: string, i: NowItem, schedule: Pick<ItemSchedule, 'review_after'> | undefined) => {
     if (i.waiting) waiting.push({ ...ref(scope, i), since: i.waiting.since, check: schedule?.review_after != null && schedule.review_after <= today });
   };
-  /** 止まった取りかかり中。連絡待ち・「いつかやる」の項目は呼ぶ側で除く。 */
+  /** 止まった取りかかり中。連絡待ち・「いつかやる」の項目は呼ぶ側で除き、先待ちの項目（今は手を動かせない）はここで除く。 */
+  const held = await prerequisiteHold(vault, [UNASSIGNED_SCOPE, ...projects.map(p => p.id)]);
   const addStalled = (scope: string, i: NowItem) => {
-    if (i.progress && progressStale(i.progress, today)) stalled.push({ ...ref(scope, i), since: i.progress.since, updated: i.progress.updated, ...(i.progress.note !== undefined ? { note: i.progress.note } : {}) });
+    if (i.progress && !held(i) && progressStale(i.progress, today)) stalled.push({ ...ref(scope, i), since: i.progress.since, updated: i.progress.updated, ...(i.progress.note !== undefined ? { note: i.progress.note } : {}) });
   };
   const ordered: { row: WeeklyReviewList['projects'][number]; at: number }[] = [];
   for (const project of projects) {

@@ -9,7 +9,7 @@ import { readNowItems,readItemResolutions,activeResolutions,UNASSIGNED_SCOPE } f
 import { effortLabel,type ItemEffort } from './item-efforts.js';
 import { stepsLabel,type ItemStepsValue } from './item-steps.js';
 import { readItemWaits,waitingDays } from './item-waits.js';
-import { PROGRESS_LIMIT,progressDetail,type NowItemProgress } from './item-progress.js';
+import { PROGRESS_LIMIT,progressDetail,readItemProgress,type NowItemProgress } from './item-progress.js';
 import { blockSettled,locatePrerequisite,prerequisiteLists,prerequisiteState,readItemBlocks,type NowItemAfter } from './item-blocks.js';
 import { dayNoteSection,readDayCloses } from './day-closes.js';
 import { readItemSomedays,orphanedSomedays } from './item-somedays.js';
@@ -160,8 +160,10 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
      const schedule=i.resolution===null?scheduled.get(i.key):undefined;
      // 先に済ませることが付いた項目（連絡待ちの項目は連絡待ちとして扱う）。
      const block=i.resolution===null&&!i.waiting&&i.after?blockNote(project.id,i.after):undefined;
-     if(block){front.add(i.key);(block.settled?ready:blocked).push({at,id:project.id,row:`- [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}（${block.text}${schedule?`・${scheduleLabel(schedule)}`:''}）`});}
-     if(i.resolution===null&&i.progress&&!i.waiting&&!block){front.add(i.key);progressing.push({updated:i.progress.updated,id:project.id,place:`[${plain(project.title)}](${now})`,text:`次の一手: ${clip(i.label+i.text)}`,progress:i.progress,dates:[schedule?scheduleLabel(schedule):'',i.effort?effortLabel(i.effort):'',i.steps?clip(stepsLabel(i.steps),80):''].filter(Boolean).join('・')});}
+     // 取りかかり中の項目は、先に済ませることが片付いていれば取りかかり中の欄に出す（先待ちの間は先待ちとして扱う）。
+     const working=i.resolution===null&&!!i.progress&&!i.waiting&&!(block&&!block.settled);
+     if(block&&!working){front.add(i.key);(block.settled?ready:blocked).push({at,id:project.id,row:`- [${plain(project.title)}](${now}) ${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}（${block.text}${schedule?`・${scheduleLabel(schedule)}`:''}）`});}
+     if(working&&i.progress){front.add(i.key);progressing.push({updated:i.progress.updated,id:project.id,place:`[${plain(project.title)}](${now})`,text:`次の一手: ${clip(i.label+i.text)}`,progress:i.progress,dates:[schedule?scheduleLabel(schedule):'',i.effort?effortLabel(i.effort):'',i.steps?clip(stepsLabel(i.steps),80):''].filter(Boolean).join('・')});}
      if(i.resolution===null&&i.waiting){front.add(i.key);waiting.push({since:i.waiting.since,id:project.id,place:`[${plain(project.title)}](${now})`,text:`${i.section==='next'?'次の一手: ':i.label?'':'未解決: '}${clip(i.label+i.text)}`,...(i.waiting.who?{who:i.waiting.who}:{}),dates:schedule?scheduleLabel(schedule):'',check:schedule?.review_after!=null&&schedule.review_after<=today});}
      if(!schedule)continue;
      calendarItems.push({projectId:project.id,projectTitle:project.title,itemKey:i.key,section:i.section,text:i.label+i.text,due:schedule.due,reviewAfter:schedule.review_after,scheduledAt:schedule.created_at});
@@ -304,6 +306,7 @@ export async function rebuildDashboardLocked(config:HubConfig,vault:Vault,option
   for(const path of schedules.problems)errors.push(`- [期日・見直す日の記録が不正です](${path})`);
   for(const path of (await readItemWaits(vault)).problems)errors.push(`- [連絡待ちの記録が不正です](${path})`);
   for(const path of (await readItemBlocks(vault)).problems)errors.push(`- [先に済ませることの記録が不正です](${path})`);
+  for(const path of (await readItemProgress(vault)).problems)errors.push(`- [取りかかり中の記録が不正です](${path})`);
   for(const path of (await readDayCloses(vault)).problems)errors.push(`- [1日の締めの記録が不正です](${path})`);
   for(const path of [...(await readItemSomedays(vault)).problems,...(await readSomedayReviews(vault)).problems])errors.push(`- [「いつかやる」の記録が不正です](${path})`);
   // 資料を加える・外す記録の不正。不正な記録は無いものとして資料棚を作る。
