@@ -10,6 +10,7 @@ import { calendarDateSchema } from './happened.js';
 import { itemEffortSchema } from './item-efforts.js';
 import { contextTagsSchema } from './item-contexts.js';
 import { itemStepsValueSchema } from './item-steps.js';
+import { itemProgressSchema } from './item-progress.js';
 import { itemWaitingSchema } from './item-waits.js';
 import { ITEM_BLOCKS_MAX } from './item-blocks.js';
 import { dayCloseIdSchema, dayNoteSchema, normalizeDayNote } from './day-closes.js';
@@ -70,6 +71,9 @@ const itemSteps=z.object({...base,operation:z.literal('item-steps'),project_id:i
 const itemBlocks=z.object({...base,operation:z.literal('item-blocks'),project_id:projectIdSchema,item_key:itemKeySchema,after:z.array(z.object({project_id:itemScopeSchema,item_key:itemKeySchema}).strict()).min(1).max(ITEM_BLOCKS_MAX).nullable(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.after===null||new Set(v.after.map(a=>`${a.project_id}\n${a.item_key}`)).size===v.after.length,'同じ項目を2回選んでいます');
 // 1日の締め。closeはonの日を締め、本文を明日へのひとこと（任意・空なら付けない）として残す。dismissは表示中のひとこと（close_idの締め）を消す（本文は空）。
 const dayClose=z.object({...base,operation:z.literal('day-close'),action:z.enum(['close','dismiss']),on:scheduleDateSchema.optional(),close_id:dayCloseIdSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='close'?v.on!==undefined&&v.close_id===undefined:v.on===undefined&&v.close_id!==undefined,'締めには日付を、消すときは締めのIDを指定します');
+// 取りかかり中の印。progressは変更後の全体（始めた日と、任意のどこまで進んだかのひとこと）で、nullは印を外す依頼。
+// expectedは本人が見ていた今の印（なければnull）で、今の印と違えば受け付けない（古い表示から新しいひとことを上書きしないため）。
+const itemProgress=z.object({...base,operation:z.literal('item-progress'),project_id:itemScopeSchema,item_key:itemKeySchema,progress:itemProgressSchema.nullable(),expected:itemProgressSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 const itemWait=z.object({...base,operation:z.literal('item-wait'),project_id:itemScopeSchema,item_key:itemKeySchema,waiting:itemWaitingSchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
 // 「いつかやる」。somedayは変更後の全体（移した日と、最後に見直した日）で、nullは元の欄へ戻す依頼。
 const itemSomeday=z.object({...base,operation:z.literal('item-someday'),project_id:itemScopeSchema,item_key:itemKeySchema,someday:itemSomedaySchema.nullable(),confirmed:z.literal(true),text:z.string()}).strict();
@@ -105,7 +109,7 @@ const organizeRetry=z.object({...base,operation:z.literal('organize-retry'),inpu
 // 保存済みのメモを資料棚に載せる（add。名前を変える・外した資料を戻すのも同じ）か、資料棚から外す（remove）。titleは変更後の名前で、省くと名前なし（AIの要約を示す）。
 const referenceMark=z.object({...base,operation:z.literal('reference-mark'),input_id:inputIdSchema,action:referenceMarkActionSchema,title:referenceTitleSchema.optional(),confirmed:z.literal(true),text:z.string()}).strict().refine(v=>v.action==='add'||v.title===undefined,'外すときは名前を指定しません');
 const policyKeep=z.object({...base,operation:z.literal('policy-keep'),knowledge_id:z.string().regex(/^KNW-[0-9A-HJKMNP-TV-Z]{26}$/),knowledge_hash:z.string().regex(/^[a-f0-9]{64}$/),confirmed:z.literal(true),text:z.string()}).strict();
-const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemContexts, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition, organizeRetry, projectArea, itemSteps, referenceMark, itemBlocks, dayClose]);
+const schema = z.union([captureSchema, correctionSchema, decisionSchema, knowledgeApprove, knowledgeReject, knowledgeRetire, projectStatus, projectDefinition, projectMerge, itemResolution, itemHintDismiss, itemSchedule, itemOccurrence, itemEffort, itemContexts, itemWait, itemSomeday, somedayReview, weeklyReview, gitDraftDismiss, projectCreate, conflictResolve, ideaLink, insightReaction, askSchema, preferencesSchema, policyKeep, personDefinition, organizeRetry, projectArea, itemSteps, referenceMark, itemBlocks, dayClose, itemProgress]);
 export type IntakeRequest = z.infer<typeof schema>;
 export function decodeIntake(bytes: Uint8Array): string {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }

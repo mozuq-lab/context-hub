@@ -44,6 +44,7 @@ POLICY.md                      共通の有効方針（派生集約）
 90_system/project-areas/       本人がプロジェクトに付けた領域の変更の記録
 90_system/organize-retries/    本人が頼んだ、整理に失敗したメモのやり直し
 90_system/item-waits/          次の一手・未解決に本人が付けた連絡待ちの印（相手・頼んだ日）
+90_system/item-progress/       次の一手に本人が付けた取りかかり中の印（始めた日・どこまで進んだかのひとこと）
 90_system/item-blocks/         プロジェクトの次の一手・未解決に本人が付けた「先に済ませること」（先の項目の置き場・キー・本文）
 90_system/day-closes/          本人が1日を締めた記録と明日へのひとこと、ひとことを消した記録
 90_system/item-somedays/       次の一手・未解決を本人が「いつかやる」へ移した記録（移した日・見直した日）

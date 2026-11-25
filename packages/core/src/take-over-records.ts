@@ -12,13 +12,14 @@ import { readItemWaits, waitCleared, waitPath, type ItemWaitRecord } from './ite
 import { readItemSomedays, somedayCleared, somedayPath, type ItemSomedayRecord } from './item-somedays.js';
 import { readItemSteps, stepsCleared, stepsPath, type ItemStepsRecord } from './item-steps.js';
 import { blocksCleared, blocksPath, readItemBlocks, type ItemBlockRecord } from './item-blocks.js';
+import { progressCleared, progressPath, readItemProgress, type ItemProgressRecord } from './item-progress.js';
 import type { HubConfig } from './types.js';
 
 /** 引き取った行動。scopeは行動の置き場のプロジェクト（省略はプロジェクト未定）、textは保存した行動の本文。 */
 export interface TakenOverAction { inputId: string; scope?: string; text: string; fromKey: string; source: string }
 
 /**
- * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、場所・道具の札、連絡待ちの印、「いつかやる」、手順、
+ * AIの行を「自分の行動にする」で引き取ったとき、元の行に効いていた期日・見直す日・繰り返しと手間の目安、場所・道具の札、連絡待ちの印、「いつかやる」、手順、取りかかり中の印、
  * 先に済ませること（行動をプロジェクトに置くときだけ）を、行動の記録として写す（Writerロック内）。
  * 元の行と行動は置き場もキーも違うことがあり（別のプロジェクト・プロジェクト未定）、元の行の日付は作業要約が届くたびに別のキーの記録から引き継がれているため、
  * 読むたびに元の行をたどるのではなく、引き取った時点で効いている記録を行動の記録にする。
@@ -54,6 +55,12 @@ export async function carryTakenOverRecordsLocked(config: HubConfig, vault: Vaul
   if (step && !steps.records.some(r => r.source_event_id === takeOverEvent(action.inputId, step.id))) {
     const record: ItemStepsRecord = { ...base, id: `STP-${ulid()}`, steps: step.steps, source_event_id: takeOverEvent(action.inputId, step.id) };
     if (!await vault.create(stepsPath(record.id), JSON.stringify(sorted(record, stepsOrder), null, 2) + '\n')) throw new Error('手順の記録が競合しました');
+  }
+  const progress = await readItemProgress(vault), started = effectiveItemRecords(progress.records, source.scope, source.items, resolved, progressCleared).byKey.get(action.fromKey);
+  if (started && !progress.records.some(r => r.source_event_id === takeOverEvent(action.inputId, started.id))) {
+    // 書いた日は元の記録のままにする（引き取っただけで印を更新したことにせず、止まった取りかかり中の日数を保つ）。
+    const record: ItemProgressRecord = { ...base, id: `PROG-${ulid()}`, progress: started.progress, source_event_id: takeOverEvent(action.inputId, started.id), created_at: started.created_at };
+    if (!await vault.create(progressPath(record.id), JSON.stringify(sorted(record, progressOrder), null, 2) + '\n')) throw new Error('取りかかり中の記録が競合しました');
   }
   // 先に済ませることは、プロジェクトの項目にだけ付けられる（プロジェクト未定へ引き取った行動には写さない）。
   if (scope !== UNASSIGNED_SCOPE) {
@@ -136,6 +143,7 @@ const scheduleOrder = ['schema_version', 'id', 'project_id', 'item_key', 'sectio
 const stepsOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'steps', 'source', 'source_event_id', 'created_at'];
 const somedayOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'someday', 'source', 'source_event_id', 'created_at'];
 const blocksOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'after', 'source', 'source_event_id', 'created_at'];
+const progressOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'progress', 'source', 'source_event_id', 'created_at'];
 const waitOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'waiting', 'source', 'source_event_id', 'created_at'];
 const contextOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'contexts', 'source', 'source_event_id', 'created_at'];
 const effortOrder = ['schema_version', 'id', 'project_id', 'item_key', 'section', 'text', 'input_id', 'effort', 'source', 'source_event_id', 'created_at'];
