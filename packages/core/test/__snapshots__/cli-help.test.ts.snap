@@ -1,0 +1,991 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`全コマンドの--helpの文面（説明・引数・オプション・既定値・選択肢・並び順）が変わらない 1`] = `
+{
+  "ctx": "Usage: ctx [options] [command]
+
+Markdownを正本とする個人用AI Context Hub
+
+Options:
+  -V, --version                        output the version number
+  --config <path>                      設定ファイル
+  --vault <path>                       明示的な保存先
+  --state <path>                       Vault外のローカル状態
+  -h, --help                           display help for command
+
+Commands:
+  init                                 保存先を初期化（既存ノートは保持）
+  add [options] [text]                 原文を保存
+  project                              人によるプロジェクト管理
+  correct [options] <id> [text]        元原文を保持して最新入力を訂正
+  item                                 NOWの次の一手・未解決を、本人の確認で完了・解決にする、誤りとして外す、または未解決へ戻す
+  history [project]                    プロジェクトの経緯HISTORY.mdを根拠と処理記録から作り直す（省略時は全プロジェクト）
+  references [project]                 プロジェクトの資料REFERENCES.md（本人が資料にしたメモとAIが参考資料に分類したメモ、URLの一覧）を整理結果と資料の記録から作り直す（省略時は全プロジェクト）
+  reference                            資料棚に載せる資料を本人が決める（AIの分類より優先する）。本文やURLを直すときはcorrectを使う
+  git                                  設定したローカルリポジトリのコミット履歴から作業記録の下書きを作る（既定は無効）
+  person                               人ごとの見返し:
+                                       本人が登録した人の名前・呼び名が出てくる記録と未完了の項目を40_people/に集める（AIは使わない）
+  idea                                 似ているアイデアを確認し、本人の判断で束ねる・別の話にする（AIは使わない）
+  someday                              「いつかやる」の一覧（移した項目・休止中のプロジェクト・置いたアイデア）を見直す。最後に見直した日の古い順に並び、30日以上見直していないものに印が付く。AIは置きも始めもしない
+  weekly-review                        週次レビュー:
+                                       確認待ち・プロジェクト未定の行動・進行中のプロジェクト・停滞・連絡待ち・期日・いつかやるを順に点検する。7日以上見直していなければHOMEで促す。見直した記録は本人の報告だけで作る
+  day                                  1日の締め:
+                                       その日を締め、明日へのひとこと（任意・3行・300文字以内）を残す。ひとことは次に締めるか消すまでHOMEの先頭に出て、ふりかえりにも載る。整理用のモデルへは渡さない
+  conflict                             生成物の競合（手で書き換えたNOW・HOME・REVIEW）を確認し、生成版へ戻す
+  organize [options]                   未処理入力を整理
+  find [options] [query]               原文・アイデア・知識・NOWを検索。絞り込み条件があれば検索語は省略可
+  ask [options] <question...>          記録だけを根拠に、問いへ引用付きで答える（AI生成・未検証。引用は記録と一致するものだけを残す）。整理と同じモデルを1回呼ぶ
+  retry-organize [options] <input-id>  整理（AIの読み取り）に失敗したメモ1件のやり直しを頼み、次の整理（cycle）で1回だけ試す。organize
+                                       --retry-failedと違い、選んだ1件だけを対象にし、organize.maxAttemptsには縛られない
+  ingest [options]                     同期受付ファイルを正式保存
+  digest [options]                     直近の期間のふりかえりREVIEW.mdを生成
+  dashboard                            プロジェクト一覧と処理状況のHOMEを生成
+  synthesize [options]                 週次の統合を実行（たまったメモをまとめて読み直し、気づきをふりかえりとHOMEへ出す）。設定のsynthesis.enabledが必要
+  cycle [options]                      受付・整理・再関連付け・HOME生成
+  recent [options]
+  pending
+  resume <project>
+  context [options] <project>
+  bundle [options] <ids...>            選んだ記録（IN・IDEA・KNWのID、NOWはプロジェクトID。最大50件）を、出典・訂正の注意・方針付きの1つの資料にする
+  policies [options]                   同期版の有効方針を読取専用で取得
+  policy                               採用した方針（判断・好み）を、本人が定期的に見直す
+  retire [options] <id>
+  candidates
+  approve [options] <id>
+  reject [options] <id>
+  propose [options] <claim>
+  backup                               バックアップから復元できるかを確かめる（元のVaultは読むだけで、書き換えない）
+  doctor [options]                     Vaultと処理記録を検査
+  help [command]                       display help for command
+",
+  "ctx add": "Usage: ctx add [options] [text]
+
+原文を保存
+
+Options:
+  --file <path>             Markdown/テキストファイル
+  --event-id <id>           再送判定用ID
+  --source <name>           出典名
+  --occurred-at <iso>       タイムゾーン付き発生日時
+  --happened-on <date>      後から記録する出来事の日付（YYYY-MM-DD。記録した日から設定のcapture.maxBackdateDays日前まで）
+  --kind <kind>             入力の種別 (choices: "memo", "work-summary", default:
+                            "memo")
+  --project <id>            人が指定する既存プロジェクト
+  --tool <name>             作業したAI/ツール
+  --session <reference>     元セッションの参照先
+  --continues <input-id>    続きとして書く前のメモの入力ID（--projectを省くと、前のメモで指定したプロジェクトを引き継ぐ）
+  --reference               資料として保存する（AIの分類に関係なく資料棚に載せる）
+  --reference-title <text>  資料の名前（--referenceと一緒に指定。1行・100文字以内）
+  --attach <path>           メモに添えるファイル（PDF・画像など）。Vaultの05_filesに複製し、資料として保存する。本文を省くとファイル名を本文にする
+  -h, --help                display help for command
+",
+  "ctx approve": "Usage: ctx approve [options] <id>
+
+Options:
+  --hash <sha256>          候補一覧で確認した内容ハッシュ
+  --scope <scope>          global または project
+  --project <id>           採用先ContextHubプロジェクト
+  --project-hash <sha256>  確認したproject.mdのハッシュ
+  -h, --help               display help for command
+",
+  "ctx ask": "Usage: ctx ask [options] <question...>
+
+記録だけを根拠に、問いへ引用付きで答える（AI生成・未検証。引用は記録と一致するものだけを残す）。整理と同じモデルを1回呼ぶ
+
+Options:
+  --project <id>  このプロジェクトに帰属・関連する記録から答える
+  --dry-run       根拠の候補として渡す記録だけを表示。モデルは呼ばない
+  --json          JSONで出力
+  -h, --help      display help for command
+",
+  "ctx backup": "Usage: ctx backup [options] [command]
+
+バックアップから復元できるかを確かめる（元のVaultは読むだけで、書き換えない）
+
+Options:
+  -h, --help        display help for command
+
+Commands:
+  verify [options]  最新（または指定）のアーカイブをVault外の一時フォルダーへ展開して確かめ、結果を記録してHOMEを更新
+  status            最後の確認結果と、確かめた復元点
+  help [command]    display help for command
+",
+  "ctx backup status": "Usage: ctx backup status [options]
+
+最後の確認結果と、確かめた復元点
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx backup verify": "Usage: ctx backup verify [options]
+
+最新（または指定）のアーカイブをVault外の一時フォルダーへ展開して確かめ、結果を記録してHOMEを更新
+
+Options:
+  --archive <path>   確かめるアーカイブ（省略時は設定のbackup.dirでいちばん新しいもの）
+  --work-dir <path>  展開先の親フォルダー（省略時はOSの一時フォルダー。Vaultと同期フォルダーの外にする）
+  --keep             確認後も展開先を残す（中身を自分で確かめるとき）
+  -h, --help         display help for command
+",
+  "ctx bundle": "Usage: ctx bundle [options] <ids...>
+
+選んだ記録（IN・IDEA・KNWのID、NOWはプロジェクトID。最大50件）を、出典・訂正の注意・方針付きの1つの資料にする
+
+Options:
+  --max-chars <n>  最大文字数
+  -h, --help       display help for command
+",
+  "ctx candidates": "Usage: ctx candidates [options]
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx conflict": "Usage: ctx conflict [options] [command]
+
+生成物の競合（手で書き換えたNOW・HOME・REVIEW）を確認し、生成版へ戻す
+
+Options:
+  -h, --help                  display help for command
+
+Commands:
+  list                        対象ごとの退避・手で変えた行・確認用ハッシュを表示
+  resolve [options] <target>  手で変えた行をメモとして残し、最新の入力から作り直して退避を片付ける（例:
+                              10_projects/<id>/NOW.md）
+  help [command]              display help for command
+",
+  "ctx conflict list": "Usage: ctx conflict list [options]
+
+対象ごとの退避・手で変えた行・確認用ハッシュを表示
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx conflict resolve": "Usage: ctx conflict resolve [options] <target>
+
+手で変えた行をメモとして残し、最新の入力から作り直して退避を片付ける（例: 10_projects/<id>/NOW.md）
+
+Options:
+  --hash <sha256>  conflict listで確認した対象のハッシュ
+  --no-memo        NOWの手で変えた行をメモとして保存しない（置き換えた全文は記録に残る）
+  --confirm        差分を確認した本人による操作
+  -h, --help       display help for command
+",
+  "ctx context": "Usage: ctx context [options] <project>
+
+Options:
+  --max-chars <n>  最大文字数
+  -h, --help       display help for command
+",
+  "ctx correct": "Usage: ctx correct [options] <id> [text]
+
+元原文を保持して最新入力を訂正
+
+Options:
+  --file <path>    訂正文ファイル
+  --event-id <id>  再送判定ID
+  --source <name>  出典名 (default: "cli-correction")
+  -h, --help       display help for command
+",
+  "ctx cycle": "Usage: ctx cycle [options]
+
+受付・整理・再関連付け・HOME生成
+
+Options:
+  --limit <n>         整理と回復の合計上限
+  --dry-run           書き込みとモデル呼び出しなし
+  --retry-failed      失敗分を再試行
+  --quiet-empty       新規処理と失敗がない場合NO_REPLY
+  --thinking <level>  思考水準 (choices: "off", "minimal", "low", "medium", "high")
+  -h, --help          display help for command
+",
+  "ctx dashboard": "Usage: ctx dashboard [options]
+
+プロジェクト一覧と処理状況のHOMEを生成
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx day": "Usage: ctx day [options] [command]
+
+1日の締め:
+その日を締め、明日へのひとこと（任意・3行・300文字以内）を残す。ひとことは次に締めるか消すまでHOMEの先頭に出て、ふりかえりにも載る。整理用のモデルへは渡さない
+
+Options:
+  -h, --help         display help for command
+
+Commands:
+  close [options]    その日を締める。同じ日を締め直すと、最後の締めがその日の締めになる（7日前までさかのぼれる）
+  dismiss [options]  表示中の明日へのひとことを消す（HOMEの先頭から外す。締めの記録は残る）
+  list [options]     締めた日とひとことの一覧（新しい順）と、いまHOMEに出ているひとこと
+  help [command]     display help for command
+",
+  "ctx day close": "Usage: ctx day close [options]
+
+その日を締める。同じ日を締め直すと、最後の締めがその日の締めになる（7日前までさかのぼれる）
+
+Options:
+  --on <date>    締める日（YYYY-MM-DD。既定は今日）
+  --note <text>  明日へのひとこと（改行は\\nではなく、実際の改行で書く）
+  --confirm      その日を締めた本人による報告
+  -h, --help     display help for command
+",
+  "ctx day dismiss": "Usage: ctx day dismiss [options]
+
+表示中の明日へのひとことを消す（HOMEの先頭から外す。締めの記録は残る）
+
+Options:
+  --confirm   ひとことを読んだ本人による操作
+  -h, --help  display help for command
+",
+  "ctx day list": "Usage: ctx day list [options]
+
+締めた日とひとことの一覧（新しい順）と、いまHOMEに出ているひとこと
+
+Options:
+  --limit <n>  件数（既定14） (default: "14")
+  -h, --help   display help for command
+",
+  "ctx digest": "Usage: ctx digest [options]
+
+直近の期間のふりかえりREVIEW.mdを生成
+
+Options:
+  --days <n>  集計日数（既定は設定のretrieve.digestDays）
+  -h, --help  display help for command
+",
+  "ctx doctor": "Usage: ctx doctor [options]
+
+Vaultと処理記録を検査
+
+Options:
+  --unlock    全Writer・整理の停止後、死亡PIDのロック残骸のみ回収
+  -h, --help  display help for command
+",
+  "ctx find": "Usage: ctx find [options] [query]
+
+原文・アイデア・知識・NOWを検索。絞り込み条件があれば検索語は省略可
+
+Options:
+  --project <id>  このプロジェクトに帰属・関連する記録だけ（AI推定は区別して表示）
+  --kind <kinds>  種類、カンマ区切り（memo, work-summary, action, correction, idea,
+                  knowledge, now, reference）
+  --since <date>  この日付（YYYY-MM-DD、JST）または日時以降
+  --until <date>  この日付（YYYY-MM-DD、JST）または日時以前
+  --sort <order>  並び順。検索語がなければnewest (choices: "relevance", "newest")
+  --limit <n>     表示件数（1〜200、既定50）
+  --offset <n>    先頭から飛ばす件数
+  -h, --help      display help for command
+",
+  "ctx git": "Usage: ctx git [options] [command]
+
+設定したローカルリポジトリのコミット履歴から作業記録の下書きを作る（既定は無効）
+
+Options:
+  -h, --help              display help for command
+
+Commands:
+  collect                 下書きを作ってHOMEを更新
+  drafts [options]        下書きの一覧
+  use [options] <id>      下書きの本文をそのまま入力にする
+  dismiss [options] <id>  下書きを見送る
+  help [command]          display help for command
+",
+  "ctx git collect": "Usage: ctx git collect [options]
+
+下書きを作ってHOMEを更新
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx git dismiss": "Usage: ctx git dismiss [options] <id>
+
+下書きを見送る
+
+Options:
+  --hash <sha256>  git draftsで確認したハッシュ
+  --confirm        本文を確認した本人による見送り
+  -h, --help       display help for command
+",
+  "ctx git drafts": "Usage: ctx git drafts [options]
+
+下書きの一覧
+
+Options:
+  --all       入力済み・見送り済みも表示
+  -h, --help  display help for command
+",
+  "ctx git use": "Usage: ctx git use [options] <id>
+
+下書きの本文をそのまま入力にする
+
+Options:
+  --hash <sha256>  git draftsで確認したハッシュ
+  --kind <kind>    入力の種類 (choices: "memo", "work-summary", default: "memo")
+  --confirm        本文を確認した本人による保存
+  -h, --help       display help for command
+",
+  "ctx history": "Usage: ctx history [options] [project]
+
+プロジェクトの経緯HISTORY.mdを根拠と処理記録から作り直す（省略時は全プロジェクト）
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx idea": "Usage: ctx idea [options] [command]
+
+似ているアイデアを確認し、本人の判断で束ねる・別の話にする（AIは使わない）
+
+Options:
+  -h, --help                  display help for command
+
+Commands:
+  similar                     未確認の似ているアイデアの組と、束ねるときに指定するハッシュ
+  groups                      束ねたアイデアの一覧（先頭が代表）。linksは直接束ねた組で、束から外すにはこの組をseparateする
+  link [options] <a> <b>      2件のアイデアを同じ話として束ねる
+  separate [options] <a> <b>  2件のアイデアを別の話として候補から外す（直接束ねた組なら束から外す）
+  help [command]              display help for command
+",
+  "ctx idea groups": "Usage: ctx idea groups [options]
+
+束ねたアイデアの一覧（先頭が代表）。linksは直接束ねた組で、束から外すにはこの組をseparateする
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx idea link": "Usage: ctx idea link [options] <a> <b>
+
+2件のアイデアを同じ話として束ねる
+
+Options:
+  --hash-a <sha256>  idea similarで確認した1件目のハッシュ
+  --hash-b <sha256>  idea similarで確認した2件目のハッシュ
+  --confirm          内容を確認した本人による判断
+  -h, --help         display help for command
+",
+  "ctx idea separate": "Usage: ctx idea separate [options] <a> <b>
+
+2件のアイデアを別の話として候補から外す（直接束ねた組なら束から外す）
+
+Options:
+  --confirm   内容を確認した本人による判断
+  -h, --help  display help for command
+",
+  "ctx idea similar": "Usage: ctx idea similar [options]
+
+未確認の似ているアイデアの組と、束ねるときに指定するハッシュ
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx ingest": "Usage: ctx ingest [options]
+
+同期受付ファイルを正式保存
+
+Options:
+  --limit <n>  受付操作の上限
+  --dry-run    書き込みなし
+  -h, --help   display help for command
+",
+  "ctx init": "Usage: ctx init [options]
+
+保存先を初期化（既存ノートは保持）
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx item": "Usage: ctx item [options] [command]
+
+NOWの次の一手・未解決を、本人の確認で完了・解決にする、誤りとして外す、または未解決へ戻す
+
+Options:
+  -h, --help                                         display help for command
+
+Commands:
+  list <project>                                     直近に生成したNOWの項目とキーを表示
+  resolve [options] <project> <key>                  項目を完了・解決にする
+  reopen [options] <project> <key>                   解決済み、または誤りとして外した項目を未解決へ戻す
+  exclude [options] <project> <key>                  AIの読み違いなどの誤りとして項目を外す（完了・解決とは数えない）。理由: wrong-project=別のプロジェクトの話、misread=読み違い、outdated=もう古い。読み違いと、AIが推定した帰属への「別のプロジェクトの話」は、次のcycleで元のメモを読み直す
+  add [options] <project> [text]                     本人が決めた行動を次の一手に追加する（1行・200文字以内。モデルを使わない）。projectを_unassignedにすると、プロジェクト未定の次の一手に追加する。AIが読み取った行を行動にするときは元の行を指定し、textを省くと元の本文のまま追加する
+  move [options] <project> <key> <to>                本人が追加した行動を別の置き場へ移す（projectとtoはプロジェクトのIDか_unassigned）。期日・見直す日・繰り返し・手間の目安・連絡待ち・「いつかやる」は移した先の行動に引き継ぐ。戻すときは、移した先の行動をもう一度移す
+  dismiss-hint [options] <project> <key> <input-id>  「片付いたかも」が違うとき、そのメモからの候補を見送る（項目は未解決のまま）
+  schedule [options] <project> <key>                 項目に期日・次に見直す日・繰り返しを付ける（noneで外す。指定しなかったものは今のものを保つ）
+  effort [options] <project> <key>                   項目に手間の目安を付ける（quick=15分ほど、hour=1時間ほど、half-day=半日以上。noneで外す）。空いた時間に合う項目を選ぶ手掛かりにする。AIは推測しない
+  contexts [options] <project> <key> [tags...]       項目の場所・道具の札（例: 家・外出先・PC・電話）を、指定した札の全体に置き換える（8個まで・1つ20文字以内）。今いる場所や手元の道具でできる項目を選ぶ手掛かりにする。AIは付けない
+  steps [options] <project> <key> [steps...]         大きな次の一手を手順（2〜10個・1つ200文字以内）に分ける。手順を指定すると全体を置き換えて最初からにし、--nextで今の手順を終えて次へ進め、--backで1つ戻す。NOW・HOMEには今の1歩だけが出る。AIは手順を作らない
+  wait [options] <project> <key>                     項目に「連絡待ち」の印を付ける（人に頼んだこと・返事を待っていること）。印を付けた項目はHOMEの「次の一手」から外れ、「連絡待ち」にまとまる。見直す日（schedule --review）が来ると「次の一手」の先頭に確認として出る。AIは付けない
+  progress [options] <project> <key>                 次の一手に「取りかかり中」の印を付ける（数日かけて進めている項目）。印を付けた項目はHOMEの「次の一手」の先頭の「取りかかり中」にまとまり、14日更新がないと週次レビューとふりかえりに出る。--noteでどこまで進んだかを書き直せる。AIは付けない
+  after [options] <project> <key>                    項目に「先に済ませること」を付ける（別の項目が済むまで手を付けられない）。先の項目が残っている間はHOMEの「次の一手」から外れて「先待ち」にまとまり、すべて片付くと「動けるようになった項目」に出る。付けられるのはプロジェクトの項目だけ。AIは付けない
+  someday [options] <project> <key>                  項目を「いつかやる」へ移す（今はやらないが残しておく）。移した項目はHOMEの「次の一手」の一覧・件数・期日の欄から外れ、「いつかやる」の一覧で30日ごとに見直す。AIは移さない
+  done-round [options] <project> <key>               定例の項目の今回を完了にし、期日を次の回へ進める（項目は残る）
+  skip-round [options] <project> <key>               定例の項目の今回だけを見送り、期日を次の回へ進める
+  help [command]                                     display help for command
+",
+  "ctx item add": "Usage: ctx item add [options] <project> [text]
+
+本人が決めた行動を次の一手に追加する（1行・200文字以内。モデルを使わない）。projectを_unassignedにすると、プロジェクト未定の次の一手に追加する。AIが読み取った行を行動にするときは元の行を指定し、textを省くと元の本文のまま追加する
+
+Options:
+  --from-key <key>    行動にするNOWの項目のキー（item listで確認）
+  --from <input-id>   行動にする提案の根拠の入力ID
+  --from-text <text>  行動にする提案の本文（ラベルを除く）
+  --effort <effort>   一緒に付ける手間の目安 (choices: "quick", "hour", "half-day")
+  --context <tag>     一緒に付ける場所・道具の札（1つずつ指定。繰り返して複数可・8個まで。同じ受付IDの再送では最初の札のまま）
+  --event-id <id>     再送判定用ID（付けると、途中で止まった追加を同じIDで再送しても重複しない）
+  --confirm           文面を確認した本人による追加
+  -h, --help          display help for command
+",
+  "ctx item after": "Usage: ctx item after [options] <project> <key>
+
+項目に「先に済ませること」を付ける（別の項目が済むまで手を付けられない）。先の項目が残っている間はHOMEの「次の一手」から外れて「先待ち」にまとまり、すべて片付くと「動けるようになった項目」に出る。付けられるのはプロジェクトの項目だけ。AIは付けない
+
+Options:
+  --on <items...>  先に済ませる項目（<置き場>:<キー>。置き場はプロジェクトIDか_unassigned。1〜3件、ctx item
+                   listで確認）
+  --clear          印を外して、ふつうの次の一手に戻す
+  --confirm        項目を確認した本人による操作
+  -h, --help       display help for command
+",
+  "ctx item contexts": "Usage: ctx item contexts [options] <project> <key> [tags...]
+
+項目の場所・道具の札（例:
+家・外出先・PC・電話）を、指定した札の全体に置き換える（8個まで・1つ20文字以内）。今いる場所や手元の道具でできる項目を選ぶ手掛かりにする。AIは付けない
+
+Options:
+  --clear     札をすべて外す
+  --confirm   項目を確認した本人による操作
+  -h, --help  display help for command
+",
+  "ctx item dismiss-hint": "Usage: ctx item dismiss-hint [options] <project> <key> <input-id>
+
+「片付いたかも」が違うとき、そのメモからの候補を見送る（項目は未解決のまま）
+
+Options:
+  --confirm   候補と引用を確認した本人による見送り
+  -h, --help  display help for command
+",
+  "ctx item done-round": "Usage: ctx item done-round [options] <project> <key>
+
+定例の項目の今回を完了にし、期日を次の回へ進める（項目は残る）
+
+Options:
+  --confirm   項目と期日を確認した本人による報告
+  -h, --help  display help for command
+",
+  "ctx item effort": "Usage: ctx item effort [options] <project> <key>
+
+項目に手間の目安を付ける（quick=15分ほど、hour=1時間ほど、half-day=半日以上。noneで外す）。空いた時間に合う項目を選ぶ手掛かりにする。AIは推測しない
+
+Options:
+  --set <effort>  手間の目安 (choices: "quick", "hour", "half-day", "none")
+  --confirm       項目を確認した本人による操作
+  -h, --help      display help for command
+",
+  "ctx item exclude": "Usage: ctx item exclude [options] <project> <key>
+
+AIの読み違いなどの誤りとして項目を外す（完了・解決とは数えない）。理由:
+wrong-project=別のプロジェクトの話、misread=読み違い、outdated=もう古い。読み違いと、AIが推定した帰属への「別のプロジェクトの話」は、次のcycleで元のメモを読み直す
+
+Options:
+  --reason <reason>  外す理由 (choices: "wrong-project", "misread", "outdated")
+  --note <text>      一言（200文字以内・1行。次からの整理でAIへ渡す）
+  --confirm          項目を確認した本人による報告
+  -h, --help         display help for command
+",
+  "ctx item list": "Usage: ctx item list [options] <project>
+
+直近に生成したNOWの項目とキーを表示
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx item move": "Usage: ctx item move [options] <project> <key> <to>
+
+本人が追加した行動を別の置き場へ移す（projectとtoはプロジェクトのIDか_unassigned）。期日・見直す日・繰り返し・手間の目安・連絡待ち・「いつかやる」は移した先の行動に引き継ぐ。戻すときは、移した先の行動をもう一度移す
+
+Options:
+  --event-id <id>  再送判定用ID（付けると、途中で止まった移動を同じIDで再送しても重複しない）
+  --confirm        行動と移す先を確認した本人による移動
+  -h, --help       display help for command
+",
+  "ctx item progress": "Usage: ctx item progress [options] <project> <key>
+
+次の一手に「取りかかり中」の印を付ける（数日かけて進めている項目）。印を付けた項目はHOMEの「次の一手」の先頭の「取りかかり中」にまとまり、14日更新がないと週次レビューとふりかえりに出る。--noteでどこまで進んだかを書き直せる。AIは付けない
+
+Options:
+  --note <text>   どこまで進んだかのひとこと（任意・1行80文字以内。HOMEとアプリにだけ示し、NOWとモデルへ渡す資料には載せない）
+  --no-note       ひとことを外す
+  --since <date>  始めた日（YYYY-MM-DD。既定は、印が付いていれば今の始めた日、なければ今日）
+  --clear         印を外して、ふつうの次の一手に戻す
+  --confirm       項目を確認した本人による操作
+  -h, --help      display help for command
+",
+  "ctx item reopen": "Usage: ctx item reopen [options] <project> <key>
+
+解決済み、または誤りとして外した項目を未解決へ戻す
+
+Options:
+  --confirm   項目を確認した本人による報告
+  -h, --help  display help for command
+",
+  "ctx item resolve": "Usage: ctx item resolve [options] <project> <key>
+
+項目を完了・解決にする
+
+Options:
+  --confirm   項目を確認した本人による報告
+  -h, --help  display help for command
+",
+  "ctx item schedule": "Usage: ctx item schedule [options] <project> <key>
+
+項目に期日・次に見直す日・繰り返しを付ける（noneで外す。指定しなかったものは今のものを保つ）
+
+Options:
+  --due <date>     期日（YYYY-MM-DD、またはnone）
+  --review <date>  次に見直す日（YYYY-MM-DD、またはnone）。この日まではHOMEの一覧でたたむ
+  --repeat <rule>  定例の繰り返し（daily・weekly・monthly・14d・2w・3mなど、またはnone）。期日が必要
+  --clear          期日・見直す日・繰り返しをすべて外す
+  --confirm        項目を確認した本人による操作
+  -h, --help       display help for command
+",
+  "ctx item skip-round": "Usage: ctx item skip-round [options] <project> <key>
+
+定例の項目の今回だけを見送り、期日を次の回へ進める
+
+Options:
+  --confirm   項目と期日を確認した本人による報告
+  -h, --help  display help for command
+",
+  "ctx item someday": "Usage: ctx item someday [options] <project> <key>
+
+項目を「いつかやる」へ移す（今はやらないが残しておく）。移した項目はHOMEの「次の一手」の一覧・件数・期日の欄から外れ、「いつかやる」の一覧で30日ごとに見直す。AIは移さない
+
+Options:
+  --keep      見直したが今は始めない（そのまま）。移した日は変えず、見直した日を今日にする
+  --clear     元の欄へ戻す（始める）
+  --confirm   項目を確認した本人による操作
+  -h, --help  display help for command
+",
+  "ctx item steps": "Usage: ctx item steps [options] <project> <key> [steps...]
+
+大きな次の一手を手順（2〜10個・1つ200文字以内）に分ける。手順を指定すると全体を置き換えて最初からにし、--nextで今の手順を終えて次へ進め、--backで1つ戻す。NOW・HOMEには今の1歩だけが出る。AIは手順を作らない
+
+Options:
+  --next      今の手順を終えて次へ進める
+  --back      終えた手順を1つ戻す
+  --clear     手順を外す
+  --confirm   項目を確認した本人による操作
+  -h, --help  display help for command
+",
+  "ctx item wait": "Usage: ctx item wait [options] <project> <key>
+
+項目に「連絡待ち」の印を付ける（人に頼んだこと・返事を待っていること）。印を付けた項目はHOMEの「次の一手」から外れ、「連絡待ち」にまとまる。見直す日（schedule
+--review）が来ると「次の一手」の先頭に確認として出る。AIは付けない
+
+Options:
+  --who <name>    待っている相手（任意・40文字以内。HOMEとアプリにだけ示し、NOWとモデルへ渡す資料には載せない）
+  --no-who        相手を外す
+  --since <date>  頼んだ日（YYYY-MM-DD。既定は、印が付いていれば今の頼んだ日、なければ今日）
+  --clear         印を外して元の欄へ戻す
+  --confirm       項目を確認した本人による操作
+  -h, --help      display help for command
+",
+  "ctx organize": "Usage: ctx organize [options]
+
+未処理入力を整理
+
+Options:
+  --limit <n>         処理上限
+  --dry-run           対象一覧のみ。モデル/書き込みなし
+  --retry-failed      失敗分を再処理
+  --id <id>           指定入力を処理
+  --quiet-empty       0件時にNO_REPLYを返す
+  --thinking <level>  推論の思考水準。設定organize.llm.thinkingを上書き (choices: "off",
+                      "minimal", "low", "medium", "high")
+  -h, --help          display help for command
+",
+  "ctx pending": "Usage: ctx pending [options]
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx person": "Usage: ctx person [options] [command]
+
+人ごとの見返し: 本人が登録した人の名前・呼び名が出てくる記録と未完了の項目を40_people/に集める（AIは使わない）
+
+Options:
+  -h, --help             display help for command
+
+Commands:
+  add [options] <id>     人を登録する（IDは英小文字・数字・ハイフン）
+  list                   登録した人と確認用ハッシュを一覧
+  show <id>              人ごとの見返しの本文を表示（書き込まない）
+  edit [options] <id>    本人の確認で名前・呼び名を書き換える
+  remove [options] <id>  人の登録を外す（記録は消さず、手で変えていないSUMMARY.mdを消す）
+  help [command]         display help for command
+",
+  "ctx person add": "Usage: ctx person add [options] <id>
+
+人を登録する（IDは英小文字・数字・ハイフン）
+
+Options:
+  --name <text>    名前
+  --aliases <csv>  呼び名、カンマ区切り
+  -h, --help       display help for command
+",
+  "ctx person edit": "Usage: ctx person edit [options] <id>
+
+本人の確認で名前・呼び名を書き換える
+
+Options:
+  --name <text>          新しい名前
+  --add-alias <text>     追加する呼び名（複数指定可） (default: [])
+  --remove-alias <text>  削除する呼び名（複数指定可） (default: [])
+  --hash <sha256>        person listで確認したperson.mdのハッシュ
+  --confirm              定義を確認した本人による変更
+  -h, --help             display help for command
+",
+  "ctx person list": "Usage: ctx person list [options]
+
+登録した人と確認用ハッシュを一覧
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx person remove": "Usage: ctx person remove [options] <id>
+
+人の登録を外す（記録は消さず、手で変えていないSUMMARY.mdを消す）
+
+Options:
+  --hash <sha256>  person listで確認したperson.mdのハッシュ
+  --confirm        定義を確認した本人による変更
+  -h, --help       display help for command
+",
+  "ctx person show": "Usage: ctx person show [options] <id>
+
+人ごとの見返しの本文を表示（書き込まない）
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx policies": "Usage: ctx policies [options]
+
+同期版の有効方針を読取専用で取得
+
+Options:
+  --project <id>  ContextHubプロジェクト
+  --cwd <path>    対応付ける作業フォルダー
+  --json          JSON出力
+  -h, --help      display help for command
+",
+  "ctx policy": "Usage: ctx policy [options] [command]
+
+採用した方針（判断・好み）を、本人が定期的に見直す
+
+Options:
+  -h, --help           display help for command
+
+Commands:
+  review [options]     有効な方針と、採用（または前回「まだ有効」と確かめて）からの日数。見直す時期の方針が先頭
+  keep [options] <id>  方針がまだ有効だと確かめた記録を残す（見直しの日数をここから数え直す）。止めるときは retire を使う
+  help [command]       display help for command
+",
+  "ctx policy keep": "Usage: ctx policy keep [options] <id>
+
+方針がまだ有効だと確かめた記録を残す（見直しの日数をここから数え直す）。止めるときは retire を使う
+
+Options:
+  --hash <sha256>  policy reviewで確認した方針のハッシュ
+  --confirm        方針を確認した本人による操作
+  -h, --help       display help for command
+",
+  "ctx policy review": "Usage: ctx policy review [options]
+
+有効な方針と、採用（または前回「まだ有効」と確かめて）からの日数。見直す時期の方針が先頭
+
+Options:
+  --all       見直す時期でない方針も表示
+  -h, --help  display help for command
+",
+  "ctx project": "Usage: ctx project [options] [command]
+
+人によるプロジェクト管理
+
+Options:
+  -h, --help                display help for command
+
+Commands:
+  add [options] <id>
+  list                      定義・状態・確認用ハッシュを一覧
+  status [options] <id>     本人の判断でプロジェクトを進行中・休止・完了に切り替える
+  area [options] <id>       本人の判断でプロジェクトに領域（責任範囲。例:
+                            仕事・家）を付ける・外す。HOMEと週次レビューで領域ごとにまとめて見る。AIは付けず、帰属の推定にも使わない
+  edit [options] <id>       本人の確認でプロジェクトの名前・別名・キーワード・望む結果を書き換える（帰属未確定のメモは次のcycleで再関連付けの対象になる）
+  merge [options] <from>    同じものを指すプロジェクトを、本人の確認で統合先へまとめる（統合元の入力・完了報告・日付は統合先のものとして読み替える。原文と記録は動かさない）
+  unmerge [options] <from>  統合を取り消し、統合元を統合前の状態へ戻す（統合で統合先へ足した別名・キーワードのうち残っているものを外す）
+  candidates
+  approve [options] <id>
+  reject [options] <id>
+  help [command]            display help for command
+",
+  "ctx project add": "Usage: ctx project add [options] <id>
+
+Options:
+  --title <text>    プロジェクト名
+  --aliases <csv>   別名、カンマ区切り
+  --keywords <csv>  検索語、カンマ区切り
+  --outcome <text>  望む結果（何をもって完了か。改行は\\nで書けます）
+  -h, --help        display help for command
+",
+  "ctx project approve": "Usage: ctx project approve [options] <id>
+
+Options:
+  --hash <sha256>   確認した候補のハッシュ
+  --token <token>   候補の確認トークン
+  --confirm         候補詳細を読んだ人の明示確認
+  --outcome <text>  作るプロジェクトの望む結果（改行は\\nで書けます）
+  -h, --help        display help for command
+",
+  "ctx project area": "Usage: ctx project area [options] <id>
+
+本人の判断でプロジェクトに領域（責任範囲。例: 仕事・家）を付ける・外す。HOMEと週次レビューで領域ごとにまとめて見る。AIは付けず、帰属の推定にも使わない
+
+Options:
+  --set <area>     領域（20文字以内）
+  --clear          領域を外す
+  --hash <sha256>  project listで確認したproject.mdのハッシュ
+  --confirm        定義を確認した本人による変更
+  -h, --help       display help for command
+",
+  "ctx project candidates": "Usage: ctx project candidates [options]
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx project edit": "Usage: ctx project edit [options] <id>
+
+本人の確認でプロジェクトの名前・別名・キーワード・望む結果を書き換える（帰属未確定のメモは次のcycleで再関連付けの対象になる）
+
+Options:
+  --title <text>           新しい名前
+  --outcome <text>         新しい望む結果（何をもって完了か。改行は\\nで書けます）
+  --clear-outcome          望む結果を外す
+  --add-alias <text>       追加する別名（複数指定可） (default: [])
+  --remove-alias <text>    削除する別名（複数指定可） (default: [])
+  --add-keyword <text>     追加するキーワード（複数指定可） (default: [])
+  --remove-keyword <text>  削除するキーワード（複数指定可） (default: [])
+  --hash <sha256>          project listで確認したproject.mdのハッシュ
+  --confirm                定義を確認した本人による変更
+  -h, --help               display help for command
+",
+  "ctx project list": "Usage: ctx project list [options]
+
+定義・状態・確認用ハッシュを一覧
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx project merge": "Usage: ctx project merge [options] <from>
+
+同じものを指すプロジェクトを、本人の確認で統合先へまとめる（統合元の入力・完了報告・日付は統合先のものとして読み替える。原文と記録は動かさない）
+
+Options:
+  --into <id>           統合先のプロジェクト
+  --hash <sha256>       project listで確認した統合元のproject.mdのハッシュ
+  --into-hash <sha256>  project listで確認した統合先のproject.mdのハッシュ
+  --confirm             2つの定義を確認した本人による統合
+  -h, --help            display help for command
+",
+  "ctx project reject": "Usage: ctx project reject [options] <id>
+
+Options:
+  --hash <sha256>  確認した候補のハッシュ
+  --token <token>  候補の確認トークン
+  --confirm        候補詳細を読んだ人の明示確認
+  -h, --help       display help for command
+",
+  "ctx project status": "Usage: ctx project status [options] <id>
+
+本人の判断でプロジェクトを進行中・休止・完了に切り替える
+
+Options:
+  --set <status>   新しい状態 (choices: "active", "paused", "done")
+  --hash <sha256>  project listで確認したproject.mdのハッシュ
+  --confirm        定義を確認した本人による変更
+  -h, --help       display help for command
+",
+  "ctx project unmerge": "Usage: ctx project unmerge [options] <from>
+
+統合を取り消し、統合元を統合前の状態へ戻す（統合で統合先へ足した別名・キーワードのうち残っているものを外す）
+
+Options:
+  --hash <sha256>       project listで確認した統合元のproject.mdのハッシュ
+  --into-hash <sha256>  project listで確認した統合先のproject.mdのハッシュ
+  --confirm             2つの定義を確認した本人による取り消し
+  -h, --help            display help for command
+",
+  "ctx propose": "Usage: ctx propose [options] <claim>
+
+Options:
+  --kind <kind>       候補の種別 (choices: "knowledge", "decision", "preference",
+                      default: "knowledge")
+  --rationale <text>  根拠 (default: "人による候補作成")
+  --supersedes <id>   置き換えるKNW-ID
+  -h, --help          display help for command
+",
+  "ctx recent": "Usage: ctx recent [options]
+
+Options:
+  --n <n>     表示件数 (default: 10)
+  -h, --help  display help for command
+",
+  "ctx reference": "Usage: ctx reference [options] [command]
+
+資料棚に載せる資料を本人が決める（AIの分類より優先する）。本文やURLを直すときはcorrectを使う
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  add [options] <input-id>     保存済みのメモ・作業要約を資料棚に載せる。名前を変える・外した資料を戻すのも同じ（--titleを省くと名前なしでAIの要約を示す）
+  remove [options] <input-id>  資料棚から外す（AIが参考資料に分類したメモも外せる。メモと整理結果は変えない）
+  list [options]               資料棚に載る資料と本人が外した資料（cycleかreferencesで作った一覧）
+  help [command]               display help for command
+",
+  "ctx reference add": "Usage: ctx reference add [options] <input-id>
+
+保存済みのメモ・作業要約を資料棚に載せる。名前を変える・外した資料を戻すのも同じ（--titleを省くと名前なしでAIの要約を示す）
+
+Options:
+  --title <text>  資料の名前（1行・100文字以内）
+  --confirm       メモを確認した本人による操作
+  -h, --help      display help for command
+",
+  "ctx reference list": "Usage: ctx reference list [options]
+
+資料棚に載る資料と本人が外した資料（cycleかreferencesで作った一覧）
+
+Options:
+  --removed   外した資料を表示
+  -h, --help  display help for command
+",
+  "ctx reference remove": "Usage: ctx reference remove [options] <input-id>
+
+資料棚から外す（AIが参考資料に分類したメモも外せる。メモと整理結果は変えない）
+
+Options:
+  --confirm   メモを確認した本人による操作
+  -h, --help  display help for command
+",
+  "ctx references": "Usage: ctx references [options] [project]
+
+プロジェクトの資料REFERENCES.md（本人が資料にしたメモとAIが参考資料に分類したメモ、URLの一覧）を整理結果と資料の記録から作り直す（省略時は全プロジェクト）
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx reject": "Usage: ctx reject [options] <id>
+
+Options:
+  --hash <sha256>  候補一覧で確認した内容ハッシュ
+  -h, --help       display help for command
+",
+  "ctx resume": "Usage: ctx resume [options] <project>
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx retire": "Usage: ctx retire [options] <id>
+
+Options:
+  --hash <sha256>  確認した正式知識のハッシュ
+  --confirm        本人による適用停止
+  -h, --help       display help for command
+",
+  "ctx retry-organize": "Usage: ctx retry-organize [options] <input-id>
+
+整理（AIの読み取り）に失敗したメモ1件のやり直しを頼み、次の整理（cycle）で1回だけ試す。organize
+--retry-failedと違い、選んだ1件だけを対象にし、organize.maxAttemptsには縛られない
+
+Options:
+  --confirm   失敗したメモを確認した本人による依頼
+  -h, --help  display help for command
+",
+  "ctx someday": "Usage: ctx someday [options] [command]
+
+「いつかやる」の一覧（移した項目・休止中のプロジェクト・置いたアイデア）を見直す。最後に見直した日の古い順に並び、30日以上見直していないものに印が付く。AIは置きも始めもしない
+
+Options:
+  -h, --help                         display help for command
+
+Commands:
+  list                               「いつかやる」の一覧（最後に見直した日の古い順）
+  idea [options] <idea-id> <action>  アイデアを「いつかやる」に置く（add）・見直したが今は始めない（keep）・始めたので外す（start。プロジェクトか行動は別に作る）・やめて外す（drop）。アイデアのファイルは書き換えない
+  keep-project [options] <project>   休止中のプロジェクトを見直し、今は再開しない（そのまま）と記録する。再開・完了はproject
+                                     statusで切り替える
+  help [command]                     display help for command
+",
+  "ctx someday idea": "Usage: ctx someday idea [options] <idea-id> <action>
+
+アイデアを「いつかやる」に置く（add）・見直したが今は始めない（keep）・始めたので外す（start。プロジェクトか行動は別に作る）・やめて外す（drop）。アイデアのファイルは書き換えない
+
+Options:
+  --confirm   アイデアを確認した本人による判断
+  -h, --help  display help for command
+",
+  "ctx someday keep-project": "Usage: ctx someday keep-project [options] <project>
+
+休止中のプロジェクトを見直し、今は再開しない（そのまま）と記録する。再開・完了はproject statusで切り替える
+
+Options:
+  --confirm   プロジェクトを確認した本人による判断
+  -h, --help  display help for command
+",
+  "ctx someday list": "Usage: ctx someday list [options]
+
+「いつかやる」の一覧（最後に見直した日の古い順）
+
+Options:
+  -h, --help  display help for command
+",
+  "ctx synthesize": "Usage: ctx synthesize [options]
+
+週次の統合を実行（たまったメモをまとめて読み直し、気づきをふりかえりとHOMEへ出す）。設定のsynthesis.enabledが必要
+
+Options:
+  --force             間隔・新しい入力の有無にかかわらず実行
+  --dry-run           渡す件数と送る量だけを表示。モデル/書き込みなし
+  --thinking <level>  思考の深さ。設定synthesis.thinkingを上書き (choices: "off", "minimal",
+                      "low", "medium", "high")
+  -h, --help          display help for command
+",
+  "ctx weekly-review": "Usage: ctx weekly-review [options] [command]
+
+週次レビュー:
+確認待ち・プロジェクト未定の行動・進行中のプロジェクト・停滞・連絡待ち・期日・いつかやるを順に点検する。7日以上見直していなければHOMEで促す。見直した記録は本人の報告だけで作る
+
+Options:
+  -h, --help      display help for command
+
+Commands:
+  show            点検の一覧（モデルを使わずに作る。アプリとREVIEW.mdの「週次レビューの点検」と同じ）
+  done [options]  週次レビューを終えた（見直した）と記録し、HOMEとふりかえりを作り直す。同じ日の記録が既にあれば増やさない
+  help [command]  display help for command
+",
+  "ctx weekly-review done": "Usage: ctx weekly-review done [options]
+
+週次レビューを終えた（見直した）と記録し、HOMEとふりかえりを作り直す。同じ日の記録が既にあれば増やさない
+
+Options:
+  --on <date>  見直した日（YYYY-MM-DD。既定は今日）
+  --confirm    点検を終えた本人による報告
+  -h, --help   display help for command
+",
+  "ctx weekly-review show": "Usage: ctx weekly-review show [options]
+
+点検の一覧（モデルを使わずに作る。アプリとREVIEW.mdの「週次レビューの点検」と同じ）
+
+Options:
+  -h, --help  display help for command
+",
+}
+`;

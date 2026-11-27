@@ -11,6 +11,7 @@
 - 修正時は該当テストを先に失敗させ、実装後に全テストを確認します。文書だけの変更には実装をなぞるテストを追加しません。
 - 既存の認証・サービス・自動化・実Vaultを変える操作は、利用者の具体的な依頼に基づいて行います。設定例を実設定へ自動適用しません。
 - CIと導入例へ個人のID・絶対パス・トークンを埋め込みません。公開前に履歴と著者情報を含む公開対象を確認します。
+- CLIのコマンドは`packages/core/src/commands/`の群ごとのファイルに足し、`ctx --help`での並び順は`packages/core/src/cli-program.ts`で決めます。共通の確認・出力は`packages/core/src/cli-shared.ts`を使います。説明やオプションを変えたときは`packages/core/test/cli-help.test.ts`のスナップショットの差分を確かめて更新します。
 - Vaultの構成（フォルダー・生成物）や本人の操作（受付の`operations`）を足す・変える変更では、Vault向けの指示（`examples/vault-instructions/AGENTS.md`と`docs/prompts/`）も見直します。
 
 基本検証はnpm ci、npm run check、npm test、npm run build、npm run demoです。OpenClaw導入環境でのcheck:sdkは追加の互換検査として行います。VaultをAIから使うルールはexamples/vault-instructionsにあります。
